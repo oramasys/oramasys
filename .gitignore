@@ -8,3 +8,8 @@ build/
 *.db
 .env
 .DS_Store
+
+# generated test/tooling artifacts
+.hypothesis/
+.pytest_cache/
+.claude/hooks/.logs/
