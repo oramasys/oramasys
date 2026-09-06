@@ -475,7 +475,15 @@ async def test_cancellation_during_claim_reservation_still_releases_the_key():
     cancellation delivered in that exact window previously left `claimed`
     False, so the CancelledError handler skipped abort() and the key was
     stranded forever -- a later identical request would block indefinitely.
-    The asyncio.shield fix must still call abort() here."""
+
+    The current implementation (commit 7dfdb6b, "close review remediation
+    gaps") waits for the shielded claim task to actually settle before
+    calling abort(), rather than aborting immediately on cancellation --
+    closing a narrower race the earlier asyncio.shield-only fix left open
+    (abort() racing ahead of a claim that reserves the key moments later).
+    That means release_claim must be set BEFORE awaiting the cancelled task,
+    not after: the run() task's own cancellation handling is blocked on the
+    claim task settling, so awaiting `cancelled` first would deadlock."""
     entered_claim = asyncio.Event()
     release_claim = asyncio.Event()
     store = SlowClaimStore(entered_claim=entered_claim, release_claim=release_claim)
@@ -484,14 +492,9 @@ async def test_cancellation_during_claim_reservation_still_releases_the_key():
     cancelled = asyncio.create_task(runner.run(request()))
     await entered_claim.wait()  # store has committed the reservation now
     cancelled.cancel()
+    release_claim.set()  # let the in-flight claim() call settle so cleanup can proceed
     with pytest.raises(asyncio.CancelledError):
         await cancelled
-    release_claim.set()  # let the in-flight claim() call return
-
-    # Give the shielded claim() coroutine a turn to finish and for abort()
-    # (fired from the CancelledError handler) to actually run.
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
 
     assert store.aborts == 1
     assert store.in_progress == set()
