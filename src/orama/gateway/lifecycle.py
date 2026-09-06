@@ -90,26 +90,25 @@ class GatewayLifecycle:
                 return await fail("denied", "operator_consent_required")
 
             key = self._idempotency_key(request)
-
-            async def _do_claim() -> RoutingState | None:
-                return await self._store.claim(key)
-
+            claim_task = asyncio.create_task(self._store.claim(key))
             try:
-                # Shield the claim call: a cancellation of this task must not
-                # tear down an in-flight reservation. Without the shield, a
-                # cancellation landing after the store commits the reservation
-                # but before this coroutine resumes would leave `claimed`
-                # False, so the CancelledError handler below would skip
-                # abort() and strand the key forever (see Gateway Lifecycle
-                # review, cancellation-safety finding on this claim call).
-                existing = await asyncio.shield(_do_claim())
+                existing = await asyncio.shield(claim_task)
             except asyncio.CancelledError:
-                # Outcome of _do_claim() is unknown at this point -- it may
-                # still be running (shielded) or may have already reserved
-                # the key. Assume ownership so the handler below always
-                # attempts abort(); RoutingStateStore.abort() must be a safe
-                # no-op when the key was never actually reserved.
-                claimed = True
+                # The shield prevents caller cancellation from cancelling the
+                # store operation, but the claim may still be paused before it
+                # reserves the key. Wait for the claim to settle before cleanup
+                # so abort() cannot run too early and be followed by a late
+                # reservation that strands the key.
+                try:
+                    await asyncio.shield(claim_task)
+                except Exception:
+                    # Cleanup is still safe and idempotent for an unreserved
+                    # key, including a claim implementation that fails.
+                    pass
+                try:
+                    await asyncio.shield(self._store.abort(key))
+                finally:
+                    claimed = False
                 raise
             if existing is not None:
                 if not self._stored_state_matches(existing, request, key):

@@ -48,11 +48,11 @@ The caller injects semantic-owner adapters:
 - Agate resolves hardware placement;
 - Claude-Desktop-LLM operates Ollama or LM Studio and reports readiness.
 
-Requests require explicit operator consent scoped to an exact artifact version
-and a `sha256:<64 lowercase hex>` digest. Mutable versions such as `latest` are
-rejected. Successful routing state is keyed by the complete immutable request,
-so an identical repeat run returns `already_ready` without repeating owner
-operations.
+Requests require explicit operator consent scoped to the artifact id, exact
+version, and `sha256:<64 lowercase hex>` digest. Mutable versions such as
+`latest` are rejected. Successful routing state is keyed by the complete
+immutable request, so an identical repeat run returns `already_ready` without
+repeating owner operations.
 
 `PerpetuaToolsGatewayFacade` is a temporary one-way compatibility entry point.
 It delegates to Gateway Lifecycle and propagates denial, timeout, and error

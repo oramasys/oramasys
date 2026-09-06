@@ -23,19 +23,19 @@ Perpetua-Tools façade.
 
 `GatewayLifecycle.run()` validates explicit operator consent and an immutable
 artifact version plus SHA-256 digest. It derives an idempotency fingerprint and
-returns the stored routing state without repeating side effects when that exact
-request has already completed.
+returns the stored routing state without repeating semantic-owner operations
+when that exact request has already completed. Replay still emits lifecycle
+progress such as `started` and `already_ready`.
 
 The state-store port atomically claims an idempotency key. A contender waits
 for and returns the completed state rather than repeating semantic-owner
 operations; failures abort the claim so a later attempt may retry.
 
 For a newly claimed request the lifecycle authorizes both endpoints through
-Telos, verifies the
-artifact and runtime admission through Phylax, asks Agate for placement, asks
-Claude-Desktop-LLM to make the provider ready within the declared timeout, and
-then persists one routing state. No package manager, credential store, or raw
-endpoint client is implemented here.
+Telos, verifies the artifact and runtime admission through Phylax, asks Agate
+for placement, asks Claude-Desktop-LLM to make the provider ready within the
+declared timeout, and then persists one routing state. No package manager,
+credential store, or raw endpoint client is implemented here.
 
 ## Contracts
 
@@ -56,7 +56,7 @@ delivery reason code.
 ## Acceptance Criteria
 
 - `latest`, ranges, tags, and missing or malformed SHA-256 digests are rejected.
-- Consent is scoped to the exact artifact and version.
+- Consent is scoped to the exact artifact id, version, and SHA-256 digest.
 - Telos sees both configuration and health endpoints before provider operation.
 - Phylax owns provenance, integrity, redaction, and admission decisions.
 - Agate and Claude receive only the inputs needed for their owned decisions.
