@@ -6,6 +6,8 @@ import asyncio
 
 import pytest
 
+from telos import EndpointRef
+
 from orama.gateway.contracts import ArtifactPin, GatewayLifecycleRequest, OperatorConsent
 from orama.gateway.lifecycle import GatewayLifecycle
 
@@ -76,8 +78,8 @@ def request() -> GatewayLifecycleRequest:
             digest=digest,
         ),
         provider_kind="ollama",
-        config_endpoint="http://127.0.0.1:18789/config",
-        health_endpoint="http://127.0.0.1:18789/health",
+        config_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
+        health_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
         readiness_timeout_seconds=30,
     )
 
