@@ -60,6 +60,30 @@ class FailingClaimStore(MemoryStore):
 
 
 @dataclass
+class SlowClaimStore(MemoryStore):
+    """Reserves the key immediately (like a real store would), then blocks
+    before returning -- so a cancellation can land in the window between the
+    store committing the reservation and the lifecycle's claim() await
+    resuming. Reproduces the exact race the cancellation-safety fix closes."""
+
+    entered_claim: asyncio.Event | None = None
+    release_claim: asyncio.Event | None = None
+
+    async def claim(self, key: str) -> RoutingState | None:
+        async with self._condition:
+            while key in self.in_progress and key not in self.states:
+                await self._condition.wait()
+            if key in self.states:
+                return self.states[key]
+            self.in_progress.add(key)  # reservation committed here
+        if self.entered_claim is not None:
+            self.entered_claim.set()
+        if self.release_claim is not None:
+            await self.release_claim.wait()
+        return None
+
+
+@dataclass
 class EventSink:
     events: list[GatewayProgressEvent] = field(default_factory=list)
     fail_on_phase: str | None = None
@@ -188,6 +212,7 @@ def request(*, consent: bool = True, version: str = "1.2.3") -> GatewayLifecycle
             accepted=consent,
             artifact_id="alphaclaw",
             version=version,
+            digest="sha256:" + "a" * 64,
         ),
         provider_kind="ollama",
         config_endpoint="http://127.0.0.1:18789/config",
@@ -326,7 +351,34 @@ async def test_consent_must_match_the_exact_artifact_version():
     mismatched = request().model_copy(
         update={
             "operator_consent": OperatorConsent(
-                accepted=True, artifact_id="alphaclaw", version="1.2.4"
+                accepted=True,
+                artifact_id="alphaclaw",
+                version="1.2.4",
+                digest="sha256:" + "a" * 64,
+            )
+        }
+    )
+
+    result = await runner.run(mismatched)
+
+    assert (result.status, result.reason_code) == ("denied", "operator_consent_required")
+    assert telos.calls == []
+    assert (phylax.artifact_calls, agate.calls, claude.calls, store.saves) == (0, 0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_consent_must_match_the_exact_artifact_digest():
+    """Regression test: OperatorConsent previously scoped only artifact_id +
+    version, so a same-version artifact swap with a different digest was not
+    caught by consent (CodeRabbit finding, CWE-863 on oramasys/oramasys#1)."""
+    runner, telos, phylax, agate, claude, store, _ = lifecycle()
+    mismatched = request().model_copy(
+        update={
+            "operator_consent": OperatorConsent(
+                accepted=True,
+                artifact_id="alphaclaw",
+                version="1.2.3",
+                digest="sha256:" + "b" * 64,
             )
         }
     )
@@ -414,6 +466,40 @@ async def test_cancellation_releases_claim_so_a_waiter_can_retry():
     assert retry.status == "ready"
     assert store.aborts == 1
     assert claude.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_claim_reservation_still_releases_the_key():
+    """The store commits its reservation (adds the key to in_progress)
+    BEFORE the lifecycle's `await self._store.claim(key)` resumes. A
+    cancellation delivered in that exact window previously left `claimed`
+    False, so the CancelledError handler skipped abort() and the key was
+    stranded forever -- a later identical request would block indefinitely.
+    The asyncio.shield fix must still call abort() here."""
+    entered_claim = asyncio.Event()
+    release_claim = asyncio.Event()
+    store = SlowClaimStore(entered_claim=entered_claim, release_claim=release_claim)
+    runner, _, _, _, claude, _, _ = lifecycle(store=store)
+
+    cancelled = asyncio.create_task(runner.run(request()))
+    await entered_claim.wait()  # store has committed the reservation now
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release_claim.set()  # let the in-flight claim() call return
+
+    # Give the shielded claim() coroutine a turn to finish and for abort()
+    # (fired from the CancelledError handler) to actually run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert store.aborts == 1
+    assert store.in_progress == set()
+
+    retry = await runner.run(request())
+
+    assert retry.status == "ready"
+    assert claude.calls == 1
 
 
 @pytest.mark.asyncio

@@ -85,11 +85,32 @@ class GatewayLifecycle:
                 consent.accepted
                 and consent.artifact_id == request.artifact.artifact_id
                 and consent.version == request.artifact.version
+                and consent.digest == request.artifact.digest
             ):
                 return await fail("denied", "operator_consent_required")
 
             key = self._idempotency_key(request)
-            existing = await self._store.claim(key)
+
+            async def _do_claim() -> RoutingState | None:
+                return await self._store.claim(key)
+
+            try:
+                # Shield the claim call: a cancellation of this task must not
+                # tear down an in-flight reservation. Without the shield, a
+                # cancellation landing after the store commits the reservation
+                # but before this coroutine resumes would leave `claimed`
+                # False, so the CancelledError handler below would skip
+                # abort() and strand the key forever (see Gateway Lifecycle
+                # review, cancellation-safety finding on this claim call).
+                existing = await asyncio.shield(_do_claim())
+            except asyncio.CancelledError:
+                # Outcome of _do_claim() is unknown at this point -- it may
+                # still be running (shielded) or may have already reserved
+                # the key. Assume ownership so the handler below always
+                # attempts abort(); RoutingStateStore.abort() must be a safe
+                # no-op when the key was never actually reserved.
+                claimed = True
+                raise
             if existing is not None:
                 if not self._stored_state_matches(existing, request, key):
                     return await fail("error", "routing_state_corrupt")

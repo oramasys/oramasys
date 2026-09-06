@@ -45,6 +45,14 @@ class OperatorConsent(Contract):
     accepted: bool
     artifact_id: str
     version: str
+    digest: str
+
+    @field_validator("digest")
+    @classmethod
+    def digest_must_be_sha256(cls, value: str) -> str:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise ValueError("operator consent digest must be sha256:<64 lowercase hex>")
+        return value
 
 
 class GatewayLifecycleRequest(Contract):
@@ -165,7 +173,16 @@ class RoutingStateStore(Protocol):
 
     async def complete(self, key: str, state: RoutingState) -> None: ...
 
-    async def abort(self, key: str) -> None: ...
+    async def abort(self, key: str) -> None:
+        """Release a claimed key.
+
+        MUST be a safe, idempotent no-op when called on a key that was never
+        actually reserved by this caller (including the case where a
+        cancellation raced the underlying claim() reservation and the caller
+        cannot tell whether it committed). Implementations must not raise or
+        corrupt state when abort() targets an unknown or already-released key.
+        """
+        ...
 
 
 class ProgressEventSink(Protocol):
