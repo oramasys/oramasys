@@ -19,6 +19,12 @@ from orama.gateway.contracts import (
     RoutingStateStore,
     TelosPort,
 )
+from orama.gateway.dialer import (
+    DIALER_REJECTION_REASONS,
+    ModelServerDialRequest,
+    ModelServerDialer,
+    ModelServerDialResult,
+)
 
 
 class GatewayLifecycle:
@@ -31,6 +37,7 @@ class GatewayLifecycle:
         claude: ClaudeProviderPort,
         store: RoutingStateStore,
         events: ProgressEventSink,
+        dialer: ModelServerDialer | None = None,
     ) -> None:
         self._telos = telos
         self._phylax = phylax
@@ -38,6 +45,8 @@ class GatewayLifecycle:
         self._claude = claude
         self._store = store
         self._event_sink = events
+        self._dialer = dialer
+
 
     async def run(self, request: GatewayLifecycleRequest) -> GatewayLifecycleResult:
         run_events: list[GatewayProgressEvent] = []
@@ -167,6 +176,47 @@ class GatewayLifecycle:
                 "running",
                 {"policy_version": health.policy_version},
             )
+
+            # Gate 4 Half A (doc 66): execute the actual dials through the
+            # dedicated dialer so Telos authorizes the real dial path from
+            # day one, with DNS resolution + address classification in front
+            # of any connection. A dialer rejection fails closed.
+            if self._dialer is not None:
+                dial_results: dict[str, ModelServerDialResult] = {}
+                for purpose, endpoint in (
+                    (EndpointPurpose.CONFIG_READ, request.config_endpoint),
+                    (EndpointPurpose.HEALTH_PROBE, request.health_endpoint),
+                ):
+                    dial = await self._dialer.dial(
+                        ModelServerDialRequest(
+                            endpoint=endpoint,
+                            purpose=purpose,
+                            allow_public=endpoint.is_public,
+                            run_id=key,
+                        )
+                    )
+                    dial_results[purpose.value] = dial
+                    if not dial.allowed:
+                        reason = (
+                            dial.reason_code
+                            if dial.reason_code in DIALER_REJECTION_REASONS
+                            else "dial_denied"
+                        )
+                        return await fail("denied", reason)
+                await emit(
+                    "endpoints_dialed",
+                    "running",
+                    {
+                        "config_resolved_address": dial_results[
+                            EndpointPurpose.CONFIG_READ.value
+                        ].resolved_address
+                        or "",
+                        "health_resolved_address": dial_results[
+                            EndpointPurpose.HEALTH_PROBE.value
+                        ].resolved_address
+                        or "",
+                    },
+                )
 
             artifact = await self._phylax.verify_artifact(request.artifact)
             if not artifact.allowed or not artifact.decision_ref:
