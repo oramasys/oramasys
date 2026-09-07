@@ -63,6 +63,7 @@ class GatewayLifecycleRequest(Contract):
     provider_kind: Literal["ollama", "lm_studio"]
     config_endpoint: EndpointRef
     health_endpoint: EndpointRef
+    allow_public_model_servers: bool = False
     model_hint: str | None = None
     readiness_timeout_seconds: int = Field(gt=0)
 

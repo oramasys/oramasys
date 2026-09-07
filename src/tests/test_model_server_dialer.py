@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from telos import EndpointPurpose, EndpointRef, EndpointUseRequest
@@ -15,10 +16,12 @@ from telos import EndpointPurpose, EndpointRef, EndpointUseRequest
 from orama.gateway.dialer import (
     REASON_CONNECTOR_REFUSED,
     REASON_DIAL_TIMEOUT,
+    REASON_DNS_INVALID_ANSWER,
     REASON_NO_ANSWERS,
     REASON_PROHIBITED_ADDRESS,
     REASON_PUBLIC_NOT_PERMITTED,
     REASON_TELOS_DENIED,
+    REASON_TELOS_DECISION_EXPIRED,
     REASON_TELOS_ENDPOINT_MISMATCH,
     ModelServerDialer,
     ModelServerDialRequest,
@@ -178,6 +181,40 @@ async def test_ipv4_mapped_ipv6_metadata_answer_is_rejected():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "address",
+    [
+        "0.0.0.0",
+        "255.255.255.255",
+        "100.64.0.1",
+        "2001::1",
+        "2002:0808:0808::1",
+    ],
+)
+async def test_transition_and_shared_address_space_are_rejected_before_dispatch(address: str):
+    resolver = FakeResolver({"ollama.local": [address]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request())
+
+    assert not result.allowed
+    assert result.reason_code == REASON_PROHIBITED_ADDRESS
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_dns_answer_is_denied_with_a_stable_reason():
+    resolver = FakeResolver({"ollama.local": ["not-an-ip-address"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request())
+
+    assert not result.allowed
+    assert result.reason_code == REASON_DNS_INVALID_ANSWER
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
 async def test_empty_dns_answer_set_fails_closed():
     resolver = FakeResolver({})  # no answers for any host
     dialer, _, _, connector = make_dialer(resolver=resolver)
@@ -203,14 +240,14 @@ async def test_telos_denial_blocks_the_dial():
 
 
 @pytest.mark.asyncio
-async def test_telos_decision_for_different_endpoint_is_refused():
+async def test_telos_decision_for_different_endpoint_port_is_refused():
     @dataclass
     class MismatchingTelos(TelosFake):
         async def authorize(self, request: EndpointUseRequest):
             decision = await super().authorize(request)
             return replace(
                 decision,
-                endpoint=EndpointRef("http", "other.local", 1, is_public=False),
+                endpoint=EndpointRef("http", "ollama.local", 443, is_public=False),
             )
 
     dialer, _, _, connector = make_dialer(telos=MismatchingTelos())
@@ -219,6 +256,56 @@ async def test_telos_decision_for_different_endpoint_is_refused():
 
     assert not result.allowed
     assert result.reason_code == REASON_TELOS_ENDPOINT_MISMATCH
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_public_answer_for_a_private_declared_endpoint_is_rejected_even_with_opt_in():
+    resolver = FakeResolver({"ollama.local": ["8.8.8.8"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request(allow_public=True))
+
+    assert not result.allowed
+    assert result.reason_code == REASON_PROHIBITED_ADDRESS
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_expired_telos_decision_is_refused_before_dns_resolution():
+    @dataclass
+    class ExpiredTelos(TelosFake):
+        async def authorize(self, request: EndpointUseRequest):
+            decision = await super().authorize(request)
+            return replace(decision, expires_at=datetime.now(UTC) - timedelta(seconds=1))
+
+    resolver = FakeResolver({"ollama.local": ["127.0.0.1"]})
+    dialer, _, _, connector = make_dialer(telos=ExpiredTelos(), resolver=resolver)
+
+    result = await dialer.dial(dial_request())
+
+    assert not result.allowed
+    assert result.reason_code == REASON_TELOS_DECISION_EXPIRED
+    assert resolver.calls == []
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_timezone_ambiguous_telos_expiry_is_refused_before_dns_resolution():
+    @dataclass
+    class NaiveExpiryTelos(TelosFake):
+        async def authorize(self, request: EndpointUseRequest):
+            decision = await super().authorize(request)
+            return replace(decision, expires_at=datetime.now())
+
+    resolver = FakeResolver({"ollama.local": ["127.0.0.1"]})
+    dialer, _, _, connector = make_dialer(telos=NaiveExpiryTelos(), resolver=resolver)
+
+    result = await dialer.dial(dial_request())
+
+    assert not result.allowed
+    assert result.reason_code == REASON_TELOS_DECISION_EXPIRED
+    assert resolver.calls == []
     assert connector.calls == []
 
 
@@ -353,6 +440,54 @@ async def test_lifecycle_fails_closed_when_dial_resolves_prohibited_address():
     assert (result.status, result.reason_code) == ("denied", REASON_PROHIBITED_ADDRESS)
     assert connector.calls == []
     assert claude.calls == 0  # readiness never started
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_requires_explicit_public_model_server_opt_in():
+    resolver = FakeResolver({"models.example.com": ["8.8.8.8"]})
+    runner, connector, _, claude, _ = lifecycle_with_dialer(resolver=resolver)
+    public_request = gateway_request().model_copy(
+        update={"config_endpoint": PUBLIC, "health_endpoint": PUBLIC}
+    )
+
+    result = await runner.run(public_request)
+
+    assert (result.status, result.reason_code) == ("denied", REASON_PUBLIC_NOT_PERMITTED)
+    assert connector.calls == []
+    assert claude.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_dials_declared_public_model_servers_only_after_opt_in():
+    resolver = FakeResolver({"models.example.com": ["8.8.8.8"]})
+    runner, connector, _, claude, _ = lifecycle_with_dialer(resolver=resolver)
+    public_request = gateway_request().model_copy(
+        update={
+            "config_endpoint": PUBLIC,
+            "health_endpoint": PUBLIC,
+            "allow_public_model_servers": True,
+        }
+    )
+
+    result = await runner.run(public_request)
+
+    assert result.status == "ready"
+    assert len(connector.calls) == 2
+    assert claude.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_maps_connector_failure_to_a_generic_dial_denial():
+    resolver = FakeResolver({"127.0.0.1": ["127.0.0.1"]})
+    runner, connector, _, claude, _ = lifecycle_with_dialer(
+        resolver=resolver, connector=FakeConnector(fail=True)
+    )
+
+    result = await runner.run(gateway_request())
+
+    assert (result.status, result.reason_code) == ("denied", "dial_denied")
+    assert len(connector.calls) == 1
+    assert claude.calls == 0
 
 
 @pytest.mark.asyncio

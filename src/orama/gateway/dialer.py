@@ -22,8 +22,10 @@ Rules enforced here (doc 66 "Dialer contract (first cut)"):
    Telos authorization -- there is no window in which credentials could be
    forwarded to a rejected address, even transiently.
 5. ``Telos.authorize()`` is the decision gate. The dialer never decides
-   authorization on its own; it refuses to dial without a fresh, matching
-   ``allowed`` decision.
+   authorization on its own; it refuses to dial without a fresh, unexpired,
+   matching ``allowed`` decision. Telos binds the purpose to the exact
+   ``EndpointRef`` (scheme, host, and port); this module intentionally does
+   not maintain a competing endpoint allowlist.
 
 Only ``config_read`` and ``health_probe`` are in Gate 4 scope.
 ``model_egress`` requires the paid-dispatch accounting gate (doc 66,
@@ -40,6 +42,7 @@ import asyncio
 import ipaddress
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 from telos import (
@@ -61,8 +64,21 @@ REASON_TELOS_DENIED = "telos_denied"
 REASON_TELOS_ENDPOINT_MISMATCH = "telos_decision_endpoint_mismatch"
 REASON_PURPOSE_OUT_OF_SCOPE = "purpose_not_in_gate4_scope"
 REASON_NO_ANSWERS = "dns_no_answers"
+REASON_DNS_INVALID_ANSWER = "dns_invalid_answer"
 REASON_CONNECTOR_REFUSED = "connector_refused"
 REASON_DIAL_TIMEOUT = "dial_timeout"
+REASON_TELOS_DECISION_EXPIRED = "telos_decision_expired"
+
+# These ranges are neither ordinary local addresses nor ordinary public
+# endpoints. Teredo and 6to4 encode or route through other addresses; shared
+# carrier space is not a caller-controlled local network. Reject all three
+# rather than letting Python's broad ``is_private`` classification decide a
+# model-server egress boundary.
+_IPV4_PROHIBITED_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"),)
+_IPV6_PROHIBITED_NETWORKS = (
+    ipaddress.ip_network("2001::/32"),  # Teredo
+    ipaddress.ip_network("2002::/16"),  # 6to4
+)
 
 #: Default deadline for DNS resolution + connector I/O combined (Gate 4 scope
 #: is config_read/health_probe -- both lightweight, bounded probes). Without
@@ -80,7 +96,9 @@ DIALER_REJECTION_REASONS = frozenset(
         REASON_TELOS_ENDPOINT_MISMATCH,
         REASON_PURPOSE_OUT_OF_SCOPE,
         REASON_NO_ANSWERS,
+        REASON_DNS_INVALID_ANSWER,
         REASON_DIAL_TIMEOUT,
+        REASON_TELOS_DECISION_EXPIRED,
     }
 )
 
@@ -165,6 +183,8 @@ class ModelServerDialer:
             return ModelServerDialResult(False, f"{REASON_TELOS_DENIED}:{decision.reason_code}")
         if decision.endpoint != request.endpoint:
             return ModelServerDialResult(False, REASON_TELOS_ENDPOINT_MISMATCH)
+        if _decision_is_expired(decision):
+            return ModelServerDialResult(False, REASON_TELOS_DECISION_EXPIRED)
 
         # DNS resolution and connector I/O share one deadline so neither a
         # hung resolver nor a hung connector can hold the caller's routing-
@@ -182,7 +202,10 @@ class ModelServerDialer:
                 # the whole host before dispatch.
                 chosen: str | None = None
                 for answer_text in answers:
-                    reason, is_local = _classify(answer_text)
+                    try:
+                        reason, is_local = _classify(answer_text)
+                    except ValueError:
+                        return ModelServerDialResult(False, REASON_DNS_INVALID_ANSWER)
                     if reason == REASON_PROHIBITED_ADDRESS:
                         return ModelServerDialResult(False, REASON_PROHIBITED_ADDRESS)
                     if not is_local and not request.allow_public:
@@ -200,7 +223,7 @@ class ModelServerDialer:
                 # bearing work can observe a rejected address.
                 try:
                     provider_ref = await self._connector.connect(
-                        address=chosen or "",
+                        address=chosen,
                         port=request.endpoint.port,
                         purpose=request.purpose,
                     )
@@ -217,6 +240,16 @@ def _endpoint_is_public_declared(endpoint: EndpointRef) -> bool:
     return endpoint.is_public
 
 
+def _decision_is_expired(decision: EndpointUseDecision) -> bool:
+    """Fail closed on expired or timezone-ambiguous authorization decisions."""
+    expires_at = decision.expires_at
+    return expires_at is not None and (
+        expires_at.tzinfo is None
+        or expires_at.utcoffset() is None
+        or expires_at <= datetime.now(UTC)
+    )
+
+
 def _classify(address_text: str) -> tuple[str, bool]:
     """Classify one resolved address.
 
@@ -230,12 +263,18 @@ def _classify(address_text: str) -> tuple[str, bool]:
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
 
+    prohibited_networks = (
+        _IPV6_PROHIBITED_NETWORKS
+        if isinstance(address, ipaddress.IPv6Address)
+        else _IPV4_PROHIBITED_NETWORKS
+    )
+
     if (
         address.is_unspecified
         or address.is_multicast
         or address.is_link_local
         or address.is_reserved
-        or address == ipaddress.ip_address("255.255.255.255")
+        or any(address in network for network in prohibited_networks)
     ):
         return REASON_PROHIBITED_ADDRESS, False
 
