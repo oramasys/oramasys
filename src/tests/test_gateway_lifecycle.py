@@ -561,3 +561,44 @@ async def test_pt_facade_propagates_denial_without_legacy_fallback():
 
     assert (result.status, result.reason_code) == ("denied", "endpoint_denied")
     assert len(telos.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_does_not_bypass_claim_cleanup():
+    """CodeRabbit finding: a SECOND Task.cancel() lands while the
+    cancellation handler is itself awaiting the shielded claim_task drain.
+    asyncio.CancelledError is a BaseException, not an Exception, so the
+    prior code's `except Exception: pass` around that inner await did NOT
+    catch it -- the second cancellation propagated straight past both the
+    claim_task drain AND the abort(key) call below it, silently skipping
+    cleanup. Reproduces CodeRabbit's own repro shape but against the real
+    GatewayLifecycle/SlowClaimStore harness instead of a standalone script."""
+    entered_claim = asyncio.Event()
+    release_claim = asyncio.Event()
+    store = SlowClaimStore(entered_claim=entered_claim, release_claim=release_claim)
+    runner, _, _, _, claude, _, _ = lifecycle(store=store)
+
+    cancelled = asyncio.create_task(runner.run(request()))
+    await entered_claim.wait()  # store has committed the reservation now
+
+    cancelled.cancel()
+    await asyncio.sleep(0)  # let the first cancellation reach the handler
+    cancelled.cancel()  # second cancellation, while the handler awaits cleanup
+
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    release_claim.set()  # let the (still-running, shielded) claim() settle
+
+    # Give the shielded cleanup task -- detached from the outer task's own
+    # cancellation by the fix -- a few turns to actually finish running.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert store.aborts == 1
+    assert store.in_progress == set()
+
+    retry = await runner.run(request())
+
+    assert retry.status == "ready"
+    assert claude.calls == 1

@@ -91,24 +91,39 @@ class GatewayLifecycle:
 
             key = self._idempotency_key(request)
             claim_task = asyncio.create_task(self._store.claim(key))
-            try:
-                existing = await asyncio.shield(claim_task)
-            except asyncio.CancelledError:
-                # The shield prevents caller cancellation from cancelling the
-                # store operation, but the claim may still be paused before it
-                # reserves the key. Wait for the claim to settle before cleanup
-                # so abort() cannot run too early and be followed by a late
-                # reservation that strands the key.
+
+            async def _drain_claim_then_abort() -> None:
+                """Runs to completion regardless of how many times the
+                caller cancels this lifecycle run. A single shield wraps
+                BOTH the claim_task drain and the abort() call as one
+                inseparable unit -- a REPEATED cancellation can only
+                interrupt our *await* on this coroutine, never the
+                coroutine itself, since shield() detaches it into its own
+                task on first use. The prior code shielded the drain and
+                the abort() as two separate awaits, so a second
+                cancellation landing between them raised CancelledError
+                (a BaseException, not caught by the drain's
+                `except Exception`) straight past the abort() call below
+                it, silently skipping cleanup and stranding the claim."""
                 try:
-                    await asyncio.shield(claim_task)
+                    await claim_task
                 except Exception:
                     # Cleanup is still safe and idempotent for an unreserved
                     # key, including a claim implementation that fails.
                     pass
+                await self._store.abort(key)
+
+            try:
+                existing = await asyncio.shield(claim_task)
+            except asyncio.CancelledError:
+                claimed = False
                 try:
-                    await asyncio.shield(self._store.abort(key))
-                finally:
-                    claimed = False
+                    await asyncio.shield(_drain_claim_then_abort())
+                except asyncio.CancelledError:
+                    # A later cancellation interrupted only OUR wait on the
+                    # cleanup task, not the cleanup task itself -- it keeps
+                    # running detached and will still call abort().
+                    pass
                 raise
             if existing is not None:
                 if not self._stored_state_matches(existing, request, key):
