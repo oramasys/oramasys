@@ -60,7 +60,7 @@ class GatewayLifecycleRequest(Contract):
     gateway_id: str
     artifact: ArtifactPin
     operator_consent: OperatorConsent
-    provider_kind: Literal["ollama", "lm_studio"]
+    provider_kind: Literal["ollama", "lm_studio", "openclaw_gateway"]
     config_endpoint: EndpointRef
     health_endpoint: EndpointRef
     allow_public_model_servers: bool = False

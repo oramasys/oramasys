@@ -35,18 +35,15 @@ All injectable I/O (DNS resolver, connector) are async callables so tests run
 against controlled DNS and HTTP-client fakes, never a real metadata service
 or the workstation resolver (doc 65/66 test constraint).
 
-Accepted residual risk (Gate 4 boundary, tracked as fast-follow): once an
-address passes classification, ``DialConnector`` has no per-purpose
-port/transport restriction of its own -- ``EndpointRef`` only validates
-``1 <= port <= 65535``, so e.g. a ``health_probe`` can dial any TCP port on a
-classified host (a shared RFC1918 host's port 6379, say), and UDP transport
-is unaddressed entirely. Telos's endpoint-exact-match authorization is the
-real gate here (it binds scheme/host/port, so an unauthorized port never
-reaches a fresh decision), not the dialer -- but a compromised or over-broad
-Telos policy has no second, independent restriction to fall back on inside
-this module. Close by enforcing TCP-only plus a per-purpose default-port
-allowlist (config_read/health_probe: 80/443/8080/11434/1234) when a second
-consumer or a wider purpose set makes the gap load-bearing.
+The dialer provides an independent transport floor in addition to Telos's
+exact endpoint authorization. Gate 4 currently supports local Ollama
+(``http:11434``), LM Studio (``http:1234``), and the OpenClaw control gateway
+(``http:18789``), plus an explicitly opted-in TLS reverse proxy
+(``https:443``) for the model-server providers. MLX's ``http:8081`` convention
+is not included because MLX is not yet a Gateway Lifecycle provider; paid
+online LLM egress remains out of scope. A new provider or non-default port
+must extend the lifecycle contract and this evidence-backed table together,
+rather than silently broadening a generic TCP dial.
 """
 
 from __future__ import annotations
@@ -56,7 +53,7 @@ import ipaddress
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from telos import (
     EndpointPurpose,
@@ -67,6 +64,32 @@ from telos import (
 )
 
 GATE4_PURPOSES = (EndpointPurpose.CONFIG_READ, EndpointPurpose.HEALTH_PROBE)
+ModelServerProvider = Literal["ollama", "lm_studio", "openclaw_gateway"]
+
+_TCP_SCHEMES = frozenset({"http", "https"})
+_MODEL_SERVER_TRANSPORT_PORTS = frozenset(
+    {
+        ("http", 11434),  # Ollama
+        ("http", 1234),  # LM Studio
+        ("http", 18789),  # OpenClaw control gateway
+        ("https", 443),  # explicitly opted-in TLS reverse proxy
+    }
+)
+
+# Both Gate 4 operations query the same model-server control surface today.
+# Keep the table purpose-keyed so a later provider operation must make any
+# broader port need explicit instead of inheriting a generic TCP capability.
+PURPOSE_ALLOWED_TRANSPORT_PORTS: dict[EndpointPurpose, frozenset[tuple[str, int]]] = {
+    purpose: _MODEL_SERVER_TRANSPORT_PORTS for purpose in GATE4_PURPOSES
+}
+
+# The purpose table keeps the external capability narrow; this table prevents
+# accidentally treating one local runtime's port as another runtime's API.
+_PROVIDER_ALLOWED_TRANSPORT_PORTS: dict[ModelServerProvider, frozenset[tuple[str, int]]] = {
+    "ollama": frozenset({("http", 11434), ("https", 443)}),
+    "lm_studio": frozenset({("http", 1234), ("https", 443)}),
+    "openclaw_gateway": frozenset({("http", 18789)}),
+}
 
 #: Purposes whose policy permits loopback/RFC1918/ULA model servers.
 LOCAL_PERMITTED_PURPOSES = frozenset(GATE4_PURPOSES)
@@ -78,6 +101,8 @@ REASON_TELOS_ENDPOINT_MISMATCH = "telos_decision_endpoint_mismatch"
 REASON_PURPOSE_OUT_OF_SCOPE = "purpose_not_in_gate4_scope"
 REASON_NO_ANSWERS = "dns_no_answers"
 REASON_DNS_INVALID_ANSWER = "dns_invalid_answer"
+REASON_TRANSPORT_NOT_PERMITTED = "transport_not_permitted"
+REASON_PORT_NOT_PERMITTED = "port_not_permitted"
 REASON_CONNECTOR_REFUSED = "connector_refused"
 REASON_DIAL_TIMEOUT = "dial_timeout"
 REASON_TELOS_DECISION_EXPIRED = "telos_decision_expired"
@@ -110,6 +135,8 @@ DIALER_REJECTION_REASONS = frozenset(
         REASON_PURPOSE_OUT_OF_SCOPE,
         REASON_NO_ANSWERS,
         REASON_DNS_INVALID_ANSWER,
+        REASON_TRANSPORT_NOT_PERMITTED,
+        REASON_PORT_NOT_PERMITTED,
         REASON_DIAL_TIMEOUT,
         REASON_TELOS_DECISION_EXPIRED,
     }
@@ -141,6 +168,7 @@ class ModelServerDialRequest:
 
     endpoint: EndpointRef
     purpose: EndpointPurpose
+    provider_kind: ModelServerProvider
     allow_public: bool
     actor_id: str = "gateway_lifecycle"
     workflow_id: str = "gateway_lifecycle"
@@ -150,6 +178,8 @@ class ModelServerDialRequest:
     def __post_init__(self) -> None:
         if _validate_purpose(self.purpose) is not None:
             raise ValueError(f"purpose {self.purpose} is not in Gate 4 scope")
+        if self.provider_kind not in _PROVIDER_ALLOWED_TRANSPORT_PORTS:
+            raise ValueError(f"unsupported model server provider {self.provider_kind}")
         if not self.run_id.strip():
             raise ValueError("run_id is required")
 
@@ -198,6 +228,9 @@ class ModelServerDialer:
             return ModelServerDialResult(False, REASON_TELOS_ENDPOINT_MISMATCH)
         if _decision_is_expired(decision):
             return ModelServerDialResult(False, REASON_TELOS_DECISION_EXPIRED)
+        transport_error = _validate_transport_and_port(request)
+        if transport_error is not None:
+            return ModelServerDialResult(False, transport_error)
 
         # DNS resolution and connector I/O share one deadline so neither a
         # hung resolver nor a hung connector can hold the caller's routing-
@@ -261,6 +294,19 @@ def _decision_is_expired(decision: EndpointUseDecision) -> bool:
         or expires_at.utcoffset() is None
         or expires_at <= datetime.now(UTC)
     )
+
+
+def _validate_transport_and_port(request: ModelServerDialRequest) -> str | None:
+    """Return a stable denial reason for a non-Gate-4 transport capability."""
+    endpoint = request.endpoint
+    if endpoint.scheme not in _TCP_SCHEMES:
+        return REASON_TRANSPORT_NOT_PERMITTED
+    transport_port = endpoint.scheme, endpoint.port
+    if transport_port not in PURPOSE_ALLOWED_TRANSPORT_PORTS[request.purpose]:
+        return REASON_PORT_NOT_PERMITTED
+    if transport_port not in _PROVIDER_ALLOWED_TRANSPORT_PORTS[request.provider_kind]:
+        return REASON_PORT_NOT_PERMITTED
+    return None
 
 
 def _classify(address_text: str) -> tuple[str, bool]:

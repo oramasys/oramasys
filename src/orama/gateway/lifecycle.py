@@ -191,6 +191,7 @@ class GatewayLifecycle:
                         ModelServerDialRequest(
                             endpoint=endpoint,
                             purpose=purpose,
+                            provider_kind=request.provider_kind,
                             allow_public=request.allow_public_model_servers,
                             actor_id=request.gateway_id,
                             run_id=key,

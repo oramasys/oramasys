@@ -20,9 +20,11 @@ from orama.gateway.dialer import (
     REASON_NO_ANSWERS,
     REASON_PROHIBITED_ADDRESS,
     REASON_PUBLIC_NOT_PERMITTED,
+    REASON_PORT_NOT_PERMITTED,
     REASON_TELOS_DENIED,
     REASON_TELOS_DECISION_EXPIRED,
     REASON_TELOS_ENDPOINT_MISMATCH,
+    REASON_TRANSPORT_NOT_PERMITTED,
     ModelServerDialer,
     ModelServerDialRequest,
 )
@@ -67,17 +69,19 @@ class FakeConnector:
 
 
 LOCAL = EndpointRef("http", "ollama.local", 11434, is_public=False)
-PUBLIC = EndpointRef("http", "models.example.com", 443, is_public=True)
+PUBLIC = EndpointRef("https", "models.example.com", 443, is_public=True)
 
 
 def dial_request(
     endpoint: EndpointRef = LOCAL,
     purpose: EndpointPurpose = EndpointPurpose.HEALTH_PROBE,
+    provider_kind: str = "ollama",
     allow_public: bool = False,
 ) -> ModelServerDialRequest:
     return ModelServerDialRequest(
         endpoint=endpoint,
         purpose=purpose,
+        provider_kind=provider_kind,
         allow_public=allow_public,
         run_id="run-test",
     )
@@ -165,6 +169,75 @@ async def test_public_endpoint_without_opt_in_is_rejected():
 
     assert not result.allowed
     assert result.reason_code == REASON_PUBLIC_NOT_PERMITTED
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "provider_kind"),
+    [
+        (EndpointRef("http", "ollama.local", 11434, is_public=False), "ollama"),
+        (EndpointRef("http", "lm-studio.local", 1234, is_public=False), "lm_studio"),
+        (
+            EndpointRef("http", "openclaw.local", 18789, is_public=False),
+            "openclaw_gateway",
+        ),
+        (EndpointRef("https", "models.example.com", 443, is_public=True), "ollama"),
+    ],
+)
+async def test_documented_gate4_transport_port_pairs_are_dialed(
+    endpoint: EndpointRef, provider_kind: str
+):
+    resolver = FakeResolver({endpoint.host: ["8.8.8.8"] if endpoint.is_public else ["127.0.0.1"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(
+        dial_request(endpoint, provider_kind=provider_kind, allow_public=endpoint.is_public)
+    )
+
+    assert result.allowed
+    assert connector.calls == [(result.resolved_address, endpoint.port, EndpointPurpose.HEALTH_PROBE)]
+
+
+@pytest.mark.asyncio
+async def test_non_model_server_port_is_rejected_before_dns_resolution():
+    endpoint = EndpointRef("http", "ollama.local", 6379, is_public=False)
+    resolver = FakeResolver({"ollama.local": ["127.0.0.1"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request(endpoint))
+
+    assert not result.allowed
+    assert result.reason_code == REASON_PORT_NOT_PERMITTED
+    assert resolver.calls == []
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_provider_port_conventions_cannot_be_crossed():
+    endpoint = EndpointRef("http", "openclaw.local", 18789, is_public=False)
+    resolver = FakeResolver({"openclaw.local": ["127.0.0.1"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request(endpoint, provider_kind="ollama"))
+
+    assert not result.allowed
+    assert result.reason_code == REASON_PORT_NOT_PERMITTED
+    assert resolver.calls == []
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_tcp_transport_is_rejected_before_dns_resolution():
+    endpoint = EndpointRef("udp", "ollama.local", 11434, is_public=False)
+    resolver = FakeResolver({"ollama.local": ["127.0.0.1"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request(endpoint))
+
+    assert not result.allowed
+    assert result.reason_code == REASON_TRANSPORT_NOT_PERMITTED
+    assert resolver.calls == []
     assert connector.calls == []
 
 
@@ -490,11 +563,32 @@ async def test_lifecycle_fails_closed_when_dial_resolves_prohibited_address():
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_fails_closed_when_a_model_endpoint_uses_an_unapproved_port():
+    resolver = FakeResolver({"127.0.0.1": ["127.0.0.1"]})
+    runner, connector, _, claude, _ = lifecycle_with_dialer(resolver=resolver)
+    non_model_request = gateway_request().model_copy(
+        update={
+            "config_endpoint": EndpointRef("http", "127.0.0.1", 6379, is_public=False),
+        }
+    )
+
+    result = await runner.run(non_model_request)
+
+    assert (result.status, result.reason_code) == ("denied", REASON_PORT_NOT_PERMITTED)
+    assert connector.calls == []
+    assert claude.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_requires_explicit_public_model_server_opt_in():
     resolver = FakeResolver({"models.example.com": ["8.8.8.8"]})
     runner, connector, _, claude, _ = lifecycle_with_dialer(resolver=resolver)
     public_request = gateway_request().model_copy(
-        update={"config_endpoint": PUBLIC, "health_endpoint": PUBLIC}
+        update={
+            "provider_kind": "ollama",
+            "config_endpoint": PUBLIC,
+            "health_endpoint": PUBLIC,
+        }
     )
 
     result = await runner.run(public_request)
@@ -510,6 +604,7 @@ async def test_lifecycle_dials_declared_public_model_servers_only_after_opt_in()
     runner, connector, _, claude, _ = lifecycle_with_dialer(resolver=resolver)
     public_request = gateway_request().model_copy(
         update={
+            "provider_kind": "ollama",
             "config_endpoint": PUBLIC,
             "health_endpoint": PUBLIC,
             "allow_public_model_servers": True,

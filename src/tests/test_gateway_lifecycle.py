@@ -215,7 +215,7 @@ def request(*, consent: bool = True, version: str = "1.2.3") -> GatewayLifecycle
             version=version,
             digest="sha256:" + "a" * 64,
         ),
-        provider_kind="ollama",
+        provider_kind="openclaw_gateway",
         config_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
         health_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
         model_hint="qwen3.5:9b",
