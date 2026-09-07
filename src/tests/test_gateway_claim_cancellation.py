@@ -6,6 +6,8 @@ import asyncio
 
 import pytest
 
+from telos import EndpointRef
+
 from orama.gateway.contracts import ArtifactPin, GatewayLifecycleRequest, OperatorConsent
 from orama.gateway.lifecycle import GatewayLifecycle
 
@@ -76,8 +78,8 @@ def request() -> GatewayLifecycleRequest:
             digest=digest,
         ),
         provider_kind="ollama",
-        config_endpoint="http://127.0.0.1:18789/config",
-        health_endpoint="http://127.0.0.1:18789/health",
+        config_endpoint=EndpointRef("http", "127.0.0.1", 11434, is_public=False),
+        health_endpoint=EndpointRef("http", "127.0.0.1", 11434, is_public=False),
         readiness_timeout_seconds=30,
     )
 
@@ -107,6 +109,48 @@ async def test_cancellation_waits_for_claim_to_settle_before_abort():
     store.release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+    assert store.aborts == 1
+    assert store.in_progress == set()
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_does_not_bypass_claim_cleanup():
+    """A second Task.cancel() while the first cancellation's cleanup is
+    still draining the claim must not bypass abort(). asyncio.CancelledError
+    is a BaseException, not caught by `except Exception`, so a naive cleanup
+    path (drain and abort as two separate shielded awaits) can let a second
+    cancellation skip straight past the abort() call, never invoking it at
+    all -- not even eventually. The fix combines drain+abort into one
+    coroutine so abort() is always reached once shielded, regardless of how
+    many further cancellations land on the *outer* await; a later
+    cancellation can only interrupt this test's own wait on that detached
+    cleanup task, never the task itself, so cleanup still completes and is
+    observable after giving the event loop a few more turns.
+    """
+    store = ClaimBeforeReserveStore()
+    owner = UnreachedOwner()
+    runner = GatewayLifecycle(
+        telos=owner,
+        phylax=Phylax(),
+        agate=owner,
+        claude=owner,
+        store=store,
+        events=EventSink(),
+    )
+
+    task = asyncio.create_task(runner.run(request()))
+    await store.entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    store.release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
 
     assert store.aborts == 1
     assert store.in_progress == set()

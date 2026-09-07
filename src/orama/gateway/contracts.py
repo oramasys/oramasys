@@ -6,6 +6,7 @@ import re
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from telos import EndpointRef, EndpointUseDecision, EndpointUseRequest
 
 
 class Contract(BaseModel):
@@ -55,22 +56,23 @@ class OperatorConsent(Contract):
         return value
 
 
+#: Single home for the Gate-4 model-server provider identifier. Imported by
+#: dialer.py rather than redefined there -- one Literal, not two that can
+#: silently drift apart (contracts.py has no dependency on dialer.py, so
+#: this direction avoids a cycle).
+ModelServerProvider = Literal["ollama", "lm_studio", "openclaw_gateway"]
+
+
 class GatewayLifecycleRequest(Contract):
     gateway_id: str
     artifact: ArtifactPin
     operator_consent: OperatorConsent
-    provider_kind: Literal["ollama", "lm_studio"]
-    config_endpoint: str
-    health_endpoint: str
+    provider_kind: ModelServerProvider
+    config_endpoint: EndpointRef
+    health_endpoint: EndpointRef
+    allow_public_model_servers: bool = False
     model_hint: str | None = None
     readiness_timeout_seconds: int = Field(gt=0)
-
-
-class TelosDecision(Contract):
-    allowed: bool
-    policy_version: str
-    endpoint_ref: str | None = None
-    reason_code: str
 
 
 class PhylaxDecision(Contract):
@@ -117,8 +119,8 @@ class RoutingState(Contract):
     provider_ref: str
     placement_ref: str
     placement_policy_version: str
-    config_endpoint_ref: str
-    health_endpoint_ref: str
+    config_endpoint: EndpointRef
+    health_endpoint: EndpointRef
     config_telos_policy_version: str
     health_telos_policy_version: str
     artifact_decision_ref: str
@@ -135,7 +137,7 @@ class GatewayLifecycleResult(Contract):
 
 
 class TelosPort(Protocol):
-    async def authorize(self, *, purpose: str, endpoint: str) -> TelosDecision: ...
+    async def authorize(self, request: EndpointUseRequest) -> EndpointUseDecision: ...
 
 
 class PhylaxPort(Protocol):
@@ -160,8 +162,8 @@ class ClaudeProviderPort(Protocol):
         *,
         provider_kind: str,
         placement_ref: str,
-        config_endpoint_ref: str,
-        health_endpoint_ref: str,
+        config_endpoint: EndpointRef,
+        health_endpoint: EndpointRef,
         timeout_seconds: int,
     ) -> ProviderReadiness: ...
 

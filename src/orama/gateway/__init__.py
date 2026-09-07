@@ -9,14 +9,26 @@ from orama.gateway.contracts import (
     OperatorConsent,
     RoutingState,
 )
+from orama.gateway.dialer import (
+    DialConnector,
+    DnsResolver,
+    ModelServerDialRequest,
+    ModelServerDialResult,
+    ModelServerDialer,
+)
 from orama.gateway.lifecycle import GatewayLifecycle
 
 __all__ = [
     "ArtifactPin",
+    "DialConnector",
+    "DnsResolver",
     "GatewayLifecycle",
     "GatewayLifecycleRequest",
     "GatewayLifecycleResult",
     "GatewayProgressEvent",
+    "ModelServerDialRequest",
+    "ModelServerDialResult",
+    "ModelServerDialer",
     "OperatorConsent",
     "PerpetuaToolsGatewayFacade",
     "RoutingState",
