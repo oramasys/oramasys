@@ -44,6 +44,18 @@ is not included because MLX is not yet a Gateway Lifecycle provider; paid
 online LLM egress remains out of scope. A new provider or non-default port
 must extend the lifecycle contract and this evidence-backed table together,
 rather than silently broadening a generic TCP dial.
+
+Reviewed and accepted for Gate 4's current scope (Claude review, 2026-09-07):
+folding ``"openclaw_gateway"`` into ``GatewayLifecycleRequest.provider_kind``
+is a real, known modeling overload -- that field's other two callers
+(``AgatePort.resolve_placement``, ``ClaudeProviderPort.ensure_ready``) expect
+an actual model-serving backend, not the control-plane gateway that owns the
+lifecycle itself. It is safe today only because Gate 4 keeps Agate/Claude
+behind fakes with no real placement/readiness behavior yet (doc 66's own
+"do not yet authorize... provider dispatch, or hardware placement"). Gate 5
+(``ResolvedRoute``), which wires real Agate/Claude implementations, MUST
+separate "control-plane dial target" from "model-serving provider selection"
+before this overload becomes load-bearing -- do not carry it forward silently.
 """
 
 from __future__ import annotations
