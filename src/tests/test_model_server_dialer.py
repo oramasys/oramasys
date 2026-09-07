@@ -632,6 +632,78 @@ async def test_lifecycle_maps_connector_failure_to_a_generic_dial_denial():
     assert claude.calls == 0
 
 
+@dataclass
+class FirstCallMismatchTelos(TelosFake):
+    """Returns a decision whose endpoint diverges from what was requested,
+    but only on the FIRST authorize() call. Simulates a Telos backend whose
+    policy state changes between the lifecycle's own pre-dial authorize and
+    the dialer's internal re-authorize for the same nominal request --
+    exactly the scenario the endpoint-mismatch check at the lifecycle
+    boundary must catch, since the dialer's own mismatch check only ever
+    compares against request.config_endpoint/health_endpoint, never against
+    what an earlier decision echoed."""
+
+    _authorize_calls: int = 0
+
+    async def authorize(self, request: EndpointUseRequest):
+        self._authorize_calls += 1
+        decision = await super().authorize(request)
+        if self._authorize_calls == 1:
+            wrong = EndpointRef("http", "wrong.example", 11434, is_public=False)
+            return replace(decision, endpoint=wrong)
+        return decision
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_fails_closed_when_first_decision_endpoint_diverges_from_request():
+    """Important finding: lifecycle.py authorized config/health once, then
+    the dialer authorized (and exact-match validated) a second time -- but
+    readiness I/O and persisted routing state used the FIRST decision's
+    echoed endpoint, which was never independently classified or dial-
+    validated. A divergent-but-allowed first decision could therefore bypass
+    the classified dial path entirely. Must fail closed before any dial,
+    connector call, or readiness attempt."""
+    resolver = FakeResolver({"127.0.0.1": ["127.0.0.1"]})
+    telos = FirstCallMismatchTelos()
+    runner, connector, _, claude, _ = lifecycle_with_dialer(resolver=resolver, telos=telos)
+
+    result = await runner.run(gateway_request())
+
+    assert (result.status, result.reason_code) == (
+        "error",
+        "telos_decision_endpoint_mismatch",
+    )
+    assert resolver.calls == []
+    assert connector.calls == []
+    assert claude.calls == 0
+
+
+@dataclass
+class ExpiredFirstDecisionTelos(TelosFake):
+    async def authorize(self, request: EndpointUseRequest):
+        decision = await super().authorize(request)
+        return replace(decision, expires_at=datetime.now(UTC) - timedelta(seconds=1))
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_fails_closed_on_expired_first_decision_before_any_dial():
+    """The dialer already refuses to dial on an expired decision (dialer.py's
+    own decision_is_expired check). The lifecycle boundary must apply the
+    same check to its own pre-dial authorize -- otherwise an expired-but-
+    technically-allowed first decision still reaches readiness/state through
+    the code path this test exercises before any dial ever runs."""
+    resolver = FakeResolver({"127.0.0.1": ["127.0.0.1"]})
+    telos = ExpiredFirstDecisionTelos()
+    runner, connector, _, claude, _ = lifecycle_with_dialer(resolver=resolver, telos=telos)
+
+    result = await runner.run(gateway_request())
+
+    assert (result.status, result.reason_code) == ("error", "telos_decision_expired")
+    assert resolver.calls == []
+    assert connector.calls == []
+    assert claude.calls == 0
+
+
 @pytest.mark.asyncio
 async def test_lifecycle_dial_uses_gateway_id_as_the_authorizing_actor():
     """CodeRabbit finding: the dial request must carry the same actor Telos

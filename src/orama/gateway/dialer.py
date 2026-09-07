@@ -65,7 +65,7 @@ import ipaddress
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Protocol
 
 from telos import (
     EndpointPurpose,
@@ -75,8 +75,9 @@ from telos import (
     TelosPort,
 )
 
+from orama.gateway.contracts import ModelServerProvider
+
 GATE4_PURPOSES = (EndpointPurpose.CONFIG_READ, EndpointPurpose.HEALTH_PROBE)
-ModelServerProvider = Literal["ollama", "lm_studio", "openclaw_gateway"]
 
 _TCP_SCHEMES = frozenset({"http", "https"})
 _MODEL_SERVER_TRANSPORT_PORTS = frozenset(
@@ -238,7 +239,7 @@ class ModelServerDialer:
             return ModelServerDialResult(False, f"{REASON_TELOS_DENIED}:{decision.reason_code}")
         if decision.endpoint != request.endpoint:
             return ModelServerDialResult(False, REASON_TELOS_ENDPOINT_MISMATCH)
-        if _decision_is_expired(decision):
+        if decision_is_expired(decision):
             return ModelServerDialResult(False, REASON_TELOS_DECISION_EXPIRED)
         transport_error = _validate_transport_and_port(request)
         if transport_error is not None:
@@ -298,7 +299,7 @@ def _endpoint_is_public_declared(endpoint: EndpointRef) -> bool:
     return endpoint.is_public
 
 
-def _decision_is_expired(decision: EndpointUseDecision) -> bool:
+def decision_is_expired(decision: EndpointUseDecision) -> bool:
     """Fail closed on expired or timezone-ambiguous authorization decisions."""
     expires_at = decision.expires_at
     return expires_at is not None and (

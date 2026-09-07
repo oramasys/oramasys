@@ -24,6 +24,7 @@ from orama.gateway.dialer import (
     ModelServerDialRequest,
     ModelServerDialer,
     ModelServerDialResult,
+    decision_is_expired,
 )
 
 
@@ -159,6 +160,17 @@ class GatewayLifecycle:
             )
             if not config.allowed:
                 return await fail("denied", config.reason_code)
+            if config.endpoint != request.config_endpoint:
+                # A decision that echoes a different endpoint than the one
+                # requested must never be trusted for anything downstream --
+                # the dialer only ever resolves/classifies/dials
+                # request.config_endpoint, so an "allowed" decision for a
+                # different endpoint would let readiness I/O and persisted
+                # routing state use an address the dial path never actually
+                # validated. Fail closed rather than silently substitute.
+                return await fail("error", "telos_decision_endpoint_mismatch")
+            if decision_is_expired(config):
+                return await fail("error", "telos_decision_expired")
 
             health = await self._telos.authorize(
                 EndpointUseRequest(
@@ -171,6 +183,10 @@ class GatewayLifecycle:
             )
             if not health.allowed:
                 return await fail("denied", health.reason_code)
+            if health.endpoint != request.health_endpoint:
+                return await fail("error", "telos_decision_endpoint_mismatch")
+            if decision_is_expired(health):
+                return await fail("error", "telos_decision_expired")
             await emit(
                 "endpoints_authorized",
                 "running",
@@ -258,8 +274,15 @@ class GatewayLifecycle:
                     readiness = await self._claude.ensure_ready(
                         provider_kind=request.provider_kind,
                         placement_ref=placement.placement_ref,
-                        config_endpoint=config.endpoint,
-                        health_endpoint=health.endpoint,
+                        # request.config_endpoint/health_endpoint, not
+                        # config.endpoint/health.endpoint: the dialer above
+                        # only ever resolves/classifies/dials the request's
+                        # own endpoints (matched exactly at the checks
+                        # above). Using the decision's echoed endpoint here
+                        # would let readiness I/O run against an address the
+                        # dial path never actually validated.
+                        config_endpoint=request.config_endpoint,
+                        health_endpoint=request.health_endpoint,
                         timeout_seconds=request.readiness_timeout_seconds,
                     )
             except TimeoutError:
@@ -282,8 +305,8 @@ class GatewayLifecycle:
                 provider_ref=readiness.provider_ref,
                 placement_ref=placement.placement_ref,
                 placement_policy_version=placement.policy_version,
-                config_endpoint=config.endpoint,
-                health_endpoint=health.endpoint,
+                config_endpoint=request.config_endpoint,
+                health_endpoint=request.health_endpoint,
                 config_telos_policy_version=config.policy_version,
                 health_telos_policy_version=health.policy_version,
                 artifact_decision_ref=artifact.decision_ref,

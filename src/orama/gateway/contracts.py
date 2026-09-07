@@ -56,11 +56,18 @@ class OperatorConsent(Contract):
         return value
 
 
+#: Single home for the Gate-4 model-server provider identifier. Imported by
+#: dialer.py rather than redefined there -- one Literal, not two that can
+#: silently drift apart (contracts.py has no dependency on dialer.py, so
+#: this direction avoids a cycle).
+ModelServerProvider = Literal["ollama", "lm_studio", "openclaw_gateway"]
+
+
 class GatewayLifecycleRequest(Contract):
     gateway_id: str
     artifact: ArtifactPin
     operator_consent: OperatorConsent
-    provider_kind: Literal["ollama", "lm_studio", "openclaw_gateway"]
+    provider_kind: ModelServerProvider
     config_endpoint: EndpointRef
     health_endpoint: EndpointRef
     allow_public_model_servers: bool = False
