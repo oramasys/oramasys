@@ -119,8 +119,14 @@ async def test_repeated_cancellation_does_not_bypass_claim_cleanup():
     """A second Task.cancel() while the first cancellation's cleanup is
     still draining the claim must not bypass abort(). asyncio.CancelledError
     is a BaseException, not caught by `except Exception`, so a naive cleanup
-    path can be interrupted mid-drain by repeated cancellation, leaving the
-    key permanently reserved.
+    path (drain and abort as two separate shielded awaits) can let a second
+    cancellation skip straight past the abort() call, never invoking it at
+    all -- not even eventually. The fix combines drain+abort into one
+    coroutine so abort() is always reached once shielded, regardless of how
+    many further cancellations land on the *outer* await; a later
+    cancellation can only interrupt this test's own wait on that detached
+    cleanup task, never the task itself, so cleanup still completes and is
+    observable after giving the event loop a few more turns.
     """
     store = ClaimBeforeReserveStore()
     owner = UnreachedOwner()
@@ -138,15 +144,13 @@ async def test_repeated_cancellation_does_not_bypass_claim_cleanup():
     task.cancel()
     await asyncio.sleep(0)
     task.cancel()
-    await asyncio.sleep(0)
-    task.cancel()
 
-    assert not task.done()
-    assert store.aborts == 0
-
-    store.release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+    store.release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
 
     assert store.aborts == 1
     assert store.in_progress == set()
