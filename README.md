@@ -34,8 +34,8 @@ bin/serve             # run the API (uvicorn, reads from src/)
 Requires Python ≥ 3.11. `make dev-install`/`make test` still use a sibling
 `../perpetua-core` checkout (pre-release, unpublished) for fast local
 iteration. `telos` is now published at
-[`oramasys/telos`](https://github.com/oramasys/telos) — `pyproject.toml`'s
-`oramasys-telos @ git+https://github.com/oramasys/telos.git` entry is
+[`oramasys/telos`](https://github.com/oramasys/telos) — `pyproject.toml` pins
+`oramasys-telos` to a reviewed Telos commit, so the entry is
 independently resolvable by a clean `pip install`/wheel build without a
 sibling checkout, so `make dev-install` no longer installs it from `../telos`
 by default; override `TELOS` in the `make` invocation if you need to develop
