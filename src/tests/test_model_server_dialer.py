@@ -215,6 +215,53 @@ async def test_malformed_dns_answer_is_denied_with_a_stable_reason():
 
 
 @pytest.mark.asyncio
+async def test_ipv6_loopback_is_treated_as_local_not_prohibited():
+    """Regression: CPython's ipaddress module reports ``::1`` as
+    is_reserved == True (verified on 3.13), which the prohibited-class check
+    would otherwise reject unconditionally -- the single most common
+    config_read/health_probe target for an IPv6-only local model server.
+    Found while adding mixed-family test coverage; not caught by three prior
+    review passes (author, CodeRabbit, independent adversarial review)."""
+    resolver = FakeResolver({"ollama.local": ["::1"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request())
+
+    assert result.allowed
+    assert connector.calls[0][0] == "::1"
+
+
+@pytest.mark.asyncio
+async def test_benchmark_range_198_18_is_treated_as_local_not_prohibited():
+    """RFC 2544 benchmark space (198.18.0.0/15) is not real Internet-routable
+    traffic; Python's ipaddress.is_private already classifies it as private,
+    so it is dialed without requiring allow_public -- pinning this as a
+    deliberate, verified classification (F13/F08), not an oversight."""
+    resolver = FakeResolver({"ollama.local": ["198.18.0.1"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request())
+
+    assert result.allowed
+    assert connector.calls[0][0] == "198.18.0.1"
+
+
+@pytest.mark.asyncio
+async def test_mixed_family_answer_set_on_a_permitted_host_dials_the_first_answer():
+    """A host with both A and AAAA records must classify every answer (one
+    prohibited answer rejects the whole host, per rule 2) before dispatch,
+    and dial the first answer once the full set clears classification."""
+    resolver = FakeResolver({"ollama.local": ["127.0.0.1", "::1"]})
+    dialer, _, _, connector = make_dialer(resolver=resolver)
+
+    result = await dialer.dial(dial_request())
+
+    assert result.allowed
+    assert result.resolved_address == "127.0.0.1"
+    assert connector.calls[0][0] == "127.0.0.1"
+
+
+@pytest.mark.asyncio
 async def test_empty_dns_answer_set_fails_closed():
     resolver = FakeResolver({})  # no answers for any host
     dialer, _, _, connector = make_dialer(resolver=resolver)

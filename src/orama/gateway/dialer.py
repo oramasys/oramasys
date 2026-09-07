@@ -34,6 +34,19 @@ Only ``config_read`` and ``health_probe`` are in Gate 4 scope.
 All injectable I/O (DNS resolver, connector) are async callables so tests run
 against controlled DNS and HTTP-client fakes, never a real metadata service
 or the workstation resolver (doc 65/66 test constraint).
+
+Accepted residual risk (Gate 4 boundary, tracked as fast-follow): once an
+address passes classification, ``DialConnector`` has no per-purpose
+port/transport restriction of its own -- ``EndpointRef`` only validates
+``1 <= port <= 65535``, so e.g. a ``health_probe`` can dial any TCP port on a
+classified host (a shared RFC1918 host's port 6379, say), and UDP transport
+is unaddressed entirely. Telos's endpoint-exact-match authorization is the
+real gate here (it binds scheme/host/port, so an unauthorized port never
+reaches a fresh decision), not the dialer -- but a compromised or over-broad
+Telos policy has no second, independent restriction to fall back on inside
+this module. Close by enforcing TCP-only plus a per-purpose default-port
+allowlist (config_read/health_probe: 80/443/8080/11434/1234) when a second
+consumer or a wider purpose set makes the gap load-bearing.
 """
 
 from __future__ import annotations
@@ -262,6 +275,15 @@ def _classify(address_text: str) -> tuple[str, bool]:
     # IPv4-mapped IPv6 must be judged by its embedded IPv4 class.
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
+
+    # Loopback is checked before the prohibited-class predicates below:
+    # CPython's ipaddress module reports ``::1`` (IPv6 loopback) as
+    # is_reserved == True (verified on 3.13; a real interpreter quirk, not
+    # a documentation error), which would otherwise unconditionally reject
+    # the single most common config_read/health_probe target. Loopback is
+    # always local-permitted, never prohibited -- doc 66's own rule text.
+    if address.is_loopback:
+        return "", True
 
     prohibited_networks = (
         _IPV6_PROHIBITED_NETWORKS
