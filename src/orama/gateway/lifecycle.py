@@ -93,24 +93,35 @@ class GatewayLifecycle:
 
             key = self._idempotency_key(request)
             claim_task = asyncio.create_task(self._store.claim(key))
-            try:
-                existing = await asyncio.shield(claim_task)
-            except asyncio.CancelledError:
-                # The shield prevents caller cancellation from cancelling the
-                # store operation, but the claim may still be paused before it
-                # reserves the key. Wait for the claim to settle before cleanup
-                # so abort() cannot run too early and be followed by a late
-                # reservation that strands the key.
+
+            async def _drain_claim_then_abort() -> None:
+                """Runs to completion regardless of how many times the
+                caller cancels this lifecycle run. Started once as its own
+                Task, then re-awaited under a fresh shield on every retry --
+                a Task.cancel() while awaiting a shield only cancels that
+                await, never the shielded Task itself, so the drain-then-
+                abort sequence keeps making progress underneath repeated
+                cancellation instead of restarting or being abandoned.
+                """
                 try:
-                    await asyncio.shield(claim_task)
+                    await claim_task
                 except Exception:
                     # Cleanup is still safe and idempotent for an unreserved
                     # key, including a claim implementation that fails.
                     pass
-                try:
-                    await asyncio.shield(self._store.abort(key))
-                finally:
-                    claimed = False
+                await self._store.abort(key)
+
+            try:
+                existing = await asyncio.shield(claim_task)
+            except asyncio.CancelledError:
+                claimed = False
+                drain_task = asyncio.ensure_future(_drain_claim_then_abort())
+                while True:
+                    try:
+                        await asyncio.shield(drain_task)
+                        break
+                    except asyncio.CancelledError:
+                        continue
                 raise
             if existing is not None:
                 if not self._stored_state_matches(existing, request, key):

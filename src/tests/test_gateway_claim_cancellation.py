@@ -112,3 +112,41 @@ async def test_cancellation_waits_for_claim_to_settle_before_abort():
 
     assert store.aborts == 1
     assert store.in_progress == set()
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_does_not_bypass_claim_cleanup():
+    """A second Task.cancel() while the first cancellation's cleanup is
+    still draining the claim must not bypass abort(). asyncio.CancelledError
+    is a BaseException, not caught by `except Exception`, so a naive cleanup
+    path can be interrupted mid-drain by repeated cancellation, leaving the
+    key permanently reserved.
+    """
+    store = ClaimBeforeReserveStore()
+    owner = UnreachedOwner()
+    runner = GatewayLifecycle(
+        telos=owner,
+        phylax=Phylax(),
+        agate=owner,
+        claude=owner,
+        store=store,
+        events=EventSink(),
+    )
+
+    task = asyncio.create_task(runner.run(request()))
+    await store.entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    assert not task.done()
+    assert store.aborts == 0
+
+    store.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store.aborts == 1
+    assert store.in_progress == set()
