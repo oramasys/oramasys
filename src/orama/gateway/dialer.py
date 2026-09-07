@@ -277,6 +277,12 @@ class ModelServerDialer:
                     if chosen is None:
                         chosen = answer_text
 
+                # Every path out of the classification loop either returned a
+                # rejection or set `chosen`; assert the invariant so strict
+                # type checkers narrow str | None to str for the connector
+                # protocol (CodeRabbit nitpick on oramasys#3, dialer.py:239).
+                assert chosen is not None
+
                 # Rule 4: the connector is invoked only after every answer in
                 # the answer set passed classification, so no credential-
                 # bearing work can observe a rejected address.

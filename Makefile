@@ -14,13 +14,13 @@ TELOS ?=
 dev-install:
 	$(PYTHON) -m venv .venv
 	.venv/bin/pip install -e $(PERPETUA_CORE)
-	$(if $(TELOS),.venv/bin/pip install -e $(TELOS),)
 	.venv/bin/pip install -e ".[dev]"
+	$(if $(TELOS),.venv/bin/pip install -e $(TELOS),)
 
 install: dev-install
 
 test:
 	.venv/bin/pip install -e $(PERPETUA_CORE) -q
-	$(if $(TELOS),.venv/bin/pip install -e $(TELOS) -q,)
 	.venv/bin/pip install -e ".[dev]" -q
+	$(if $(TELOS),.venv/bin/pip install -e $(TELOS) -q,)
 	.venv/bin/python -m pytest src/tests/ -v
