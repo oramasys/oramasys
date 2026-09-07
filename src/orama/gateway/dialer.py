@@ -36,6 +36,7 @@ or the workstation resolver (doc 65/66 test constraint).
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -61,6 +62,14 @@ REASON_TELOS_ENDPOINT_MISMATCH = "telos_decision_endpoint_mismatch"
 REASON_PURPOSE_OUT_OF_SCOPE = "purpose_not_in_gate4_scope"
 REASON_NO_ANSWERS = "dns_no_answers"
 REASON_CONNECTOR_REFUSED = "connector_refused"
+REASON_DIAL_TIMEOUT = "dial_timeout"
+
+#: Default deadline for DNS resolution + connector I/O combined (Gate 4 scope
+#: is config_read/health_probe -- both lightweight, bounded probes). Without
+#: this, a hung resolver or connector holds the caller's routing-key claim
+#: open indefinitely, since the claim happens before this dial (CodeRabbit
+#: finding on oramasys#3).
+DEFAULT_DIAL_TIMEOUT_SECONDS = 10.0
 
 #: Rejection reasons the dialer produces itself (not connector/Telos text).
 DIALER_REJECTION_REASONS = frozenset(
@@ -71,6 +80,7 @@ DIALER_REJECTION_REASONS = frozenset(
         REASON_TELOS_ENDPOINT_MISMATCH,
         REASON_PURPOSE_OUT_OF_SCOPE,
         REASON_NO_ANSWERS,
+        REASON_DIAL_TIMEOUT,
     }
 )
 
@@ -104,6 +114,7 @@ class ModelServerDialRequest:
     actor_id: str = "gateway_lifecycle"
     workflow_id: str = "gateway_lifecycle"
     run_id: str = ""
+    dial_timeout_seconds: float = DEFAULT_DIAL_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if _validate_purpose(self.purpose) is not None:
@@ -155,42 +166,51 @@ class ModelServerDialer:
         if decision.endpoint != request.endpoint:
             return ModelServerDialResult(False, REASON_TELOS_ENDPOINT_MISMATCH)
 
-        # Rule 1: resolve every answer before any connection is opened.
-        answers = list(await self._resolver(request.endpoint.host))
-        if not answers:
-            return ModelServerDialResult(False, REASON_NO_ANSWERS)
-
-        # Rule 2: classify every answer; one prohibited answer rejects the
-        # whole host before dispatch.
-        local_permitted = request.purpose in LOCAL_PERMITTED_PURPOSES
-        chosen: str | None = None
-        for answer_text in answers:
-            reason, is_local = _classify(answer_text)
-            if reason == REASON_PROHIBITED_ADDRESS:
-                return ModelServerDialResult(False, REASON_PROHIBITED_ADDRESS)
-            if not is_local and not request.allow_public:
-                return ModelServerDialResult(False, REASON_PUBLIC_NOT_PERMITTED)
-            if not is_local and not _endpoint_is_public_declared(request.endpoint):
-                # A public-routable answer for an endpoint asserted private
-                # is a rebinding-shaped contradiction: fail closed.
-                return ModelServerDialResult(False, REASON_PROHIBITED_ADDRESS)
-            if chosen is None:
-                chosen = answer_text
-
-        # Rule 4: the connector is invoked only after every answer in the
-        # answer set passed classification, so no credential-bearing work
-        # can observe a rejected address.
+        # DNS resolution and connector I/O share one deadline so neither a
+        # hung resolver nor a hung connector can hold the caller's routing-
+        # key claim open indefinitely -- the claim happens before dial() is
+        # even called, and this dial has no deadline of its own otherwise
+        # (CodeRabbit finding on oramasys#3).
         try:
-            provider_ref = await self._connector.connect(
-                address=chosen or "",
-                port=request.endpoint.port,
-                purpose=request.purpose,
-            )
-        except Exception:
-            return ModelServerDialResult(False, REASON_CONNECTOR_REFUSED, chosen)
-        return ModelServerDialResult(
-            True, "dialed", resolved_address=chosen, provider_ref=provider_ref
-        )
+            async with asyncio.timeout(request.dial_timeout_seconds):
+                # Rule 1: resolve every answer before any connection is opened.
+                answers = list(await self._resolver(request.endpoint.host))
+                if not answers:
+                    return ModelServerDialResult(False, REASON_NO_ANSWERS)
+
+                # Rule 2: classify every answer; one prohibited answer rejects
+                # the whole host before dispatch.
+                chosen: str | None = None
+                for answer_text in answers:
+                    reason, is_local = _classify(answer_text)
+                    if reason == REASON_PROHIBITED_ADDRESS:
+                        return ModelServerDialResult(False, REASON_PROHIBITED_ADDRESS)
+                    if not is_local and not request.allow_public:
+                        return ModelServerDialResult(False, REASON_PUBLIC_NOT_PERMITTED)
+                    if not is_local and not _endpoint_is_public_declared(request.endpoint):
+                        # A public-routable answer for an endpoint asserted
+                        # private is a rebinding-shaped contradiction: fail
+                        # closed.
+                        return ModelServerDialResult(False, REASON_PROHIBITED_ADDRESS)
+                    if chosen is None:
+                        chosen = answer_text
+
+                # Rule 4: the connector is invoked only after every answer in
+                # the answer set passed classification, so no credential-
+                # bearing work can observe a rejected address.
+                try:
+                    provider_ref = await self._connector.connect(
+                        address=chosen or "",
+                        port=request.endpoint.port,
+                        purpose=request.purpose,
+                    )
+                except Exception:
+                    return ModelServerDialResult(False, REASON_CONNECTOR_REFUSED, chosen)
+                return ModelServerDialResult(
+                    True, "dialed", resolved_address=chosen, provider_ref=provider_ref
+                )
+        except TimeoutError:
+            return ModelServerDialResult(False, REASON_DIAL_TIMEOUT)
 
 
 def _endpoint_is_public_declared(endpoint: EndpointRef) -> bool:

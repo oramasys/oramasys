@@ -192,6 +192,7 @@ class GatewayLifecycle:
                             endpoint=endpoint,
                             purpose=purpose,
                             allow_public=endpoint.is_public,
+                            actor_id=request.gateway_id,
                             run_id=key,
                         )
                     )

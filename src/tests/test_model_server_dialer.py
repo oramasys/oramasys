@@ -6,6 +6,7 @@ real metadata service or depends on the workstation resolver (doc 65/66).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 
 import pytest
@@ -13,6 +14,7 @@ from telos import EndpointPurpose, EndpointRef, EndpointUseRequest
 
 from orama.gateway.dialer import (
     REASON_CONNECTOR_REFUSED,
+    REASON_DIAL_TIMEOUT,
     REASON_NO_ANSWERS,
     REASON_PROHIBITED_ADDRESS,
     REASON_PUBLIC_NOT_PERMITTED,
@@ -249,6 +251,46 @@ async def test_connector_failure_is_reported_not_raised():
     assert result.resolved_address == "127.0.0.1"
 
 
+@dataclass
+class HangingResolver:
+    """CodeRabbit finding: a resolver that never returns must not hold the
+    caller's routing-key claim open indefinitely -- dial() has no deadline
+    of its own, and the claim happens before dial() is even called."""
+
+    async def resolve(self, host: str) -> list[str]:
+        await asyncio.sleep(3600)
+        return []  # pragma: no cover -- never reached
+
+
+@pytest.mark.asyncio
+async def test_dial_times_out_instead_of_hanging_forever_on_a_stuck_resolver():
+    dialer, _, _, connector = make_dialer(resolver=HangingResolver())
+
+    result = await dialer.dial(replace(dial_request(), dial_timeout_seconds=0.05))
+
+    assert not result.allowed
+    assert result.reason_code == REASON_DIAL_TIMEOUT
+    assert connector.calls == []
+
+
+@dataclass
+class HangingConnector:
+    async def connect(self, *, address: str, port: int, purpose: EndpointPurpose) -> str:
+        await asyncio.sleep(3600)
+        return "unreachable"  # pragma: no cover -- never reached
+
+
+@pytest.mark.asyncio
+async def test_dial_times_out_instead_of_hanging_forever_on_a_stuck_connector():
+    resolver = FakeResolver({"ollama.local": ["127.0.0.1"]})
+    dialer, _, _, _ = make_dialer(resolver=resolver, connector=HangingConnector())
+
+    result = await dialer.dial(replace(dial_request(), dial_timeout_seconds=0.05))
+
+    assert not result.allowed
+    assert result.reason_code == REASON_DIAL_TIMEOUT
+
+
 # ---------------------------------------------------------------------------
 # Gate 4 wiring: GatewayLifecycle.run() dials through the dialer
 # ---------------------------------------------------------------------------
@@ -311,6 +353,25 @@ async def test_lifecycle_fails_closed_when_dial_resolves_prohibited_address():
     assert (result.status, result.reason_code) == ("denied", REASON_PROHIBITED_ADDRESS)
     assert connector.calls == []
     assert claude.calls == 0  # readiness never started
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_dial_uses_gateway_id_as_the_authorizing_actor():
+    """CodeRabbit finding: the dial request must carry the same actor Telos
+    already authorized against (request.gateway_id), not the dataclass
+    default -- otherwise the fresh dial authorization silently authorizes a
+    different actor than the one the caller actually is."""
+    resolver = FakeResolver({"127.0.0.1": ["127.0.0.1"]})
+    runner, _, telos, _, _ = lifecycle_with_dialer(resolver=resolver)
+
+    result = await runner.run(gateway_request())
+
+    assert result.status == "ready"
+    # 4 calls: config/health authorize (pre-dial) + config/health dial-time
+    # re-authorize -- every one of them must carry the caller's real actor,
+    # not the dialer's own dataclass default.
+    assert len(telos.calls) == 4
+    assert all(c.actor_id == "local-model-gateway" for c in telos.calls)
 
 
 @pytest.mark.asyncio
