@@ -121,11 +121,16 @@ REASON_DIAL_TIMEOUT = "dial_timeout"
 REASON_TELOS_DECISION_EXPIRED = "telos_decision_expired"
 
 # These ranges are neither ordinary local addresses nor ordinary public
-# endpoints. Teredo and 6to4 encode or route through other addresses; shared
-# carrier space is not a caller-controlled local network. Reject all three
+# endpoints. Teredo and 6to4 encode or route through other addresses; the
+# 6to4 relay anycast prefix (192.88.99.0/24, RFC 3068/7526) is shared
+# infrastructure that any attacker-adjacent network can answer on; shared
+# carrier space is not a caller-controlled local network. Reject all four
 # rather than letting Python's broad ``is_private`` classification decide a
 # model-server egress boundary.
-_IPV4_PROHIBITED_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"),)
+_IPV4_PROHIBITED_NETWORKS = (
+    ipaddress.ip_network("100.64.0.0/10"),   # CGNAT (RFC 6598)
+    ipaddress.ip_network("192.88.99.0/24"),  # 6to4 relay anycast (RFC 3068/7526)
+)
 _IPV6_PROHIBITED_NETWORKS = (
     ipaddress.ip_network("2001::/32"),  # Teredo
     ipaddress.ip_network("2002::/16"),  # 6to4
