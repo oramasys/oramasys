@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 
+from telos import EndpointPurpose, EndpointUseRequest
+
 from orama.gateway.contracts import (
     AgatePort,
     ClaudeProviderPort,
@@ -138,15 +140,27 @@ class GatewayLifecycle:
             claimed = True
 
             config = await self._telos.authorize(
-                purpose="config", endpoint=request.config_endpoint
+                EndpointUseRequest(
+                    actor_id=request.gateway_id,
+                    workflow_id="gateway_lifecycle",
+                    purpose=EndpointPurpose.CONFIG_READ,
+                    endpoint=request.config_endpoint,
+                    run_id=key,
+                )
             )
-            if not config.allowed or not config.endpoint_ref:
+            if not config.allowed:
                 return await fail("denied", config.reason_code)
 
             health = await self._telos.authorize(
-                purpose="health", endpoint=request.health_endpoint
+                EndpointUseRequest(
+                    actor_id=request.gateway_id,
+                    workflow_id="gateway_lifecycle",
+                    purpose=EndpointPurpose.HEALTH_PROBE,
+                    endpoint=request.health_endpoint,
+                    run_id=key,
+                )
             )
-            if not health.allowed or not health.endpoint_ref:
+            if not health.allowed:
                 return await fail("denied", health.reason_code)
             await emit(
                 "endpoints_authorized",
@@ -192,8 +206,8 @@ class GatewayLifecycle:
                     readiness = await self._claude.ensure_ready(
                         provider_kind=request.provider_kind,
                         placement_ref=placement.placement_ref,
-                        config_endpoint_ref=config.endpoint_ref,
-                        health_endpoint_ref=health.endpoint_ref,
+                        config_endpoint=config.endpoint,
+                        health_endpoint=health.endpoint,
                         timeout_seconds=request.readiness_timeout_seconds,
                     )
             except TimeoutError:
@@ -216,8 +230,8 @@ class GatewayLifecycle:
                 provider_ref=readiness.provider_ref,
                 placement_ref=placement.placement_ref,
                 placement_policy_version=placement.policy_version,
-                config_endpoint_ref=config.endpoint_ref,
-                health_endpoint_ref=health.endpoint_ref,
+                config_endpoint=config.endpoint,
+                health_endpoint=health.endpoint,
                 config_telos_policy_version=config.policy_version,
                 health_telos_policy_version=health.policy_version,
                 artifact_decision_ref=artifact.decision_ref,

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from pydantic import ValidationError
+from telos import EndpointPurpose, EndpointRef, EndpointUseDecision, EndpointUseRequest
 
 from orama.gateway.compat import PerpetuaToolsGatewayFacade
 from orama.gateway.contracts import (
@@ -18,7 +19,6 @@ from orama.gateway.contracts import (
     PlacementDecision,
     ProviderReadiness,
     RoutingState,
-    TelosDecision,
 )
 from orama.gateway.lifecycle import GatewayLifecycle
 
@@ -104,14 +104,15 @@ class MutatingEventSink(EventSink):
 @dataclass
 class TelosFake:
     allowed: bool = True
-    calls: list[tuple[str, str]] = field(default_factory=list)
+    calls: list[EndpointUseRequest] = field(default_factory=list)
 
-    async def authorize(self, *, purpose: str, endpoint: str) -> TelosDecision:
-        self.calls.append((purpose, endpoint))
-        return TelosDecision(
+    async def authorize(self, request: EndpointUseRequest) -> EndpointUseDecision:
+        self.calls.append(request)
+        return EndpointUseDecision(
             allowed=self.allowed,
             policy_version="telos-v1",
-            endpoint_ref=f"telos:{purpose}",
+            decision_ref=f"telos:{request.purpose}",
+            endpoint=request.endpoint,
             reason_code="allowed" if self.allowed else "endpoint_denied",
         )
 
@@ -179,8 +180,8 @@ class ClaudeFake:
         *,
         provider_kind: str,
         placement_ref: str,
-        config_endpoint_ref: str,
-        health_endpoint_ref: str,
+        config_endpoint: EndpointRef,
+        health_endpoint: EndpointRef,
         timeout_seconds: int,
     ) -> ProviderReadiness:
         self.calls += 1
@@ -215,11 +216,30 @@ def request(*, consent: bool = True, version: str = "1.2.3") -> GatewayLifecycle
             digest="sha256:" + "a" * 64,
         ),
         provider_kind="ollama",
-        config_endpoint="http://127.0.0.1:18789/config",
-        health_endpoint="http://127.0.0.1:18789/health",
+        config_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
+        health_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
         model_hint="qwen3.5:9b",
         readiness_timeout_seconds=30,
     )
+
+
+def test_gateway_request_uses_canonical_normalized_endpoint_refs() -> None:
+    payload = request().model_dump()
+    config_endpoint = EndpointRef("http", "127.0.0.1", 18789, is_public=False)
+    health_endpoint = EndpointRef("http", "127.0.0.1", 18789, is_public=False)
+    payload.update(
+        config_endpoint=config_endpoint,
+        health_endpoint=health_endpoint,
+    )
+
+    gateway_request = GatewayLifecycleRequest(**payload)
+
+    assert gateway_request.config_endpoint == config_endpoint
+    assert gateway_request.health_endpoint == health_endpoint
+
+    payload["config_endpoint"] = "http://127.0.0.1:18789/config"
+    with pytest.raises(ValidationError):
+        GatewayLifecycleRequest(**payload)
 
 
 def lifecycle(
@@ -292,10 +312,16 @@ async def test_success_uses_each_semantic_owner_and_materializes_routing_state()
     assert result.routing_state is not None
     assert result.routing_state.provider_ref == "claude:ollama"
     assert result.routing_state.placement_ref == "agate:local-gpu"
-    assert telos.calls == [
-        ("config", "http://127.0.0.1:18789/config"),
-        ("health", "http://127.0.0.1:18789/health"),
+    assert [call.purpose for call in telos.calls] == [
+        EndpointPurpose.CONFIG_READ,
+        EndpointPurpose.HEALTH_PROBE,
     ]
+    assert [call.endpoint for call in telos.calls] == [
+        request().config_endpoint,
+        request().health_endpoint,
+    ]
+    assert {call.actor_id for call in telos.calls} == {"local-model-gateway"}
+    assert {call.workflow_id for call in telos.calls} == {"gateway_lifecycle"}
     assert (phylax.artifact_calls, phylax.admission_calls) == (1, 1)
     assert (agate.calls, claude.calls, store.saves) == (1, 1, 1)
     assert [event.sequence for event in sink.events] == list(range(1, len(sink.events) + 1))

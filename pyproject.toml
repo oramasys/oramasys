@@ -9,6 +9,7 @@ description = "Hardware-aware multi-agent orchestration system (oramasys graph +
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
+    "oramasys-telos>=0.1.0a1",
     "perpetua-core>=2.0.0-alpha.1",
     "fastapi>=0.110",
     "pydantic>=2,<3",

@@ -31,7 +31,13 @@ make test             # pytest src/tests
 bin/serve             # run the API (uvicorn, reads from src/)
 ```
 
-Requires Python ≥ 3.11 and a sibling `../perpetua-core` checkout.
+Requires Python ≥ 3.11 and sibling `../perpetua-core` and `../telos` checkouts.
+Both are pre-release, unpublished packages (`telos` has no remote yet — see
+`docs/superpowers/plans/2026-09-01-gateway-lifecycle.md`), installed
+editable by `make dev-install`/`make test`, matching the existing
+`perpetua-core` sibling-checkout convention rather than a real PyPI
+resolution — `pyproject.toml`'s `oramasys-telos>=0.1.0a1` entry documents the
+expected version, it is not independently installable.
 
 ## Gateway Lifecycle
 
