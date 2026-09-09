@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 
 import pytest
 from pydantic import ValidationError
-from telos import EndpointPurpose, EndpointRef, EndpointUseDecision, EndpointUseRequest
+from telos import (
+    ConnectedPeer,
+    EndpointPurpose,
+    EndpointRef,
+    EndpointUseDecision,
+    EndpointUseRequest,
+)
 
 from orama.gateway.compat import PerpetuaToolsGatewayFacade
 from orama.gateway.contracts import (
@@ -20,6 +26,7 @@ from orama.gateway.contracts import (
     ProviderReadiness,
     RoutingState,
 )
+from orama.gateway.dialer import ModelServerDialer
 from orama.gateway.lifecycle import GatewayLifecycle
 
 
@@ -61,10 +68,7 @@ class FailingClaimStore(MemoryStore):
 
 @dataclass
 class SlowClaimStore(MemoryStore):
-    """Reserves the key immediately (like a real store would), then blocks
-    before returning -- so a cancellation can land in the window between the
-    store committing the reservation and the lifecycle's claim() await
-    resuming. Reproduces the exact race the cancellation-safety fix closes."""
+    """Reserve the key immediately, then block before returning."""
 
     entered_claim: asyncio.Event | None = None
     release_claim: asyncio.Event | None = None
@@ -75,7 +79,7 @@ class SlowClaimStore(MemoryStore):
                 await self._condition.wait()
             if key in self.states:
                 return self.states[key]
-            self.in_progress.add(key)  # reservation committed here
+            self.in_progress.add(key)
         if self.entered_claim is not None:
             self.entered_claim.set()
         if self.release_claim is not None:
@@ -115,6 +119,33 @@ class TelosFake:
             endpoint=request.endpoint,
             reason_code="allowed" if self.allowed else "endpoint_denied",
         )
+
+
+@dataclass
+class GatewayResolverFake:
+    calls: list[str] = field(default_factory=list)
+
+    async def resolve(self, host: str) -> list[str]:
+        self.calls.append(host)
+        return [host] if host == "127.0.0.1" else ["127.0.0.1"]
+
+
+@dataclass
+class GatewayConnectorFake:
+    calls: list[tuple[EndpointRef, str, EndpointPurpose, float]] = field(
+        default_factory=list
+    )
+
+    async def connect(
+        self,
+        *,
+        endpoint: EndpointRef,
+        pinned_address: str,
+        purpose: EndpointPurpose,
+        timeout_seconds: float,
+    ) -> ConnectedPeer:
+        self.calls.append((endpoint, pinned_address, purpose, timeout_seconds))
+        return ConnectedPeer("gateway:dial", pinned_address)
 
 
 @dataclass
@@ -216,8 +247,8 @@ def request(*, consent: bool = True, version: str = "1.2.3") -> GatewayLifecycle
             digest="sha256:" + "a" * 64,
         ),
         provider_kind="openclaw_gateway",
-        config_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
-        health_endpoint=EndpointRef("http", "127.0.0.1", 18789, is_public=False),
+        config_endpoint=EndpointRef("http", "127.0.0.1", 18789),
+        health_endpoint=EndpointRef("http", "127.0.0.1", 18789),
         model_hint="qwen3.5:9b",
         readiness_timeout_seconds=30,
     )
@@ -225,12 +256,9 @@ def request(*, consent: bool = True, version: str = "1.2.3") -> GatewayLifecycle
 
 def test_gateway_request_uses_canonical_normalized_endpoint_refs() -> None:
     payload = request().model_dump()
-    config_endpoint = EndpointRef("http", "127.0.0.1", 18789, is_public=False)
-    health_endpoint = EndpointRef("http", "127.0.0.1", 18789, is_public=False)
-    payload.update(
-        config_endpoint=config_endpoint,
-        health_endpoint=health_endpoint,
-    )
+    config_endpoint = EndpointRef("http", "127.0.0.1", 18789)
+    health_endpoint = EndpointRef("http", "127.0.0.1", 18789)
+    payload.update(config_endpoint=config_endpoint, health_endpoint=health_endpoint)
 
     gateway_request = GatewayLifecycleRequest(**payload)
 
@@ -250,7 +278,15 @@ def lifecycle(
     claude: ClaudeFake | None = None,
     store: MemoryStore | None = None,
     sink: EventSink | None = None,
-) -> tuple[GatewayLifecycle, TelosFake, PhylaxFake, AgateFake, ClaudeFake, MemoryStore, EventSink]:
+) -> tuple[
+    GatewayLifecycle,
+    TelosFake,
+    PhylaxFake,
+    AgateFake,
+    ClaudeFake,
+    MemoryStore,
+    EventSink,
+]:
     ports = (
         telos or TelosFake(),
         phylax or PhylaxFake(),
@@ -259,6 +295,11 @@ def lifecycle(
         store or MemoryStore(),
         sink or EventSink(),
     )
+    resolver = GatewayResolverFake()
+    connector = GatewayConnectorFake()
+    dialer = ModelServerDialer(
+        telos=ports[0], resolver=resolver.resolve, connector=connector
+    )
     return GatewayLifecycle(
         telos=ports[0],
         phylax=ports[1],
@@ -266,6 +307,7 @@ def lifecycle(
         claude=ports[3],
         store=ports[4],
         events=ports[5],
+        dialer=dialer,
     ), *ports
 
 
@@ -316,7 +358,7 @@ async def test_success_uses_each_semantic_owner_and_materializes_routing_state()
         EndpointPurpose.CONFIG_READ,
         EndpointPurpose.HEALTH_PROBE,
     ]
-    assert [call.endpoint for call in telos.calls] == [
+    assert [call.endpoint.endpoint for call in telos.calls] == [
         request().config_endpoint,
         request().health_endpoint,
     ]
@@ -394,9 +436,6 @@ async def test_consent_must_match_the_exact_artifact_version():
 
 @pytest.mark.asyncio
 async def test_consent_must_match_the_exact_artifact_digest():
-    """Regression test: OperatorConsent previously scoped only artifact_id +
-    version, so a same-version artifact swap with a different digest was not
-    caught by consent (CodeRabbit finding, CWE-863 on oramasys/oramasys#1)."""
     runner, telos, phylax, agate, claude, store, _ = lifecycle()
     mismatched = request().model_copy(
         update={
@@ -422,7 +461,10 @@ async def test_telos_denial_stops_without_admission_or_provider_fallback():
 
     result = await runner.run(request())
 
-    assert (result.status, result.reason_code) == ("denied", "endpoint_denied")
+    assert (result.status, result.reason_code) == (
+        "denied",
+        "telos_denied:endpoint_denied",
+    )
     assert (phylax.artifact_calls, agate.calls, claude.calls, store.saves) == (0, 0, 0, 0)
 
 
@@ -496,29 +538,15 @@ async def test_cancellation_releases_claim_so_a_waiter_can_retry():
 
 @pytest.mark.asyncio
 async def test_cancellation_during_claim_reservation_still_releases_the_key():
-    """The store commits its reservation (adds the key to in_progress)
-    BEFORE the lifecycle's `await self._store.claim(key)` resumes. A
-    cancellation delivered in that exact window previously left `claimed`
-    False, so the CancelledError handler skipped abort() and the key was
-    stranded forever -- a later identical request would block indefinitely.
-
-    The current implementation (commit 7dfdb6b, "close review remediation
-    gaps") waits for the shielded claim task to actually settle before
-    calling abort(), rather than aborting immediately on cancellation --
-    closing a narrower race the earlier asyncio.shield-only fix left open
-    (abort() racing ahead of a claim that reserves the key moments later).
-    That means release_claim must be set BEFORE awaiting the cancelled task,
-    not after: the run() task's own cancellation handling is blocked on the
-    claim task settling, so awaiting `cancelled` first would deadlock."""
     entered_claim = asyncio.Event()
     release_claim = asyncio.Event()
     store = SlowClaimStore(entered_claim=entered_claim, release_claim=release_claim)
     runner, _, _, _, claude, _, _ = lifecycle(store=store)
 
     cancelled = asyncio.create_task(runner.run(request()))
-    await entered_claim.wait()  # store has committed the reservation now
+    await entered_claim.wait()
     cancelled.cancel()
-    release_claim.set()  # let the in-flight claim() call settle so cleanup can proceed
+    release_claim.set()
     with pytest.raises(asyncio.CancelledError):
         await cancelled
 
@@ -585,39 +613,31 @@ async def test_pt_facade_propagates_denial_without_legacy_fallback():
 
     result = await facade.run(request())
 
-    assert (result.status, result.reason_code) == ("denied", "endpoint_denied")
+    assert (result.status, result.reason_code) == (
+        "denied",
+        "telos_denied:endpoint_denied",
+    )
     assert len(telos.calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_repeated_cancellation_does_not_bypass_claim_cleanup():
-    """CodeRabbit finding: a SECOND Task.cancel() lands while the
-    cancellation handler is itself awaiting the shielded claim_task drain.
-    asyncio.CancelledError is a BaseException, not an Exception, so the
-    prior code's `except Exception: pass` around that inner await did NOT
-    catch it -- the second cancellation propagated straight past both the
-    claim_task drain AND the abort(key) call below it, silently skipping
-    cleanup. Reproduces CodeRabbit's own repro shape but against the real
-    GatewayLifecycle/SlowClaimStore harness instead of a standalone script."""
     entered_claim = asyncio.Event()
     release_claim = asyncio.Event()
     store = SlowClaimStore(entered_claim=entered_claim, release_claim=release_claim)
     runner, _, _, _, claude, _, _ = lifecycle(store=store)
 
     cancelled = asyncio.create_task(runner.run(request()))
-    await entered_claim.wait()  # store has committed the reservation now
+    await entered_claim.wait()
 
     cancelled.cancel()
-    await asyncio.sleep(0)  # let the first cancellation reach the handler
-    cancelled.cancel()  # second cancellation, while the handler awaits cleanup
+    await asyncio.sleep(0)
+    cancelled.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await cancelled
 
-    release_claim.set()  # let the (still-running, shielded) claim() settle
-
-    # Give the shielded cleanup task -- detached from the outer task's own
-    # cancellation by the fix -- a few turns to actually finish running.
+    release_claim.set()
     for _ in range(5):
         await asyncio.sleep(0)
 
