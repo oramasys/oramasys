@@ -82,11 +82,20 @@ not provide a trusted `is_public` classification bit. Operator/application
 intent to permit public model-server access remains separate as
 `allow_public_model_servers` and is passed to Telos as transport policy.
 
-## Dependency pin
+## Dependency pin and immutable migration evidence
 
 Oramasys pins Telos to the exact verified restoration/secure-dial head rather
 than the superseded semantic-only Telos scaffold. Update this document and the
-pin together if subsequent review remediation changes the verified Telos head.
+pin together if subsequent remediation changes the verified Telos head.
+
+- Telos verified head and dependency pin: `19810d0493344aa507c29c462f68afbc1b98ecf8`.
+- Oramasys verified implementation/remediation head: `0639578fe63c9681b4ee35b6e4abab69483a5d64`.
+
+The Oramasys value identifies the immutable implementation state immediately
+before this evidence-only documentation update. A later PR tip may therefore
+advance for documentation or review bookkeeping without changing the recorded
+implementation evidence; any implementation change requires refreshing this
+record after re-verification.
 
 ## Verification requirements
 
