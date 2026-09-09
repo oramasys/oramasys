@@ -156,10 +156,16 @@ class ModelServerDialer:
 
 
 def _validate_application_capability(request: ModelServerDialRequest) -> str | None:
+    purpose_allowed = PURPOSE_ALLOWED_TRANSPORT_PORTS[request.purpose]
+    provider_allowed = _PROVIDER_ALLOWED_TRANSPORT_PORTS[request.provider_kind]
+    allowed_schemes = {scheme for scheme, _ in purpose_allowed & provider_allowed}
+    if request.endpoint.scheme not in allowed_schemes:
+        return REASON_TRANSPORT_NOT_PERMITTED
+
     transport_port = request.endpoint.scheme, request.endpoint.port
-    if transport_port not in PURPOSE_ALLOWED_TRANSPORT_PORTS[request.purpose]:
+    if transport_port not in purpose_allowed:
         return REASON_PORT_NOT_PERMITTED
-    if transport_port not in _PROVIDER_ALLOWED_TRANSPORT_PORTS[request.provider_kind]:
+    if transport_port not in provider_allowed:
         return REASON_PORT_NOT_PERMITTED
     return None
 
@@ -167,8 +173,9 @@ def _validate_application_capability(request: ModelServerDialRequest) -> str | N
 def _translate_result(result: SecureDialResult) -> ModelServerDialResult:
     reason = _translate_reason(result.reason_code)
     resolved_address = None
-    if result.endpoint_identity is not None:
-        resolved_address = result.endpoint_identity.resolved_addresses[0]
+    identity = result.endpoint_identity
+    if identity is not None and identity.resolved_addresses:
+        resolved_address = identity.resolved_addresses[0]
     policy_version = result.decision.policy_version if result.decision is not None else None
     decision_ref = result.decision.decision_ref if result.decision is not None else None
     return ModelServerDialResult(
