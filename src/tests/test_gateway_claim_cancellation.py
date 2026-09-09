@@ -52,7 +52,7 @@ class Phylax:
 
 
 class UnreachedOwner:
-    async def authorize(self, *, purpose, endpoint):
+    async def authorize(self, request):
         raise AssertionError("claim-interleaving test must stop before Telos")
 
     async def resolve_placement(self, *, provider_kind, model_hint):
@@ -60,6 +60,11 @@ class UnreachedOwner:
 
     async def ensure_ready(self, **kwargs):
         raise AssertionError("claim-interleaving test must stop before provider")
+
+
+class UnreachedDialer:
+    async def dial(self, request):
+        raise AssertionError("claim-interleaving test must stop before Telos dial")
 
 
 def request() -> GatewayLifecycleRequest:
@@ -78,30 +83,34 @@ def request() -> GatewayLifecycleRequest:
             digest=digest,
         ),
         provider_kind="ollama",
-        config_endpoint=EndpointRef("http", "127.0.0.1", 11434, is_public=False),
-        health_endpoint=EndpointRef("http", "127.0.0.1", 11434, is_public=False),
+        config_endpoint=EndpointRef("http", "127.0.0.1", 11434),
+        health_endpoint=EndpointRef("http", "127.0.0.1", 11434),
         readiness_timeout_seconds=30,
     )
 
 
-@pytest.mark.asyncio
-async def test_cancellation_waits_for_claim_to_settle_before_abort():
-    store = ClaimBeforeReserveStore()
+def runner(store: ClaimBeforeReserveStore) -> GatewayLifecycle:
     owner = UnreachedOwner()
-    runner = GatewayLifecycle(
+    return GatewayLifecycle(
         telos=owner,
         phylax=Phylax(),
         agate=owner,
         claude=owner,
         store=store,
         events=EventSink(),
+        dialer=UnreachedDialer(),
     )
 
-    task = asyncio.create_task(runner.run(request()))
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_claim_to_settle_before_abort():
+    store = ClaimBeforeReserveStore()
+    gateway = runner(store)
+
+    task = asyncio.create_task(gateway.run(request()))
     await store.entered.wait()
     task.cancel()
 
-    # Cancellation must not finish while claim() can still reserve the key.
     await asyncio.sleep(0)
     assert not task.done()
     assert store.aborts == 0
@@ -116,30 +125,10 @@ async def test_cancellation_waits_for_claim_to_settle_before_abort():
 
 @pytest.mark.asyncio
 async def test_repeated_cancellation_does_not_bypass_claim_cleanup():
-    """A second Task.cancel() while the first cancellation's cleanup is
-    still draining the claim must not bypass abort(). asyncio.CancelledError
-    is a BaseException, not caught by `except Exception`, so a naive cleanup
-    path (drain and abort as two separate shielded awaits) can let a second
-    cancellation skip straight past the abort() call, never invoking it at
-    all -- not even eventually. The fix combines drain+abort into one
-    coroutine so abort() is always reached once shielded, regardless of how
-    many further cancellations land on the *outer* await; a later
-    cancellation can only interrupt this test's own wait on that detached
-    cleanup task, never the task itself, so cleanup still completes and is
-    observable after giving the event loop a few more turns.
-    """
     store = ClaimBeforeReserveStore()
-    owner = UnreachedOwner()
-    runner = GatewayLifecycle(
-        telos=owner,
-        phylax=Phylax(),
-        agate=owner,
-        claude=owner,
-        store=store,
-        events=EventSink(),
-    )
+    gateway = runner(store)
 
-    task = asyncio.create_task(runner.run(request()))
+    task = asyncio.create_task(gateway.run(request()))
     await store.entered.wait()
     task.cancel()
     await asyncio.sleep(0)
