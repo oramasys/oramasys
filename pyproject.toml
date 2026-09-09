@@ -10,7 +10,7 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "oramasys-telos @ git+https://github.com/oramasys/telos.git@19810d0493344aa507c29c462f68afbc1b98ecf8",
-    "perpetua-core>=2.0.0-alpha.1",
+    "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@86225fa5c974ab2fe0b65d228a2b31888aaa440c",
     "fastapi>=0.110",
     "pydantic>=2,<3",
     "uvicorn[standard]>=0.29",
@@ -34,6 +34,6 @@ testpaths = ["src/tests"]
 packages = ["src/orama"]
 
 [tool.hatch.metadata]
-# Required for the oramasys-telos git+https direct reference above: hatchling
-# refuses a direct-reference dependency in [project.dependencies] otherwise.
+# Required for the immutable git+https direct references above: hatchling
+# refuses direct-reference dependencies in [project.dependencies] otherwise.
 allow-direct-references = true
