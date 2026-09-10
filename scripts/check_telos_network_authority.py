@@ -27,12 +27,6 @@ _BANNED_IMPORT_ROOTS = frozenset(
         "asyncssh",
     }
 )
-_BANNED_FROM_IMPORTS = frozenset(
-    {
-        ("urllib", "request"),
-        ("http", "client"),
-    }
-)
 _BANNED_NETWORK_COMMANDS = frozenset(
     {"curl", "wget", "nc", "ncat", "ssh", "scp", "sftp"}
 )
@@ -57,11 +51,7 @@ def _matches_banned_import(name: str) -> bool:
 
 
 def _build_alias_map(tree: ast.AST) -> dict[str, str]:
-    """Map each locally-bound name to its canonical dotted path, so a call
-    site can be resolved back to what it actually targets regardless of
-    aliasing -- ``import subprocess as sp`` then ``sp.run(...)``, or
-    ``from subprocess import run as r`` then ``r(...)``, both resolve to
-    ``subprocess.run`` exactly like an unaliased call would."""
+    """Map locally-bound names to canonical dotted paths for call analysis."""
     alias_map: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -70,6 +60,8 @@ def _build_alias_map(tree: ast.AST) -> dict[str, str]:
                 alias_map[local] = alias.name
         elif isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
+                if alias.name == "*":
+                    continue
                 local = alias.asname or alias.name
                 alias_map[local] = f"{node.module}.{alias.name}"
     return alias_map
@@ -118,13 +110,16 @@ def scan_file(path: Path) -> list[Violation]:
                 )
                 continue
             for alias in node.names:
-                if (module, alias.name) in _BANNED_FROM_IMPORTS:
+                if alias.name == "*":
+                    continue
+                qualified = f"{module}.{alias.name}" if module else alias.name
+                if _matches_banned_import(qualified):
                     violations.append(
                         Violation(
                             path,
                             node.lineno,
                             "raw-network-import",
-                            f"{module}.{alias.name}",
+                            qualified,
                         )
                     )
 

@@ -18,14 +18,8 @@ def _write(tmp_path: Path, relative: str, content: str) -> Path:
 
 
 def test_guard_rejects_httpx_in_production(tmp_path: Path) -> None:
-    source = _write(
-        tmp_path,
-        "src/orama/provider.py",
-        "import httpx\n",
-    )
-
+    source = _write(tmp_path, "src/orama/provider.py", "import httpx\n")
     violations = scan_tree(tmp_path / "src/orama")
-
     assert any(
         v.rule == "raw-network-import" and v.path == source and v.detail == "httpx"
         for v in violations
@@ -33,59 +27,58 @@ def test_guard_rejects_httpx_in_production(tmp_path: Path) -> None:
 
 
 def test_guard_rejects_from_urllib_request_import(tmp_path: Path) -> None:
+    _write(tmp_path, "src/orama/provider.py", "from urllib import request\n")
+    violations = scan_tree(tmp_path / "src/orama")
+    assert any(v.detail == "urllib.request" for v in violations)
+
+
+def test_guard_rejects_aliased_qualified_from_import(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "src/orama/provider.py",
-        "from urllib import request\n",
+        "from urllib import request as urlrequest\n",
     )
-
     violations = scan_tree(tmp_path / "src/orama")
-
     assert any(v.detail == "urllib.request" for v in violations)
+
+
+def test_guard_rejects_http_client_from_import(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "src/orama/provider.py",
+        "from http import client as http_client\n",
+    )
+    violations = scan_tree(tmp_path / "src/orama")
+    assert any(v.detail == "http.client" for v in violations)
 
 
 def test_guard_rejects_subprocess_curl(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "src/orama/provider.py",
-        "import subprocess\n"
-        "subprocess.run(['curl', 'https://example.com'], check=True)\n",
+        "import subprocess\nsubprocess.run(['curl', 'https://example.com'], check=True)\n",
     )
-
     violations = scan_tree(tmp_path / "src/orama")
-
     assert any(v.rule == "raw-network-command" and v.detail == "curl" for v in violations)
 
 
 def test_guard_rejects_aliased_subprocess_module(tmp_path: Path) -> None:
-    """Confirmed directly against the pre-fix scanner: import subprocess as sp
-    then sp.run(...) was invisible to it entirely -- the old _call_name check
-    compared the literal name "subprocess", which never matched "sp"."""
     _write(
         tmp_path,
         "src/orama/provider.py",
-        "import subprocess as sp\n"
-        "sp.run(['curl', 'https://example.com'], check=True)\n",
+        "import subprocess as sp\nsp.run(['curl', 'https://example.com'], check=True)\n",
     )
-
     violations = scan_tree(tmp_path / "src/orama")
-
     assert any(v.rule == "raw-network-command" and v.detail == "curl" for v in violations)
 
 
 def test_guard_rejects_aliased_subprocess_function_import(tmp_path: Path) -> None:
-    """Confirmed directly against the pre-fix scanner: from subprocess import
-    run as r then r(...) was also invisible -- func wasn't even an
-    ast.Attribute, so the old check returned None and skipped it."""
     _write(
         tmp_path,
         "src/orama/provider.py",
-        "from subprocess import run as r\n"
-        "r(['wget', 'https://example.com'], check=True)\n",
+        "from subprocess import run as r\nr(['wget', 'https://example.com'], check=True)\n",
     )
-
     violations = scan_tree(tmp_path / "src/orama")
-
     assert any(v.rule == "raw-network-command" and v.detail == "wget" for v in violations)
 
 
@@ -93,22 +86,14 @@ def test_guard_rejects_shell_string_network_command(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "src/orama/provider.py",
-        "import subprocess\n"
-        "subprocess.run('wget https://example.com', shell=True, check=True)\n",
+        "import subprocess\nsubprocess.run('wget https://example.com', shell=True, check=True)\n",
     )
-
     violations = scan_tree(tmp_path / "src/orama")
-
     assert any(v.rule == "raw-network-command" and v.detail == "wget" for v in violations)
 
 
 def test_guard_allows_telos_transport_import(tmp_path: Path) -> None:
-    _write(
-        tmp_path,
-        "src/orama/provider.py",
-        "from telos import SecureDialer\n",
-    )
-
+    _write(tmp_path, "src/orama/provider.py", "from telos import SecureDialer\n")
     assert scan_tree(tmp_path / "src/orama") == []
 
 
@@ -117,7 +102,6 @@ def test_guard_does_not_scan_test_tree(tmp_path: Path) -> None:
     prod.mkdir(parents=True)
     (prod / "__init__.py").write_text("", encoding="utf-8")
     _write(tmp_path, "src/tests/test_api.py", "import httpx\n")
-
     assert scan_tree(prod) == []
 
 
