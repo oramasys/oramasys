@@ -56,13 +56,33 @@ def _matches_banned_import(name: str) -> bool:
     )
 
 
-def _call_name(node: ast.Call) -> tuple[str, str] | None:
+def _build_alias_map(tree: ast.AST) -> dict[str, str]:
+    """Map each locally-bound name to its canonical dotted path, so a call
+    site can be resolved back to what it actually targets regardless of
+    aliasing -- ``import subprocess as sp`` then ``sp.run(...)``, or
+    ``from subprocess import run as r`` then ``r(...)``, both resolve to
+    ``subprocess.run`` exactly like an unaliased call would."""
+    alias_map: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name
+                alias_map[local] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                local = alias.asname or alias.name
+                alias_map[local] = f"{node.module}.{alias.name}"
+    return alias_map
+
+
+def _resolve_call(node: ast.Call, alias_map: dict[str, str]) -> str | None:
     func = node.func
-    if not isinstance(func, ast.Attribute):
-        return None
-    if not isinstance(func.value, ast.Name):
-        return None
-    return func.value.id, func.attr
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        base = alias_map.get(func.value.id, func.value.id)
+        return f"{base}.{func.attr}"
+    if isinstance(func, ast.Name):
+        return alias_map.get(func.id)
+    return None
 
 
 def _literal_command(node: ast.AST) -> str | None:
@@ -80,6 +100,7 @@ def _literal_command(node: ast.AST) -> str | None:
 def scan_file(path: Path) -> list[Violation]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     violations: list[Violation] = []
+    alias_map = _build_alias_map(tree)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -108,10 +129,11 @@ def scan_file(path: Path) -> list[Violation]:
                     )
 
         elif isinstance(node, ast.Call):
-            called = _call_name(node)
-            if called is None or called[0] != "subprocess":
+            resolved = _resolve_call(node, alias_map)
+            if resolved is None or not resolved.startswith("subprocess."):
                 continue
-            if called[1] not in _SUBPROCESS_METHODS or not node.args:
+            method = resolved.removeprefix("subprocess.")
+            if method not in _SUBPROCESS_METHODS or not node.args:
                 continue
             executable = _literal_command(node.args[0])
             if executable in _BANNED_NETWORK_COMMANDS:

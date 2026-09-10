@@ -30,6 +30,12 @@ class ProviderInvocationRequest:
             raise ValueError("model is required")
         if not self.run_id.strip():
             raise ValueError("run_id is required")
+        # A caller-supplied list is stored by reference; without coercing to
+        # a real tuple here, mutating that list after construction silently
+        # changes what this "frozen" request contains. Confirmed directly
+        # before this fix: appending to the original list after
+        # construction was reflected in .messages despite frozen=True.
+        object.__setattr__(self, "messages", tuple(self.messages))
 
 
 @dataclass(frozen=True, slots=True)

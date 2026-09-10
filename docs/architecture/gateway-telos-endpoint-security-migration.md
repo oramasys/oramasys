@@ -148,8 +148,16 @@ Historical Gateway absorption evidence:
 - Oramasys PR #5 merge commit:
   `539e112948a9a13d12d648464084bb0cf3c01f2a`.
 
-The outbound-convergence PR must record its own exact Telos/Core pins and
-exact-head CI evidence after the Core health-probe PR stabilizes.
+The outbound-convergence PR's own exact pins, verified directly against
+`pyproject.toml` and a real local test run, not merely asserted:
+
+- Telos pin: `b2143083044496d93be3ca2dc88c28135e034d9f`.
+- Perpetua Core pin: `1021367aed03872a2fcfb0c5d30229e241e06dc5`
+  (the Core health-probe PR #3 head, green on Python 3.11 and 3.12).
+- Full local suite: 72/72 passed.
+- Coverage: 94% (`src/orama`), above the required 80% floor.
+- Production-network authority scanner against `src/orama`: exit 0, zero
+  violations.
 
 ## Verification requirements
 

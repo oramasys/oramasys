@@ -60,6 +60,27 @@ def test_provider_request_is_immutable() -> None:
         request.model = "other"  # type: ignore[misc]
 
 
+def test_provider_request_coerces_a_caller_supplied_list_to_a_real_tuple() -> None:
+    """Confirmed directly before this fix: passing a mutable list (rather
+    than a tuple literal, which every other test in this file uses) was
+    stored by reference. Mutating the original list after construction
+    silently changed what this "frozen" request contained -- frozen only
+    prevented reassigning the messages attribute itself, not mutating
+    what it pointed to."""
+    mutable_messages = [ProviderMessage(role="user", content="hi")]
+    request = ProviderInvocationRequest(
+        backend=_backend(),
+        model="qwen-test",
+        messages=mutable_messages,  # type: ignore[arg-type]
+        run_id="run-1",
+    )
+
+    mutable_messages.append(ProviderMessage(role="system", content="injected"))
+
+    assert isinstance(request.messages, tuple)
+    assert len(request.messages) == 1
+
+
 def test_provider_request_requires_model_and_run_id() -> None:
     with pytest.raises(ValueError, match="model is required"):
         ProviderInvocationRequest(

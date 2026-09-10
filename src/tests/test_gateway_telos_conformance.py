@@ -14,6 +14,8 @@ def _imports(path: Path) -> set[str]:
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module)
+            for alias in node.names:
+                names.add(f"{node.module}.{alias.name}")
     return names
 
 
@@ -45,3 +47,18 @@ def test_gateway_dialer_documents_endpoint_security_as_telos_owned() -> None:
 
     assert "Endpoint-security mechanics are owned by :mod:`telos`" in text
     assert "Do not add DNS, IP classification, SSRF, pinning" in text
+
+
+def test_imports_records_qualified_from_import_path(tmp_path: Path) -> None:
+    """Confirmed directly against the pre-fix _imports(): 'from urllib import
+    request' only added the bare 'urllib' to the set, never the qualified
+    'urllib.request' the forbidden set actually checks for -- meaning this
+    exact forbidden import was invisible to
+    test_gateway_dialer_has_no_second_transport_security_stack above."""
+    path = tmp_path / "example.py"
+    path.write_text("from urllib import request\n", encoding="utf-8")
+
+    imports = _imports(path)
+
+    assert "urllib.request" in imports
+    assert "urllib" in imports

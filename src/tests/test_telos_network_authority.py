@@ -57,6 +57,38 @@ def test_guard_rejects_subprocess_curl(tmp_path: Path) -> None:
     assert any(v.rule == "raw-network-command" and v.detail == "curl" for v in violations)
 
 
+def test_guard_rejects_aliased_subprocess_module(tmp_path: Path) -> None:
+    """Confirmed directly against the pre-fix scanner: import subprocess as sp
+    then sp.run(...) was invisible to it entirely -- the old _call_name check
+    compared the literal name "subprocess", which never matched "sp"."""
+    _write(
+        tmp_path,
+        "src/orama/provider.py",
+        "import subprocess as sp\n"
+        "sp.run(['curl', 'https://example.com'], check=True)\n",
+    )
+
+    violations = scan_tree(tmp_path / "src/orama")
+
+    assert any(v.rule == "raw-network-command" and v.detail == "curl" for v in violations)
+
+
+def test_guard_rejects_aliased_subprocess_function_import(tmp_path: Path) -> None:
+    """Confirmed directly against the pre-fix scanner: from subprocess import
+    run as r then r(...) was also invisible -- func wasn't even an
+    ast.Attribute, so the old check returned None and skipped it."""
+    _write(
+        tmp_path,
+        "src/orama/provider.py",
+        "from subprocess import run as r\n"
+        "r(['wget', 'https://example.com'], check=True)\n",
+    )
+
+    violations = scan_tree(tmp_path / "src/orama")
+
+    assert any(v.rule == "raw-network-command" and v.detail == "wget" for v in violations)
+
+
 def test_guard_rejects_shell_string_network_command(tmp_path: Path) -> None:
     _write(
         tmp_path,
