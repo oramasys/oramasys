@@ -71,8 +71,22 @@ not reacquire DNS, SSRF, pinning, redirect, proxy, TLS, or endpoint-use policy.
 when a production module imports a banned raw network stack or shells out to an
 obvious network client.
 
+The import guard evaluates both the imported module and each qualified symbol
+from `from ... import ...` statements. Alias spelling therefore cannot turn a
+forbidden `urllib.request` or `http.client` dependency into an allowed import.
+Subprocess aliases are likewise resolved to canonical call targets before
+network-command checks run.
+
 The gate intentionally scans production source rather than the test tree, so
 FastAPI/http test clients and deterministic test doubles remain available.
+
+Cross-repository conformance tests must prove more than symbol presence. For
+security-sensitive consumers such as Perpetua Core discovery, the test parses
+the consumer AST and verifies the actual outbound call chain: the probe must
+dispatch through `telos.request`, use exact-candidate Telos authorization, carry
+`EndpointPurpose.HEALTH_PROBE`, and bind the required `TransportPolicy` access
+flags. A decoy Telos import, disconnected policy object, or raw fallback must
+fail the conformance test.
 
 ## Cross-repo boundary
 
