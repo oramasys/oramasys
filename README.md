@@ -13,6 +13,7 @@ src/
     api/        # FastAPI surface (server.py: app)
     gateway/    # Gateway Lifecycle orchestration + owner ports
     graph/      # orchestration graph + perpetua dispatch bridge
+    providers/  # application-facing provider invocation contracts
   tests/        # test suite (pytest)
 Makefile        # dev-install / test
 LICENSE
@@ -26,20 +27,33 @@ Source lives under `src/` (PyPA src-layout); imports stay `import orama` via
 ## Develop
 
 ```bash
-make dev-install      # venv + editable install of perpetua-core and oramasys
-make test             # pytest src/tests
-bin/serve             # run the API (uvicorn, reads from src/)
+make dev-install                    # venv + editable installs
+make check-telos-network-authority  # reject raw production network paths
+make test                           # authority gate + pytest src/tests
+bin/serve                           # run the API
 ```
 
-Requires Python ≥ 3.11. `make dev-install`/`make test` still use a sibling
-`../perpetua-core` checkout (pre-release, unpublished) for fast local
-iteration. `telos` is now published at
-[`oramasys/telos`](https://github.com/oramasys/telos) — `pyproject.toml` pins
-`oramasys-telos` to a reviewed Telos commit, so the entry is
-independently resolvable by a clean `pip install`/wheel build without a
-sibling checkout, so `make dev-install` no longer installs it from `../telos`
-by default; override `TELOS` in the `make` invocation if you need to develop
-against a local telos checkout instead.
+Requires Python ≥ 3.11. `make dev-install`/`make test` still support a sibling
+`../perpetua-core` checkout for fast local iteration. `pyproject.toml` also pins
+Core and Telos by immutable Git commit so clean CI installs are reproducible.
+
+## Network-security architecture
+
+Oramasys is an application/workflow orchestrator, not an endpoint-security
+stack. `oramasys/telos` owns endpoint identity, DNS/address admission, SSRF
+policy, semantic endpoint-use authorization, connection pinning/peer
+verification, redirects, proxy isolation, and TLS destination identity.
+
+The repository enforces that boundary with
+`scripts/check_telos_network_authority.py`, which rejects new raw outbound
+network imports/commands under `src/orama/`. Provider and Gateway compatibility
+surfaces remain thin application adapters over Telos rather than independent
+secure connectors.
+
+See:
+
+- `docs/architecture/telos-network-authority.md`
+- `docs/architecture/gateway-telos-endpoint-security-migration.md`
 
 ## Gateway Lifecycle
 
@@ -66,3 +80,11 @@ repeating owner operations.
 It delegates to Gateway Lifecycle and propagates denial, timeout, and error
 results unchanged. It contains no inline legacy implementation and no silent
 fallback.
+
+## Provider invocation boundary
+
+`orama.providers` defines immutable application-facing provider invocation
+contracts. `build_graph(..., provider_invoker=None)` preserves the current
+Phase-2 no-network behavior. A future concrete provider invoker must use Telos
+for outbound transport rather than importing a raw HTTP/socket client into
+Oramasys production code.
