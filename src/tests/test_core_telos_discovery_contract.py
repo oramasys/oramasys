@@ -145,9 +145,12 @@ def _assert_exact_candidate_authorizer(
     allowed = rules.values[0]
     assert isinstance(allowed, ast.Set) and len(allowed.elts) == 1
     member = allowed.elts[0]
-    assert isinstance(member, ast.Attribute)
-    assert isinstance(member.value, ast.Name) and member.value.id == "candidate"
-    assert member.attr == "key", "authorization must be scoped to candidate.key"
+    assert (
+        isinstance(member, ast.Attribute)
+        and isinstance(member.value, ast.Name)
+        and member.value.id == "candidate"
+        and member.attr == "key"
+    ), "authorization must be scoped to candidate.key"
 
 
 def _assert_transport_policy(tree: ast.AST, bindings: dict[str, str]) -> None:
