@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 
-from telos import EndpointPurpose, EndpointUseRequest
+from telos import EndpointPurpose
 
 from orama.gateway.contracts import (
     AgatePort,
@@ -24,7 +24,6 @@ from orama.gateway.dialer import (
     ModelServerDialRequest,
     ModelServerDialer,
     ModelServerDialResult,
-    decision_is_expired,
 )
 
 
@@ -38,7 +37,7 @@ class GatewayLifecycle:
         claude: ClaudeProviderPort,
         store: RoutingStateStore,
         events: ProgressEventSink,
-        dialer: ModelServerDialer | None = None,
+        dialer: ModelServerDialer,
     ) -> None:
         self._telos = telos
         self._phylax = phylax
@@ -47,7 +46,6 @@ class GatewayLifecycle:
         self._store = store
         self._event_sink = events
         self._dialer = dialer
-
 
     async def run(self, request: GatewayLifecycleRequest) -> GatewayLifecycleResult:
         run_events: list[GatewayProgressEvent] = []
@@ -105,23 +103,9 @@ class GatewayLifecycle:
             claim_task = asyncio.create_task(self._store.claim(key))
 
             async def _drain_claim_then_abort() -> None:
-                """Runs to completion regardless of how many times the
-                caller cancels this lifecycle run. A single shield wraps
-                BOTH the claim_task drain and the abort() call as one
-                inseparable unit -- a REPEATED cancellation can only
-                interrupt our *await* on this coroutine, never the
-                coroutine itself, since shield() detaches it into its own
-                task on first use. The prior code shielded the drain and
-                the abort() as two separate awaits, so a second
-                cancellation landing between them raised CancelledError
-                (a BaseException, not caught by the drain's
-                `except Exception`) straight past the abort() call below
-                it, silently skipping cleanup and stranding the claim."""
                 try:
                     await claim_task
                 except Exception:
-                    # Cleanup is still safe and idempotent for an unreserved
-                    # key, including a claim implementation that fails.
                     pass
                 await self._store.abort(key)
 
@@ -132,9 +116,6 @@ class GatewayLifecycle:
                 try:
                     await asyncio.shield(_drain_claim_then_abort())
                 except asyncio.CancelledError:
-                    # A later cancellation interrupted only OUR wait on the
-                    # cleanup task, not the cleanup task itself -- it keeps
-                    # running detached and will still call abort().
                     pass
                 raise
             if existing is not None:
@@ -149,92 +130,54 @@ class GatewayLifecycle:
                 )
             claimed = True
 
-            config = await self._telos.authorize(
-                EndpointUseRequest(
-                    actor_id=request.gateway_id,
-                    workflow_id="gateway_lifecycle",
-                    purpose=EndpointPurpose.CONFIG_READ,
-                    endpoint=request.config_endpoint,
-                    run_id=key,
+            # Telos secure dials are the single endpoint-security and semantic
+            # authorization boundary. There is deliberately no preauthorization
+            # call against a raw EndpointRef and no optional non-Telos bypass.
+            dial_results: dict[str, ModelServerDialResult] = {}
+            for purpose, endpoint in (
+                (EndpointPurpose.CONFIG_READ, request.config_endpoint),
+                (EndpointPurpose.HEALTH_PROBE, request.health_endpoint),
+            ):
+                dial = await self._dialer.dial(
+                    ModelServerDialRequest(
+                        endpoint=endpoint,
+                        purpose=purpose,
+                        provider_kind=request.provider_kind,
+                        allow_public=request.allow_public_model_servers,
+                        actor_id=request.gateway_id,
+                        run_id=key,
+                    )
                 )
-            )
-            if not config.allowed:
-                return await fail("denied", config.reason_code)
-            if config.endpoint != request.config_endpoint:
-                # A decision that echoes a different endpoint than the one
-                # requested must never be trusted for anything downstream --
-                # the dialer only ever resolves/classifies/dials
-                # request.config_endpoint, so an "allowed" decision for a
-                # different endpoint would let readiness I/O and persisted
-                # routing state use an address the dial path never actually
-                # validated. Fail closed rather than silently substitute.
-                return await fail("error", "telos_decision_endpoint_mismatch")
-            if decision_is_expired(config):
-                return await fail("error", "telos_decision_expired")
+                dial_results[purpose.value] = dial
+                if not dial.allowed:
+                    reason = (
+                        dial.reason_code
+                        if dial.reason_code in DIALER_REJECTION_REASONS
+                        or dial.reason_code.startswith("telos_denied:")
+                        else "dial_denied"
+                    )
+                    return await fail("denied", reason)
+                if not dial.policy_version or not dial.decision_ref:
+                    return await fail("error", "telos_decision_metadata_missing")
 
-            health = await self._telos.authorize(
-                EndpointUseRequest(
-                    actor_id=request.gateway_id,
-                    workflow_id="gateway_lifecycle",
-                    purpose=EndpointPurpose.HEALTH_PROBE,
-                    endpoint=request.health_endpoint,
-                    run_id=key,
-                )
-            )
-            if not health.allowed:
-                return await fail("denied", health.reason_code)
-            if health.endpoint != request.health_endpoint:
-                return await fail("error", "telos_decision_endpoint_mismatch")
-            if decision_is_expired(health):
-                return await fail("error", "telos_decision_expired")
+            config_dial = dial_results[EndpointPurpose.CONFIG_READ.value]
+            health_dial = dial_results[EndpointPurpose.HEALTH_PROBE.value]
             await emit(
                 "endpoints_authorized",
                 "running",
-                {"policy_version": health.policy_version},
+                {
+                    "config_policy_version": config_dial.policy_version or "",
+                    "health_policy_version": health_dial.policy_version or "",
+                },
             )
-
-            # Gate 4 Half A (doc 66): execute the actual dials through the
-            # dedicated dialer so Telos authorizes the real dial path from
-            # day one, with DNS resolution + address classification in front
-            # of any connection. A dialer rejection fails closed.
-            if self._dialer is not None:
-                dial_results: dict[str, ModelServerDialResult] = {}
-                for purpose, endpoint in (
-                    (EndpointPurpose.CONFIG_READ, request.config_endpoint),
-                    (EndpointPurpose.HEALTH_PROBE, request.health_endpoint),
-                ):
-                    dial = await self._dialer.dial(
-                        ModelServerDialRequest(
-                            endpoint=endpoint,
-                            purpose=purpose,
-                            provider_kind=request.provider_kind,
-                            allow_public=request.allow_public_model_servers,
-                            actor_id=request.gateway_id,
-                            run_id=key,
-                        )
-                    )
-                    dial_results[purpose.value] = dial
-                    if not dial.allowed:
-                        reason = (
-                            dial.reason_code
-                            if dial.reason_code in DIALER_REJECTION_REASONS
-                            else "dial_denied"
-                        )
-                        return await fail("denied", reason)
-                await emit(
-                    "endpoints_dialed",
-                    "running",
-                    {
-                        "config_resolved_address": dial_results[
-                            EndpointPurpose.CONFIG_READ.value
-                        ].resolved_address
-                        or "",
-                        "health_resolved_address": dial_results[
-                            EndpointPurpose.HEALTH_PROBE.value
-                        ].resolved_address
-                        or "",
-                    },
-                )
+            await emit(
+                "endpoints_dialed",
+                "running",
+                {
+                    "config_resolved_address": config_dial.resolved_address or "",
+                    "health_resolved_address": health_dial.resolved_address or "",
+                },
+            )
 
             artifact = await self._phylax.verify_artifact(request.artifact)
             if not artifact.allowed or not artifact.decision_ref:
@@ -274,13 +217,6 @@ class GatewayLifecycle:
                     readiness = await self._claude.ensure_ready(
                         provider_kind=request.provider_kind,
                         placement_ref=placement.placement_ref,
-                        # request.config_endpoint/health_endpoint, not
-                        # config.endpoint/health.endpoint: the dialer above
-                        # only ever resolves/classifies/dials the request's
-                        # own endpoints (matched exactly at the checks
-                        # above). Using the decision's echoed endpoint here
-                        # would let readiness I/O run against an address the
-                        # dial path never actually validated.
                         config_endpoint=request.config_endpoint,
                         health_endpoint=request.health_endpoint,
                         timeout_seconds=request.readiness_timeout_seconds,
@@ -307,8 +243,8 @@ class GatewayLifecycle:
                 placement_policy_version=placement.policy_version,
                 config_endpoint=request.config_endpoint,
                 health_endpoint=request.health_endpoint,
-                config_telos_policy_version=config.policy_version,
-                health_telos_policy_version=health.policy_version,
+                config_telos_policy_version=config_dial.policy_version or "",
+                health_telos_policy_version=health_dial.policy_version or "",
                 artifact_decision_ref=artifact.decision_ref,
                 admission_decision_ref=admission.decision_ref,
                 artifact_phylax_policy_version=artifact.policy_version,
