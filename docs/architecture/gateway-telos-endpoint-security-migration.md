@@ -60,9 +60,9 @@ actually terminated at the vetted pin.
 | post-connect rebinding/connector mismatch | `ConnectedPeer.peer_address` recheck |
 
 HTTP-specific redirect, credential, proxy and TLS identity protections are
-already implemented in Telos `transport.py`; the Gateway compatibility dial is
-for bounded provider connectivity and delegates endpoint security to the same
-Telos authority.
+implemented in Telos `transport.py`; the Gateway compatibility dial is for
+bounded provider connectivity and delegates endpoint security to the same Telos
+authority.
 
 ## No silent fallback
 
@@ -82,27 +82,89 @@ not provide a trusted `is_public` classification bit. Operator/application
 intent to permit public model-server access remains separate as
 `allow_public_model_servers` and is passed to Telos as transport policy.
 
+## Production-network conformance gate
+
+The Gateway migration is not only a one-time refactor. Oramasys CI rejects new
+production imports of raw outbound transports and obvious network CLI
+subprocesses under `src/orama/`.
+
+The gate enforces the steady-state architecture:
+
+- Oramasys owns application/provider/workflow semantics;
+- Telos owns endpoint-specific security and secure outbound transport;
+- a future provider integration must consume/extend Telos rather than importing
+  a second HTTP/socket implementation into Oramasys;
+- test-only clients remain permitted outside the production source tree.
+
+The executable gate is `scripts/check_telos_network_authority.py`. It is wired
+into both the Makefile and GitHub Actions.
+
+## Perpetua Core discovery convergence
+
+Perpetua Core's historical `health_probe()` was a distinct raw `httpx` path and
+therefore a separate endpoint-security exception. The convergence work routes
+that discovery probe through Telos while keeping Core's public discovery/result
+semantics intact.
+
+The required authority split is:
+
+- Core expresses explicit discovery intent and maps transport outcomes into
+  `ProbeResult` / `BackendHealth`;
+- Telos performs endpoint normalization, DNS/address admission, exact
+  endpoint-use authorization, secure transport, pinning/peer verification,
+  redirect/proxy/TLS destination safety;
+- Core must not introduce a permanent always-allow `HEALTH_PROBE` semantic
+  authorizer.
+
+Oramasys pins the exact verified Core revision once that Core PR is green and
+review-clean. A cross-repo conformance test then proves the installed Core probe
+no longer creates a raw `httpx.AsyncClient` path.
+
+## Phase-3 provider invocation boundary
+
+Actual model invocation is intentionally introduced through an application port
+rather than by adding a raw HTTP client to `perpetua_graph.py`.
+
+`orama.providers` defines immutable request/result contracts and a
+`ProviderInvoker` protocol. `build_graph(..., provider_invoker=None)` preserves
+the existing no-network Phase-2 behavior. When an invoker is explicitly
+supplied, Oramasys passes resolved backend/application intent through that port
+and records the returned provider/Telos evidence.
+
+A future concrete network provider implementation must be Telos-backed. The
+source/CI network-authority gate prevents a direct `httpx`, `requests`,
+`urllib`, socket, or `curl` implementation from landing under `src/orama/`.
+
 ## Dependency pin and immutable migration evidence
 
-Oramasys pins Telos to the exact verified restoration/secure-dial head rather
-than the superseded semantic-only Telos scaffold. Update this document and the
-pin together if subsequent remediation changes the verified Telos head.
+Dependency pins are immutable commit SHAs rather than moving branches. Update
+this document and the dependency pins together when a newly verified Telos or
+Core implementation is adopted.
 
-- Telos verified head and dependency pin: `19810d0493344aa507c29c462f68afbc1b98ecf8`.
-- Oramasys verified implementation/remediation head: `0639578fe63c9681b4ee35b6e4abab69483a5d64`.
+Historical Gateway absorption evidence:
 
-The Oramasys value identifies the immutable implementation state immediately
-before this evidence-only documentation update. A later PR tip may therefore
-advance for documentation or review bookkeeping without changing the recorded
-implementation evidence; any implementation change requires refreshing this
-record after re-verification.
+- Telos dependency/evidence head used by the merged Gateway migration:
+  `19810d0493344aa507c29c462f68afbc1b98ecf8`.
+- Oramasys PR #5 merge commit:
+  `539e112948a9a13d12d648464084bb0cf3c01f2a`.
+
+The outbound-convergence PR must record its own exact Telos/Core pins and
+exact-head CI evidence after the Core health-probe PR stabilizes.
 
 ## Verification requirements
 
-The migration is complete only when both Telos and Oramasys exact-head CI are
-green on Python 3.11 and 3.12 with at least 80% project coverage, fresh review
-thread sweeps contain no unresolved migration findings, and Orama/PT handoff
-records are synchronized to those exact heads.
+The convergence is complete only when:
+
+- the production-network authority scanner passes;
+- Gateway conformance tests prove no second transport-security stack exists;
+- the pinned Core health probe is Telos-backed;
+- provider invocation remains a contract/injection boundary with no raw network
+  client in Oramasys production code;
+- Oramasys exact-head CI is green on Python 3.11 and 3.12;
+- project coverage is at least 80%, with stricter configured thresholds never
+  lowered;
+- fresh review-thread sweeps contain no unresolved actionable findings;
+- coordination/handoff records are synchronized to exact heads.
 
 No verification status authorizes merging; owner merge authorization remains
 separate.
