@@ -1,9 +1,11 @@
 """Append-only outbound decision ledger.
 
-Per-run record of provider dispatches through the graph boundary: enough for
-audit (who was called, under which Telos decision, with what outcome) without
-becoming a second policy authority. The schema stays narrow on purpose —
-routing and policy evaluation remain in the graph and Telos respectively.
+Per-run audit journal of provider dispatches through the graph boundary:
+enough to correlate who was called, under which Telos decision, with what
+outcome, without becoming a second policy authority. It is deliberately not
+the Tier-5 financial reservation/settlement ledger. The schema stays narrow
+on purpose — routing and policy evaluation remain in the graph and Telos
+respectively, while paid-call accounting remains a separate SQLite authority.
 
 Records are JSON-lines, one per dispatch, written under an asyncio lock so
 concurrent run_ids cannot interleave a line. ``read_all`` parses strictly: a
@@ -35,6 +37,8 @@ class OutboundDispatchRecord:
     decision_ref: str = ""
     provider_ref: str = ""
     telos_policy_version: str | None = None
+    # Exception type name only. Never persist exception text: it may contain
+    # endpoint URLs, credentials, or provider payload fragments.
     error: str | None = None
     recorded_at: str = field(default_factory=_utc_now_iso)
 

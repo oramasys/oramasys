@@ -149,7 +149,10 @@ def build_graph(
                     OutboundDispatchRecord(
                         run_id=run_id,
                         outcome="failed",
-                        error=str(exc),
+                        # The graph delta may retain a local diagnostic, but
+                        # the persisted audit record must not carry endpoint,
+                        # credential, or provider-payload text.
+                        error=type(exc).__name__,
                     )
                 )
             return {

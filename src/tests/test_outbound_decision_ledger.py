@@ -61,7 +61,7 @@ class _FakeInvoker:
 
 class _FailingInvoker:
     async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
-        raise RuntimeError("provider unavailable")
+        raise RuntimeError("provider unavailable at https://secret.example/v1?token=redact")
 
 
 class _InterruptingInvoker:
@@ -177,7 +177,9 @@ async def test_failed_dispatch_records_outcome_and_error(tmp_path: Path) -> None
     (record,) = ledger.read_all()
     assert record.run_id == "run-43"
     assert record.outcome == "failed"
-    assert "provider unavailable" in (record.error or "")
+    assert record.error == "RuntimeError"
+    assert "secret.example" not in (record.error or "")
+    assert "token" not in (record.error or "")
     assert record.decision_ref == ""
     assert record.provider_ref == ""
 
@@ -198,7 +200,7 @@ async def test_bounded_timeout_is_contained_and_recorded(tmp_path: Path) -> None
     (record,) = ledger.read_all()
     assert record.run_id == "run-44"
     assert record.outcome == "failed"
-    assert "timed out" in (record.error or "")
+    assert record.error == "RuntimeError"
 
 
 @pytest.mark.asyncio
