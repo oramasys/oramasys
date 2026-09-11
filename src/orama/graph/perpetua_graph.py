@@ -13,6 +13,7 @@ must remain behind a Telos-backed ProviderInvoker implementation.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from perpetua_core import END, START, MiniGraph, PerpetuaState
@@ -21,6 +22,8 @@ from perpetua_core.discovery.errors import NoBackendAvailableError
 from perpetua_core.policy import HardwarePolicyResolver
 
 from orama.providers import (
+    OutboundLedger,
+    OutboundLedgerEntry,
     ProviderInvocationRequest,
     ProviderInvoker,
     ProviderMessage,
@@ -44,11 +47,21 @@ def build_graph(
     *,
     registry: BackendRegistry | None = None,
     provider_invoker: ProviderInvoker | None = None,
+    outbound_ledger: OutboundLedger | None = None,
+    invocation_timeout_seconds: float | None = None,
 ) -> MiniGraph:
     """Build the default graph.
 
     ``provider_invoker`` is an explicit Phase-3 seam. Omitting it preserves the
     existing Phase-2 behavior and performs no provider network invocation.
+
+    ``outbound_ledger`` records one append-only entry per outbound dispatch
+    attempt (success, contained failure, or timeout) for audit correlation.
+    When omitted, dispatch behavior is unchanged and nothing is recorded.
+
+    ``invocation_timeout_seconds`` bounds a hung provider invocation; on
+    expiry the dispatch fails closed with a ``provider_invocation_timeout``
+    error delta instead of hanging the graph.
     """
 
     reg = registry if registry is not None else BackendRegistry()
@@ -105,12 +118,56 @@ def build_graph(
                 messages=_provider_messages(state),
                 run_id=str(state.metadata.get("run_id") or state.session_id),
             )
-            result = await provider_invoker.invoke(request)
+            run_id = request.run_id
+        except Exception as exc:
+            if type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt"):
+                raise
+            return {
+                "error": f"provider invocation failed: {exc}",
+                "metadata": metadata,
+            }
+
+        def _record(outcome: str, *, decision_ref: str | None = None,
+                    provider_ref: str | None = None,
+                    policy_version: str | None = None,
+                    reason: str | None = None) -> None:
+            if outbound_ledger is None:
+                return
+            outbound_ledger.record(
+                OutboundLedgerEntry(
+                    run_id=run_id,
+                    backend_name=backend.name,
+                    model=model,
+                    outcome=outcome,
+                    decision_ref=decision_ref,
+                    provider_ref=provider_ref,
+                    policy_version=policy_version,
+                    reason=reason,
+                )
+            )
+
+        try:
+            if invocation_timeout_seconds is not None:
+                result = await asyncio.wait_for(
+                    provider_invoker.invoke(request),
+                    timeout=invocation_timeout_seconds,
+                )
+            else:
+                result = await provider_invoker.invoke(request)
             provider_ref = result.provider_ref
             decision_ref = result.decision_ref
             provider_content = result.content
+            policy_version = getattr(result, "policy_version", None)
             if not isinstance(provider_content, str):
                 raise TypeError("provider content must be a string")
+        except asyncio.TimeoutError:
+            # A hung invocation must not hang the graph: fail closed within
+            # the caller-supplied deadline and record the containment.
+            _record("timeout", reason="invocation exceeded dispatch deadline")
+            return {
+                "error": f"provider invocation timed out after {invocation_timeout_seconds}s",
+                "metadata": {**metadata, "provider_outcome": "timeout"},
+            }
         except Exception as exc:
             if type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt"):
                 # MiniGraph owns its structural HITL protocol. Re-raise its
@@ -119,10 +176,21 @@ def build_graph(
             # asyncio.CancelledError/SystemExit/KeyboardInterrupt inherit from
             # BaseException and therefore retain their control-flow semantics.
             # Provider/runtime/data-shape failures become a normal graph delta.
+            # The ledger records the exception *type name* only; str(exc) can
+            # carry endpoint URLs or provider payloads and must not enter
+            # audit records.
+            _record("failed", reason=type(exc).__name__)
             return {
                 "error": f"provider invocation failed: {exc}",
                 "metadata": metadata,
             }
+
+        _record(
+            "success",
+            decision_ref=decision_ref,
+            provider_ref=provider_ref,
+            policy_version=policy_version,
+        )
 
         return {
             "metadata": {
@@ -130,6 +198,7 @@ def build_graph(
                 "provider_ref": provider_ref,
                 "decision_ref": decision_ref,
                 "provider_content": provider_content,
+                **({"provider_policy_version": policy_version} if policy_version else {}),
             }
         }
 
