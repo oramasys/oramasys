@@ -18,6 +18,7 @@ from pathlib import Path
 from perpetua_core import END, START, MiniGraph, PerpetuaState
 from perpetua_core.discovery import BackendRegistry, select_backend
 from perpetua_core.discovery.errors import NoBackendAvailableError
+from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec, stable_callable_ref
 from perpetua_core.policy import HardwarePolicyResolver
 
 from orama.providers import (
@@ -161,6 +162,33 @@ def build_graph(
     graph_builder.add_edge("dispatch", "respond")
     graph_builder.add_edge("respond", END)
     return graph_builder
+
+
+def build_graph_spec() -> GraphSpec:
+    """Describe the immutable topology of :func:`build_graph` without running it.
+
+    The runtime graph deliberately keeps injected registry and provider seams out
+    of this data-only contract. ``GraphSpec`` therefore records stable topology
+    and provenance, not executable closures or endpoint data.
+    """
+    return GraphSpec.create(
+        max_steps=3,
+        nodes=(
+            NodeSpec("route", metadata={"responsibility": "hardware-policy"}),
+            NodeSpec("dispatch", metadata={"responsibility": "backend-selection"}),
+            NodeSpec("respond", metadata={"responsibility": "response-formatting"}),
+        ),
+        edges=(
+            EdgeSpec(source=START, kind="static", target="route"),
+            EdgeSpec(source="route", kind="static", target="dispatch"),
+            EdgeSpec(source="dispatch", kind="static", target="respond"),
+            EdgeSpec(source="respond", kind="static", target=END),
+        ),
+        metadata={
+            "runtime_builder": stable_callable_ref(build_graph),
+            "runtime_engine": "perpetua_core.graph:MiniGraph",
+        },
+    )
 
 
 graph = build_graph()
