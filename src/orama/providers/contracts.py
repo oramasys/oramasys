@@ -43,6 +43,10 @@ class ProviderInvocationResult:
     content: str
     provider_ref: str
     decision_ref: str
+    #: Telos policy version that authorized the outbound dial, when the
+    #: concrete invoker can supply it (audit correlation; optional so existing
+    #: invokers stay valid).
+    policy_version: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_ref.strip():
