@@ -9,7 +9,7 @@ PERPETUA_CORE := ../perpetua-core
 # local telos checkout instead of the published git ref.
 TELOS ?=
 
-.PHONY: install test dev-install
+.PHONY: install test dev-install check-telos-network-authority
 
 dev-install:
 	$(PYTHON) -m venv .venv
@@ -19,7 +19,10 @@ dev-install:
 
 install: dev-install
 
-test:
+check-telos-network-authority:
+	$(PYTHON) scripts/check_telos_network_authority.py src/orama
+
+test: check-telos-network-authority
 	.venv/bin/pip install -e $(PERPETUA_CORE) -q
 	.venv/bin/pip install -e ".[dev]" -q
 	$(if $(TELOS),.venv/bin/pip install -e $(TELOS) -q,)

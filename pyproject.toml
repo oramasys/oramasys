@@ -9,8 +9,8 @@ description = "Hardware-aware multi-agent orchestration system (oramasys graph +
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "oramasys-telos @ git+https://github.com/oramasys/telos.git@19810d0493344aa507c29c462f68afbc1b98ecf8",
-    "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@86225fa5c974ab2fe0b65d228a2b31888aaa440c",
+    "oramasys-telos @ git+https://github.com/oramasys/telos.git@b2143083044496d93be3ca2dc88c28135e034d9f",
+    "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@c265825216b6f9284a9ce62f01737d963f88c4cd",
     "fastapi>=0.110",
     "pydantic>=2,<3",
     "uvicorn[standard]>=0.29",
