@@ -30,6 +30,7 @@ _POLICY_PATH = Path(__file__).parent.parent.parent / "config" / "model_hardware_
 
 
 def _provider_messages(state: PerpetuaState) -> tuple[ProviderMessage, ...]:
+    """Convert valid state messages into immutable provider messages."""
     messages: list[ProviderMessage] = []
     for item in state.messages:
         role = item.get("role") if isinstance(item, dict) else None
@@ -53,7 +54,7 @@ def build_graph(
     reg = registry if registry is not None else BackendRegistry()
 
     async def route_node(state: PerpetuaState) -> dict:
-        """Hardware affinity gate — raises HardwareAffinityError on NEVER verdict."""
+        """Apply the optional hardware-affinity routing policy."""
         meta_extra: dict = {"routed_at": "route_node"}
         if _POLICY_PATH.exists():
             resolver = HardwarePolicyResolver.from_file(_POLICY_PATH)
@@ -67,7 +68,7 @@ def build_graph(
         return {"metadata": {**state.metadata, **meta_extra}}
 
     async def dispatch_node(state: PerpetuaState) -> dict:
-        """Resolve a backend and optionally invoke it through the provider port."""
+        """Resolve a backend and contain provider failures at the dispatch boundary."""
         try:
             backend = select_backend(
                 reg,
@@ -97,24 +98,37 @@ def build_graph(
                 "metadata": metadata,
             }
 
-        result = await provider_invoker.invoke(
-            ProviderInvocationRequest(
-                backend=backend,
-                model=model,
-                messages=_provider_messages(state),
-                run_id=str(state.metadata.get("run_id") or state.session_id),
-            )
+        request = ProviderInvocationRequest(
+            backend=backend,
+            model=model,
+            messages=_provider_messages(state),
+            run_id=str(state.metadata.get("run_id") or state.session_id),
         )
+        try:
+            result = await provider_invoker.invoke(request)
+            provider_ref = result.provider_ref
+            decision_ref = result.decision_ref
+            provider_content = result.content
+        except Exception as exc:
+            # asyncio.CancelledError/SystemExit/KeyboardInterrupt inherit from
+            # BaseException and therefore retain their control-flow semantics.
+            # Provider/runtime/data-shape failures become a normal graph delta.
+            return {
+                "error": f"provider invocation failed: {exc}",
+                "metadata": metadata,
+            }
+
         return {
             "metadata": {
                 **metadata,
-                "provider_ref": result.provider_ref,
-                "decision_ref": result.decision_ref,
-                "provider_content": result.content,
+                "provider_ref": provider_ref,
+                "decision_ref": decision_ref,
+                "provider_content": provider_content,
             }
         }
 
     async def respond_node(state: PerpetuaState) -> dict:
+        """Append provider content or the Phase-2 dispatch compatibility response."""
         provider_content = state.metadata.get("provider_content")
         if isinstance(provider_content, str):
             content = provider_content

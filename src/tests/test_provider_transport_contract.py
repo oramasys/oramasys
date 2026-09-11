@@ -37,6 +37,16 @@ class _FakeInvoker:
         )
 
 
+class _FailingInvoker:
+    async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+        raise RuntimeError("provider unavailable")
+
+
+class _InvalidResultInvoker:
+    async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+        return None  # type: ignore[return-value]
+
+
 def _backend() -> Backend:
     return Backend(
         name="ollama-local",
@@ -61,12 +71,7 @@ def test_provider_request_is_immutable() -> None:
 
 
 def test_provider_request_coerces_a_caller_supplied_list_to_a_real_tuple() -> None:
-    """Confirmed directly before this fix: passing a mutable list (rather
-    than a tuple literal, which every other test in this file uses) was
-    stored by reference. Mutating the original list after construction
-    silently changed what this "frozen" request contained -- frozen only
-    prevented reassigning the messages attribute itself, not mutating
-    what it pointed to."""
+    """A mutable caller collection must not remain aliased by a frozen request."""
     mutable_messages = [ProviderMessage(role="user", content="hi")]
     request = ProviderInvocationRequest(
         backend=_backend(),
@@ -167,3 +172,44 @@ async def test_explicit_invoker_fails_closed_when_backend_has_no_model() -> None
 
     assert result.error == "backend 'ollama-local' has no model available for invocation"
     assert invoker.requests == []
+
+
+@pytest.mark.asyncio
+async def test_provider_invocation_failure_is_contained_in_state_error() -> None:
+    graph = build_graph(
+        registry=_Registry(_backend()),
+        provider_invoker=_FailingInvoker(),
+    )
+    state = PerpetuaState(
+        session_id="session-1",
+        task_type="reasoning",
+        target_tier="mac",
+        metadata={"run_id": "run-42", "existing": "kept"},
+    )
+
+    result = await graph.ainvoke(state)
+
+    assert result.error == "provider invocation failed: provider unavailable"
+    assert result.metadata["resolved_backend"] == "ollama-local"
+    assert result.metadata["resolved_url"] == "http://localhost:11434/v1"
+    assert result.metadata["existing"] == "kept"
+    assert "provider_ref" not in result.metadata
+
+
+@pytest.mark.asyncio
+async def test_invalid_provider_result_is_contained_in_state_error() -> None:
+    graph = build_graph(
+        registry=_Registry(_backend()),
+        provider_invoker=_InvalidResultInvoker(),
+    )
+    state = PerpetuaState(
+        session_id="session-1",
+        task_type="reasoning",
+        target_tier="mac",
+    )
+
+    result = await graph.ainvoke(state)
+
+    assert result.error.startswith("provider invocation failed:")
+    assert result.metadata["resolved_backend"] == "ollama-local"
+    assert "provider_ref" not in result.metadata
