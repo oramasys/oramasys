@@ -43,6 +43,11 @@ class ProviderInvocationResult:
     content: str
     provider_ref: str
     decision_ref: str
+    # Telos health-probe policy version the invocation was authorized under,
+    # when the invoker surfaces it. Audit correlation: the seam records it in
+    # the outbound ledger and metadata so dispatch records can be tied back to
+    # the policy version that approved them.
+    telos_policy_version: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_ref.strip():

@@ -13,6 +13,7 @@ must remain behind a Telos-backed ProviderInvoker implementation.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from perpetua_core import END, START, MiniGraph, PerpetuaState
@@ -26,6 +27,7 @@ from orama.providers import (
     ProviderInvoker,
     ProviderMessage,
 )
+from orama.providers.outbound_ledger import OutboundDispatchRecord, OutboundLedger
 
 _POLICY_PATH = Path(__file__).parent.parent.parent / "config" / "model_hardware_policy.yml"
 
@@ -45,11 +47,17 @@ def build_graph(
     *,
     registry: BackendRegistry | None = None,
     provider_invoker: ProviderInvoker | None = None,
+    outbound_ledger: OutboundLedger | None = None,
+    invocation_timeout_seconds: float | None = None,
 ) -> MiniGraph:
     """Build the default graph.
 
     ``provider_invoker`` is an explicit Phase-3 seam. Omitting it preserves the
     existing Phase-2 behavior and performs no provider network invocation.
+    ``outbound_ledger``, when given, records one append-only dispatch record
+    per provider invocation (success and failure). ``invocation_timeout_seconds``,
+    when given, bounds the invocation and contains a timeout as a normal graph
+    error delta; the default (None) leaves invoker timing to the invoker.
     """
 
     reg = registry if registry is not None else BackendRegistry()
@@ -99,16 +107,30 @@ def build_graph(
                 "metadata": metadata,
             }
 
+        run_id = str(state.metadata.get("run_id") or state.session_id)
         try:
             request = ProviderInvocationRequest(
                 backend=backend,
                 model=model,
                 messages=_provider_messages(state),
-                run_id=str(state.metadata.get("run_id") or state.session_id),
+                run_id=run_id,
             )
-            result = await provider_invoker.invoke(request)
+            if invocation_timeout_seconds is None:
+                result = await provider_invoker.invoke(request)
+            else:
+                try:
+                    result = await asyncio.wait_for(
+                        provider_invoker.invoke(request),
+                        timeout=invocation_timeout_seconds,
+                    )
+                except TimeoutError:
+                    raise RuntimeError(
+                        "provider invocation timed out after "
+                        f"{invocation_timeout_seconds}s"
+                    ) from None
             provider_ref = result.provider_ref
             decision_ref = result.decision_ref
+            telos_policy_version = result.telos_policy_version
             provider_content = result.content
             if not isinstance(provider_content, str):
                 raise TypeError("provider content must be a string")
@@ -116,23 +138,46 @@ def build_graph(
             if type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt"):
                 # MiniGraph owns its structural HITL protocol. Re-raise its
                 # interrupt so the scheduler can emit the interrupted state.
+                # An interrupt is a control-flow signal, not a dispatch
+                # outcome, so it is never recorded in the outbound ledger.
                 raise
             # asyncio.CancelledError/SystemExit/KeyboardInterrupt inherit from
             # BaseException and therefore retain their control-flow semantics.
             # Provider/runtime/data-shape failures become a normal graph delta.
+            if outbound_ledger is not None:
+                await outbound_ledger.record(
+                    OutboundDispatchRecord(
+                        run_id=run_id,
+                        outcome="failed",
+                        error=str(exc),
+                    )
+                )
             return {
                 "error": f"provider invocation failed: {exc}",
                 "metadata": metadata,
             }
 
-        return {
-            "metadata": {
-                **metadata,
-                "provider_ref": provider_ref,
-                "decision_ref": decision_ref,
-                "provider_content": provider_content,
-            }
+        if outbound_ledger is not None:
+            await outbound_ledger.record(
+                OutboundDispatchRecord(
+                    run_id=run_id,
+                    outcome="succeeded",
+                    decision_ref=decision_ref,
+                    provider_ref=provider_ref,
+                    telos_policy_version=telos_policy_version,
+                )
+            )
+
+        result_metadata = {
+            **metadata,
+            "provider_ref": provider_ref,
+            "decision_ref": decision_ref,
+            "provider_content": provider_content,
         }
+        if telos_policy_version is not None:
+            result_metadata["telos_policy_version"] = telos_policy_version
+
+        return {"metadata": result_metadata}
 
     async def respond_node(state: PerpetuaState) -> dict:
         """Append provider content or the Phase-2 dispatch compatibility response."""
