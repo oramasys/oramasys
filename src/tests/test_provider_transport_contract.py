@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
 
 from perpetua_core.discovery import Backend, BackendHealth, BackendKind
+from perpetua_core.graph.plugins.interrupts import Interrupt
 from perpetua_core.state import PerpetuaState
 
 from orama.graph.perpetua_graph import build_graph
@@ -45,6 +47,26 @@ class _FailingInvoker:
 class _InvalidResultInvoker:
     async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
         return None  # type: ignore[return-value]
+
+
+class _ContentInvoker:
+    def __init__(self, content: object) -> None:
+        self.content = content
+
+    async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+        return ProviderInvocationResult(
+            content=self.content,  # type: ignore[arg-type]
+            provider_ref="provider-ref-1",
+            decision_ref="telos-decision-1",
+        )
+
+
+class _InterruptingInvoker:
+    def __init__(self, interrupt: type[BaseException]) -> None:
+        self.interrupt = interrupt
+
+    async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+        raise self.interrupt()
 
 
 def _backend() -> Backend:
@@ -213,3 +235,81 @@ async def test_invalid_provider_result_is_contained_in_state_error() -> None:
     assert result.error.startswith("provider invocation failed:")
     assert result.metadata["resolved_backend"] == "ollama-local"
     assert "provider_ref" not in result.metadata
+
+
+@pytest.mark.asyncio
+async def test_invalid_provider_request_is_contained_before_invocation() -> None:
+    invoker = _FakeInvoker()
+    graph = build_graph(registry=_Registry(_backend()), provider_invoker=invoker)
+    state = PerpetuaState(
+        session_id="session-1",
+        task_type="reasoning",
+        target_tier="mac",
+        metadata={"run_id": " \t ", "existing": "kept"},
+    )
+
+    result = await graph.ainvoke(state)
+
+    assert result.error == "provider invocation failed: run_id is required"
+    assert result.metadata["resolved_backend"] == "ollama-local"
+    assert result.metadata["existing"] == "kept"
+    assert "provider_ref" not in result.metadata
+    assert invoker.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [None, 0, {}])
+async def test_non_string_provider_content_returns_error_state(content: object) -> None:
+    graph = build_graph(
+        registry=_Registry(_backend()), provider_invoker=_ContentInvoker(content)
+    )
+    state = PerpetuaState(session_id="session-1", target_tier="mac")
+
+    result = await graph.ainvoke(state)
+
+    assert result.error == "provider invocation failed: provider content must be a string"
+    assert result.metadata["resolved_backend"] == "ollama-local"
+    assert "provider_content" not in result.metadata
+    assert "provider_ref" not in result.metadata
+    assert result.messages == []
+
+
+@pytest.mark.asyncio
+async def test_empty_string_provider_content_remains_a_valid_response() -> None:
+    graph = build_graph(
+        registry=_Registry(_backend()), provider_invoker=_ContentInvoker("")
+    )
+
+    result = await graph.ainvoke(PerpetuaState(session_id="session-1", target_tier="mac"))
+
+    assert result.error is None
+    assert result.messages[-1]["content"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", [asyncio.CancelledError, KeyboardInterrupt, SystemExit])
+async def test_provider_control_flow_interrupts_propagate(interrupt: type[BaseException]) -> None:
+    graph = build_graph(
+        registry=_Registry(_backend()), provider_invoker=_InterruptingInvoker(interrupt)
+    )
+
+    with pytest.raises(interrupt):
+        await graph.ainvoke(PerpetuaState(session_id="session-1", target_tier="mac"))
+
+
+@pytest.mark.asyncio
+async def test_provider_graph_interrupt_reaches_minigraph() -> None:
+    interrupt = Interrupt(prompt="operator approval required", payload={"action": "invoke"})
+    graph = build_graph(
+        registry=_Registry(_backend()),
+        provider_invoker=_InterruptingInvoker(lambda: interrupt),
+    )
+
+    result = await graph.ainvoke(PerpetuaState(session_id="session-1", target_tier="mac"))
+
+    assert result.status == "interrupted"
+    assert result.error is None
+    assert result.metadata["interrupt_node"] == "dispatch"
+    assert result.metadata["interrupt_prompt"] == "operator approval required"
+    assert result.metadata["interrupt_payload"] == {"action": "invoke"}
+    assert "respond" not in result.nodes_visited

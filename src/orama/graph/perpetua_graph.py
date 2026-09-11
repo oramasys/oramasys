@@ -98,18 +98,24 @@ def build_graph(
                 "metadata": metadata,
             }
 
-        request = ProviderInvocationRequest(
-            backend=backend,
-            model=model,
-            messages=_provider_messages(state),
-            run_id=str(state.metadata.get("run_id") or state.session_id),
-        )
         try:
+            request = ProviderInvocationRequest(
+                backend=backend,
+                model=model,
+                messages=_provider_messages(state),
+                run_id=str(state.metadata.get("run_id") or state.session_id),
+            )
             result = await provider_invoker.invoke(request)
             provider_ref = result.provider_ref
             decision_ref = result.decision_ref
             provider_content = result.content
+            if not isinstance(provider_content, str):
+                raise TypeError("provider content must be a string")
         except Exception as exc:
+            if type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt"):
+                # MiniGraph owns its structural HITL protocol. Re-raise its
+                # interrupt so the scheduler can emit the interrupted state.
+                raise
             # asyncio.CancelledError/SystemExit/KeyboardInterrupt inherit from
             # BaseException and therefore retain their control-flow semantics.
             # Provider/runtime/data-shape failures become a normal graph delta.
@@ -129,6 +135,10 @@ def build_graph(
 
     async def respond_node(state: PerpetuaState) -> dict:
         """Append provider content or the Phase-2 dispatch compatibility response."""
+        if state.error is not None:
+            # MiniGraph can continue after an error delta. Do not append a
+            # success-like compatibility response after a failed dispatch.
+            return {}
         provider_content = state.metadata.get("provider_content")
         if isinstance(provider_content, str):
             content = provider_content
