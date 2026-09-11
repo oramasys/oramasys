@@ -117,16 +117,24 @@ def _assert_exact_candidate_authorizer(
 ) -> None:
     function = _function(tree, "_candidate_authorizer")
 
-    endpoint_calls = [
+    candidate_assignments = [
         node
         for node in ast.walk(function)
-        if isinstance(node, ast.Call)
-        and _qualified_name(node.func, bindings) == "telos.endpoint_from_url"
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "candidate"
+        and isinstance(node.value, ast.Call)
+        and _qualified_name(node.value.func, bindings) == "telos.endpoint_from_url"
     ]
-    assert len(endpoint_calls) == 1, "candidate must be normalized by telos.endpoint_from_url"
-    assert len(endpoint_calls[0].args) == 1
-    assert isinstance(endpoint_calls[0].args[0], ast.Name)
-    assert endpoint_calls[0].args[0].id == "url"
+    assert len(candidate_assignments) == 1, (
+        "candidate must be assigned directly from telos.endpoint_from_url(url), "
+        "not merely call it unused elsewhere"
+    )
+    endpoint_call = candidate_assignments[0].value
+    assert len(endpoint_call.args) == 1
+    assert isinstance(endpoint_call.args[0], ast.Name)
+    assert endpoint_call.args[0].id == "url"
 
     exact_rule_calls = [
         node
@@ -154,8 +162,9 @@ def _assert_exact_candidate_authorizer(
 
 
 def _assert_transport_policy(tree: ast.AST, bindings: dict[str, str]) -> None:
+    assert isinstance(tree, ast.Module)
     policy_calls: list[ast.Call] = []
-    for node in ast.walk(tree):
+    for node in tree.body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -165,7 +174,10 @@ def _assert_transport_policy(tree: ast.AST, bindings: dict[str, str]) -> None:
         if isinstance(value, ast.Call):
             policy_calls.append(value)
 
-    assert len(policy_calls) == 1, "expected exactly one module-level _POLICY constructor"
+    assert len(policy_calls) == 1, (
+        "expected exactly one direct module-level _POLICY constructor "
+        "(a nested or imported binding does not count)"
+    )
     policy_call = policy_calls[0]
     assert _qualified_name(policy_call.func, bindings) == "telos.TransportPolicy"
     keywords = _keyword_map(policy_call)
@@ -291,7 +303,7 @@ def test_contract_rejects_decoy_request_import_not_used_for_outbound_call() -> N
         "import asyncio\ndef fake_request(*args, **kwargs): return None\n",
         1,
     )
-    with pytest.raises(AssertionError, match="telos.request"):
+    with pytest.raises(AssertionError, match=r"telos\.request"):
         _assert_telos_probe_contract(source)
 
 
@@ -305,5 +317,51 @@ def test_contract_rejects_non_exact_candidate_authorization() -> None:
         "{EndpointPurpose.HEALTH_PROBE: {candidate.key}}",
         "{EndpointPurpose.HEALTH_PROBE: {('http', '0.0.0.0', 80)}}",
     )
-    with pytest.raises(AssertionError, match="candidate.key"):
+    with pytest.raises(AssertionError, match=r"candidate\.key"):
+        _assert_telos_probe_contract(source)
+
+
+def test_contract_rejects_candidate_not_assigned_from_endpoint_from_url() -> None:
+    """Confirmed directly against the pre-fix check: calling
+    endpoint_from_url(url) unused elsewhere, while assigning candidate from
+    a different expression entirely, satisfied the old 'does this call
+    exist anywhere' check."""
+    source = _minimal_probe_source().replace(
+        "    candidate = endpoint_from_url(url)\n",
+        "    endpoint_from_url(url)  # decoy call, unused\n"
+        "    candidate = type('C', (), {'key': ('http', 'evil', 80)})()\n",
+    )
+    with pytest.raises(AssertionError, match="assigned directly from"):
+        _assert_telos_probe_contract(source)
+
+
+def test_contract_rejects_nested_policy_decoy_with_unverifiable_module_binding() -> None:
+    """Confirmed directly against the pre-fix check: a compliant _POLICY
+    nested inside an unused function satisfied the old ast.walk-based scan
+    (which descends into nested scopes), even though the real module-level
+    _POLICY was imported from elsewhere and never verified at all."""
+    source = (
+        "import asyncio\n"
+        "from telos import EndpointAuthorizer, EndpointPurpose, TransportPolicy, endpoint_from_url, request\n"
+        "from somewhere_else import _POLICY\n\n"
+        "def _decoy():\n"
+        "    _POLICY = TransportPolicy(allow_public=False, allow_private=True, "
+        "allow_loopback=True, require_https_for_public=True)\n"
+        "    return _POLICY\n\n"
+        "def _candidate_authorizer(url):\n"
+        "    candidate = endpoint_from_url(url)\n"
+        "    return EndpointAuthorizer.from_exact_rules("
+        "{EndpointPurpose.HEALTH_PROBE: {candidate.key}}, version='test')\n\n"
+        "async def health_probe(base_url, timeout=1.5):\n"
+        "    url = base_url.rstrip('/') + '/models'\n"
+        "    return await asyncio.to_thread(\n"
+        "        request, 'GET', url,\n"
+        "        authorizer=_candidate_authorizer(url),\n"
+        "        transport_policy=_POLICY,\n"
+        "        actor_id='core', workflow_id='health-probe',\n"
+        "        purpose=EndpointPurpose.HEALTH_PROBE, run_id='run-1',\n"
+        "        timeout=timeout, resolver=lambda host: (),\n"
+        "    )\n"
+    )
+    with pytest.raises(AssertionError, match="direct module-level"):
         _assert_telos_probe_contract(source)

@@ -92,6 +92,47 @@ def test_guard_rejects_shell_string_network_command(tmp_path: Path) -> None:
     assert any(v.rule == "raw-network-command" and v.detail == "wget" for v in violations)
 
 
+def test_guard_rejects_os_system_network_command(tmp_path: Path) -> None:
+    """Confirmed directly against the pre-fix scanner: os.system('curl ...')
+    was completely invisible -- the scanner only ever checked subprocess.*."""
+    _write(
+        tmp_path,
+        "src/orama/provider.py",
+        "import os\nos.system('curl https://example.com')\n",
+    )
+    violations = scan_tree(tmp_path / "src/orama")
+    assert any(v.rule == "raw-network-command" and v.detail == "curl" for v in violations)
+
+
+def test_guard_rejects_asyncio_create_subprocess_shell(tmp_path: Path) -> None:
+    """Confirmed directly against the pre-fix scanner: also invisible."""
+    _write(
+        tmp_path,
+        "src/orama/provider.py",
+        "import asyncio\n"
+        "async def f():\n"
+        "    await asyncio.create_subprocess_shell('wget https://example.com')\n",
+    )
+    violations = scan_tree(tmp_path / "src/orama")
+    assert any(v.rule == "raw-network-command" and v.detail == "wget" for v in violations)
+
+
+def test_guard_rejects_asyncio_create_subprocess_exec(tmp_path: Path) -> None:
+    """Confirmed directly against the pre-fix scanner: also invisible. Uses
+    the argv form (program as a separate first argument), matching how
+    create_subprocess_exec is actually called, distinct from the shell-
+    string form the two tests above cover."""
+    _write(
+        tmp_path,
+        "src/orama/provider.py",
+        "import asyncio\n"
+        "async def f():\n"
+        "    await asyncio.create_subprocess_exec('curl', 'https://example.com')\n",
+    )
+    violations = scan_tree(tmp_path / "src/orama")
+    assert any(v.rule == "raw-network-command" and v.detail == "curl" for v in violations)
+
+
 def test_guard_allows_telos_transport_import(tmp_path: Path) -> None:
     _write(tmp_path, "src/orama/provider.py", "from telos import SecureDialer\n")
     assert scan_tree(tmp_path / "src/orama") == []

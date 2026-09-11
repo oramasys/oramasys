@@ -10,7 +10,7 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "oramasys-telos @ git+https://github.com/oramasys/telos.git@b2143083044496d93be3ca2dc88c28135e034d9f",
-    "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@1021367aed03872a2fcfb0c5d30229e241e06dc5",
+    "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@c265825216b6f9284a9ce62f01737d963f88c4cd",
     "fastapi>=0.110",
     "pydantic>=2,<3",
     "uvicorn[standard]>=0.29",

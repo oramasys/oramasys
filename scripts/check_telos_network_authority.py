@@ -33,6 +33,14 @@ _BANNED_NETWORK_COMMANDS = frozenset(
 _SUBPROCESS_METHODS = frozenset(
     {"run", "call", "check_call", "check_output", "Popen"}
 )
+_PROCESS_LAUNCH_TARGETS = frozenset(
+    {
+        "os.system",
+        "asyncio.create_subprocess_shell",
+        "asyncio.create_subprocess_exec",
+    }
+    | {f"subprocess.{method}" for method in _SUBPROCESS_METHODS}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,10 +133,9 @@ def scan_file(path: Path) -> list[Violation]:
 
         elif isinstance(node, ast.Call):
             resolved = _resolve_call(node, alias_map)
-            if resolved is None or not resolved.startswith("subprocess."):
+            if resolved is None or resolved not in _PROCESS_LAUNCH_TARGETS:
                 continue
-            method = resolved.removeprefix("subprocess.")
-            if method not in _SUBPROCESS_METHODS or not node.args:
+            if not node.args:
                 continue
             executable = _literal_command(node.args[0])
             if executable in _BANNED_NETWORK_COMMANDS:
