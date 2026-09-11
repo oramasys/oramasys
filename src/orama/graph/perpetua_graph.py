@@ -19,6 +19,7 @@ from pathlib import Path
 from perpetua_core import END, START, MiniGraph, PerpetuaState
 from perpetua_core.discovery import BackendRegistry, select_backend
 from perpetua_core.discovery.errors import NoBackendAvailableError
+from perpetua_core.graph.plugins.interrupts import Interrupt
 from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec, stable_callable_ref
 from perpetua_core.policy import HardwarePolicyResolver
 
@@ -62,7 +63,11 @@ def build_graph(
 
     ``invocation_timeout_seconds`` bounds a hung provider invocation; on
     expiry the dispatch fails closed with a ``provider_invocation_timeout``
-    error delta instead of hanging the graph.
+    error delta instead of hanging the graph. Uses ``asyncio.wait`` rather
+    than ``asyncio.wait_for`` so an invoker that catches ``CancelledError``
+    and continues I/O cannot extend the dispatch past this deadline — the
+    timeout branch returns immediately and lets the abandoned task finish
+    (or not) in the background, it never awaits that task's own completion.
     """
 
     reg = registry if registry is not None else BackendRegistry()
@@ -121,7 +126,7 @@ def build_graph(
             )
             run_id = request.run_id
         except Exception as exc:
-            if type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt"):
+            if isinstance(exc, Interrupt):
                 raise
             return {
                 "error": f"provider invocation failed: {exc}",
@@ -149,28 +154,53 @@ def build_graph(
 
         try:
             if invocation_timeout_seconds is not None:
-                result = await asyncio.wait_for(
-                    provider_invoker.invoke(request),
-                    timeout=invocation_timeout_seconds,
+                # Only wrapped in a real Task on the timeout path -- an
+                # asyncio Task re-raises KeyboardInterrupt/SystemExit out of
+                # its own step method into the event loop directly, bypassing
+                # the normal await/.result() exception propagation a bare
+                # `await coro` gives those same BaseException types. Wrapping
+                # unconditionally would silently change that control-flow
+                # semantics for every dispatch, not just the timed-out ones.
+                invoke_task = asyncio.ensure_future(provider_invoker.invoke(request))
+                done, pending = await asyncio.wait(
+                    {invoke_task}, timeout=invocation_timeout_seconds
                 )
+                if invoke_task in pending:
+                    # Deliberately NOT asyncio.wait_for: that primitive awaits
+                    # the task's own cancellation to finish, so an invoker
+                    # that catches CancelledError and keeps doing I/O extends
+                    # the wait past invocation_timeout_seconds regardless.
+                    # asyncio.wait already returned at the deadline; cancel
+                    # and move on without waiting further -- the task may
+                    # still be running, abandoned, but the dispatch settles.
+                    invoke_task.cancel()
+                    _record("timeout", reason="invocation exceeded dispatch deadline")
+                    return {
+                        "error": (
+                            f"provider invocation timed out after "
+                            f"{invocation_timeout_seconds}s"
+                        ),
+                        "metadata": {**metadata, "provider_outcome": "timeout"},
+                    }
+                result = invoke_task.result()
             else:
                 result = await provider_invoker.invoke(request)
             provider_ref = result.provider_ref
             decision_ref = result.decision_ref
             provider_content = result.content
             policy_version = getattr(result, "policy_version", None)
+            # ProviderInvoker is a Protocol: a structurally-compatible but
+            # non-ProviderInvocationResult object bypasses that dataclass's
+            # own __post_init__ validation entirely. Validate the identity
+            # references at this boundary too, not just provider_content.
+            if not isinstance(provider_ref, str) or not provider_ref.strip():
+                raise TypeError("provider_ref must be a non-empty string")
+            if not isinstance(decision_ref, str) or not decision_ref.strip():
+                raise TypeError("decision_ref must be a non-empty string")
             if not isinstance(provider_content, str):
                 raise TypeError("provider content must be a string")
-        except asyncio.TimeoutError:
-            # A hung invocation must not hang the graph: fail closed within
-            # the caller-supplied deadline and record the containment.
-            _record("timeout", reason="invocation exceeded dispatch deadline")
-            return {
-                "error": f"provider invocation timed out after {invocation_timeout_seconds}s",
-                "metadata": {**metadata, "provider_outcome": "timeout"},
-            }
         except Exception as exc:
-            if type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt"):
+            if isinstance(exc, Interrupt):
                 # MiniGraph owns its structural HITL protocol. Re-raise its
                 # interrupt so the scheduler can emit the interrupted state.
                 raise

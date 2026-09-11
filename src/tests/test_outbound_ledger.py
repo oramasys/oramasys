@@ -150,6 +150,68 @@ async def test_hung_invocation_is_contained_by_the_dispatch_deadline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_settles_on_deadline_even_when_invoker_suppresses_cancellation() -> None:
+    """CodeRabbit finding df4ea0a759661a4e56e2cddf: asyncio.wait_for() waits
+    for a cancelled task's own cancellation to finish, so an invoker that
+    catches CancelledError and keeps doing I/O can extend the wait well past
+    invocation_timeout_seconds. Proves the actual wall-clock deadline holds
+    even against an invoker deliberately built to ignore cancellation."""
+    ledger = InMemoryOutboundLedger()
+
+    class _CancellationSuppressingInvoker:
+        """Swallows cancellation exactly twice before finally respecting it.
+
+        Bounded deliberately: an invoker that swallows cancellation forever
+        would still prove the dispatch-level assertion below, but it would
+        also leave an immortal background task that this test's own event
+        loop teardown has to wait out -- an artifact of the test process,
+        not of the dispatch code under test. A few bounded swallows are
+        enough to prove asyncio.wait() (not asyncio.wait_for()) is what lets
+        dispatch_node return at the deadline regardless.
+        """
+
+        def __init__(self) -> None:
+            self.cancelled_count = 0
+
+        async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+            for _ in range(2):
+                try:
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    self.cancelled_count += 1
+                    continue  # swallow cancellation and keep "working" briefly
+            return ProviderInvocationResult(
+                content="should never be reached",
+                provider_ref="provider-ref-1",
+                decision_ref="telos-decision-1",
+            )
+
+    invoker = _CancellationSuppressingInvoker()
+    graph = build_graph(
+        registry=_Registry(_backend()),
+        provider_invoker=invoker,
+        outbound_ledger=ledger,
+        invocation_timeout_seconds=0.05,
+    )
+
+    started = asyncio.get_event_loop().time()
+    result = await asyncio.wait_for(graph.ainvoke(_state("session-suppressed")), timeout=2.0)
+    elapsed = asyncio.get_event_loop().time() - started
+
+    assert result.error is not None
+    assert "timed out" in result.error
+    assert result.metadata["provider_outcome"] == "timeout"
+    # The real assertion: dispatch itself settled near the 0.05s deadline,
+    # not near the invoker's ~20s of suppressed-cancellation sleeping. The
+    # 2.0s outer wait_for is only a test-safety net against a genuine hang;
+    # it is not the behavior under test.
+    assert elapsed < 1.0
+    entries = ledger.entries()
+    assert len(entries) == 1
+    assert entries[0].outcome == "timeout"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_dispatches_interleave_without_crosstalk() -> None:
     ledger = InMemoryOutboundLedger()
     graph = build_graph(

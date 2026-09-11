@@ -135,9 +135,20 @@ def scan_file(path: Path) -> list[Violation]:
             resolved = _resolve_call(node, alias_map)
             if resolved is None or resolved not in _PROCESS_LAUNCH_TARGETS:
                 continue
-            if not node.args:
+            command_node = None
+            if node.args:
+                command_node = node.args[0]
+            else:
+                # subprocess.run(args=["curl", ...]) and os.system(command=...)
+                # pass the command as a keyword, not positionally; a scanner
+                # that only checks node.args[0] silently misses this form.
+                for keyword in node.keywords:
+                    if keyword.arg in ("args", "command", "cmd"):
+                        command_node = keyword.value
+                        break
+            if command_node is None:
                 continue
-            executable = _literal_command(node.args[0])
+            executable = _literal_command(command_node)
             if executable in _BANNED_NETWORK_COMMANDS:
                 violations.append(
                     Violation(
