@@ -1,6 +1,7 @@
 """Provider-facing application contracts."""
 
 from .contracts import (
+    AbortableProviderInvoker,
     ProviderInvocationRequest,
     ProviderInvocationResult,
     ProviderInvoker,
@@ -13,6 +14,7 @@ from .ledger import (
 )
 
 __all__ = [
+    "AbortableProviderInvoker",
     "InMemoryOutboundLedger",
     "OutboundLedger",
     "OutboundLedgerEntry",

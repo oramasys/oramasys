@@ -24,6 +24,7 @@ from orama.providers import (
     ProviderInvocationRequest,
     ProviderInvocationResult,
 )
+from orama.providers.contracts import AbortableProviderInvoker
 
 
 class _Registry:
@@ -209,6 +210,137 @@ async def test_dispatch_settles_on_deadline_even_when_invoker_suppresses_cancell
     entries = ledger.entries()
     assert len(entries) == 1
     assert entries[0].outcome == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_calls_abort_on_abortable_invoker_after_timeout() -> None:
+    """Part 1 of the Phase-3 hard-termination design: an invoker that
+    implements the optional AbortableProviderInvoker capability gets a
+    second, independent chance to force resource release (e.g. closing
+    its own transport) beyond plain .cancel(), which only requests
+    cooperative cancellation."""
+    ledger = InMemoryOutboundLedger()
+    abort_calls: list[ProviderInvocationRequest] = []
+
+    class _AbortableHangingInvoker:
+        async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+            await asyncio.sleep(30)
+            raise AssertionError("must never complete")
+
+        async def abort(self, request: ProviderInvocationRequest) -> None:
+            abort_calls.append(request)
+
+    invoker = _AbortableHangingInvoker()
+    assert isinstance(invoker, AbortableProviderInvoker)
+    graph = build_graph(
+        registry=_Registry(_backend()),
+        provider_invoker=invoker,
+        outbound_ledger=ledger,
+        invocation_timeout_seconds=0.05,
+    )
+
+    result = await asyncio.wait_for(graph.ainvoke(_state("session-abort")), timeout=2.0)
+
+    assert result.error is not None
+    assert "timed out" in result.error
+    # abort() runs as a fire-and-forget background task alongside the
+    # cancelled invoke() task; give the event loop one more tick so its
+    # (synchronous, no-await-inside) body has actually run.
+    await asyncio.sleep(0)
+    assert len(abort_calls) == 1
+    assert abort_calls[0].run_id == "session-abort"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_refuses_new_invocations_once_abandoned_cap_exceeded() -> None:
+    """Part 2 of the Phase-3 hard-termination design: bounding
+    "accumulate tasks... without a bound" (CodeRabbit PR#7 review
+    5184132490) does not require invoker cooperation to be SAFE, only to
+    recover quickly. Once max_abandoned_invocations abandoned tasks are
+    outstanding, a NEW dispatch must fail closed immediately rather than
+    pile more uncooperative background work on top."""
+    ledger = InMemoryOutboundLedger()
+
+    class _BoundedSuppressingInvoker:
+        """Swallows cancellation twice (~0.2s total) then finishes -- long
+        enough to still be 'abandoned' when the second dispatch runs,
+        short enough not to outlive this test."""
+
+        async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+            for _ in range(2):
+                try:
+                    await asyncio.sleep(0.1)
+                except asyncio.CancelledError:
+                    continue
+            return ProviderInvocationResult(
+                content="unused", provider_ref="p", decision_ref="d",
+            )
+
+    graph = build_graph(
+        registry=_Registry(_backend()),
+        provider_invoker=_BoundedSuppressingInvoker(),
+        outbound_ledger=ledger,
+        invocation_timeout_seconds=0.02,
+        max_abandoned_invocations=1,
+    )
+
+    first = await asyncio.wait_for(graph.ainvoke(_state("session-first")), timeout=1.0)
+    assert first.metadata["provider_outcome"] == "timeout"
+
+    # The first dispatch's invoker task is still abandoned (its own 0.2s
+    # of bounded suppression hasn't elapsed yet) -- the cap (1) is already
+    # met, so this second dispatch must be refused before ever calling
+    # invoke() again, not time out a second time.
+    second = await asyncio.wait_for(graph.ainvoke(_state("session-second")), timeout=1.0)
+    assert second.metadata["provider_outcome"] == "circuit_open"
+    assert "abandoned" in (second.error or "")
+
+    entries = ledger.entries()
+    assert [e.outcome for e in entries] == ["timeout", "failed"]
+    assert entries[1].reason == "TooManyAbandonedInvocations"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_recovers_once_abandoned_task_finishes() -> None:
+    """Complementary case to the cap test above: once the abandoned task
+    actually finishes on its own, the registry empties and a subsequent
+    dispatch on the SAME graph is accepted (times out on its own new
+    grounds) rather than refused outright by the still-open circuit."""
+    ledger = InMemoryOutboundLedger()
+
+    class _BoundedSuppressingInvoker:
+        async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
+            for _ in range(2):
+                try:
+                    await asyncio.sleep(0.1)
+                except asyncio.CancelledError:
+                    continue
+            return ProviderInvocationResult(
+                content="unused", provider_ref="p", decision_ref="d",
+            )
+
+    graph = build_graph(
+        registry=_Registry(_backend()),
+        provider_invoker=_BoundedSuppressingInvoker(),
+        outbound_ledger=ledger,
+        invocation_timeout_seconds=0.02,
+        max_abandoned_invocations=1,
+    )
+
+    first = await asyncio.wait_for(graph.ainvoke(_state("session-first")), timeout=1.0)
+    assert first.metadata["provider_outcome"] == "timeout"
+
+    # Give the first dispatch's abandoned task its own ~0.2s of bounded
+    # suppression time to actually finish and clear itself from the
+    # registry via its done-callback.
+    await asyncio.sleep(0.5)
+
+    # Same graph, same invoker (always overshoots the 0.02s deadline) --
+    # if the registry had NOT drained, this would be refused outright
+    # with provider_outcome=circuit_open instead of being accepted and
+    # timing out on its own.
+    third = await asyncio.wait_for(graph.ainvoke(_state("session-recovered")), timeout=1.0)
+    assert third.metadata["provider_outcome"] == "timeout"
 
 
 @pytest.mark.asyncio

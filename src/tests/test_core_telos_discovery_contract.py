@@ -160,6 +160,49 @@ def _assert_exact_candidate_authorizer(
         and member.attr == "key"
     ), "authorization must be scoped to candidate.key"
 
+    # CWE-863 (Incorrect Authorization): everything above only confirms
+    # from_exact_rules(...) was CALLED somewhere in the function with the
+    # right arguments -- it says nothing about what the function actually
+    # RETURNS. A decoy call to from_exact_rules() followed by
+    # `return some_other_permissive_authorizer` would satisfy every check
+    # above while authorizing something else entirely. Require the
+    # exact-rule call's own result to be what reaches the return
+    # statement, either directly (`return from_exact_rules(...)`) or via
+    # a single intermediate assignment (`x = from_exact_rules(...); return x`).
+    return_nodes = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Return) and node.value is not None
+    ]
+    assert len(return_nodes) == 1, (
+        "_candidate_authorizer must have exactly one return statement"
+    )
+    returned = return_nodes[0].value
+
+    def _is_the_exact_rule_result(value: ast.AST) -> bool:
+        if value is exact_call:
+            return True
+        if isinstance(value, ast.Name):
+            aliasing_assignments = [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == value.id
+                and node.value is exact_call
+            ]
+            return len(aliasing_assignments) == 1
+        return False
+
+    assert _is_the_exact_rule_result(returned), (
+        "_candidate_authorizer must return the exact-rule authorizer it "
+        "constructed -- a decoy call to from_exact_rules() followed by "
+        "returning a different authorizer does not actually return the "
+        "exact-rule result, so callers would never receive the authorizer "
+        "this function claims to build"
+    )
+
 
 def _assert_transport_policy(tree: ast.AST, bindings: dict[str, str]) -> None:
     assert isinstance(tree, ast.Module)
@@ -364,4 +407,29 @@ def test_contract_rejects_nested_policy_decoy_with_unverifiable_module_binding()
         "    )\n"
     )
     with pytest.raises(AssertionError, match="direct module-level"):
+        _assert_telos_probe_contract(source)
+
+
+def test_contract_rejects_decoy_exact_rules_call_with_permissive_return() -> None:
+    """CodeRabbit PR#7 review 5184132490 (line 146): the pre-fix check only
+    confirmed EndpointAuthorizer.from_exact_rules(...) was CALLED somewhere
+    in _candidate_authorizer, never that its result was what the function
+    actually returned -- a decoy call to from_exact_rules() followed by
+    returning a different, permissive authorizer satisfied every existing
+    assertion (CWE-863, Incorrect Authorization)."""
+    source = _minimal_probe_source().replace(
+        "    candidate = endpoint_from_url(url)\n"
+        "    return EndpointAuthorizer.from_exact_rules(\n"
+        "        {EndpointPurpose.HEALTH_PROBE: {candidate.key}},\n"
+        "        version=\"test\",\n"
+        "    )\n",
+        "    candidate = endpoint_from_url(url)\n"
+        "    EndpointAuthorizer.from_exact_rules(  # decoy call, unused\n"
+        "        {EndpointPurpose.HEALTH_PROBE: {candidate.key}},\n"
+        "        version=\"test\",\n"
+        "    )\n"
+        "    return EndpointAuthorizer.from_permissive_rules()\n",
+    )
+    assert "from_permissive_rules" in source  # guard against a silent .replace() no-op
+    with pytest.raises(AssertionError, match="does not actually return"):
         _assert_telos_probe_contract(source)

@@ -24,6 +24,7 @@ from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec, stable_calla
 from perpetua_core.policy import HardwarePolicyResolver
 
 from orama.providers import (
+    AbortableProviderInvoker,
     OutboundLedger,
     OutboundLedgerEntry,
     ProviderInvocationRequest,
@@ -32,6 +33,26 @@ from orama.providers import (
 )
 
 _POLICY_PATH = Path(__file__).parent.parent.parent / "config" / "model_hardware_policy.yml"
+
+_DEFAULT_MAX_ABANDONED_INVOCATIONS = 8
+
+
+def _track_abandoned(task: asyncio.Task, registry: set[asyncio.Task]) -> None:
+    """Track a fire-and-forget task so its resource footprint is bounded
+    and observable instead of vanishing into the event loop untracked."""
+    registry.add(task)
+
+    def _on_done(finished: asyncio.Task) -> None:
+        registry.discard(finished)
+        if not finished.cancelled() and finished.exception() is not None:
+            # Abandoned background work failing is expected -- that's
+            # exactly why it was abandoned. The ledger already recorded
+            # the timeout that caused this; swallow here so it doesn't
+            # also surface as an "exception was never retrieved" warning
+            # at garbage-collection time.
+            pass
+
+    task.add_done_callback(_on_done)
 
 
 def _provider_messages(state: PerpetuaState) -> tuple[ProviderMessage, ...]:
@@ -51,6 +72,7 @@ def build_graph(
     provider_invoker: ProviderInvoker | None = None,
     outbound_ledger: OutboundLedger | None = None,
     invocation_timeout_seconds: float | None = None,
+    max_abandoned_invocations: int = _DEFAULT_MAX_ABANDONED_INVOCATIONS,
 ) -> MiniGraph:
     """Build the default graph.
 
@@ -62,15 +84,36 @@ def build_graph(
     When omitted, dispatch behavior is unchanged and nothing is recorded.
 
     ``invocation_timeout_seconds`` bounds a hung provider invocation; on
-    expiry the dispatch fails closed with a ``provider_invocation_timeout``
-    error delta instead of hanging the graph. Uses ``asyncio.wait`` rather
-    than ``asyncio.wait_for`` so an invoker that catches ``CancelledError``
-    and continues I/O cannot extend the dispatch past this deadline — the
-    timeout branch returns immediately and lets the abandoned task finish
-    (or not) in the background, it never awaits that task's own completion.
+    expiry the dispatch fails closed with a timeout error delta instead of
+    hanging the graph. Uses ``asyncio.wait`` rather than ``asyncio.wait_for``
+    so an invoker that catches ``CancelledError`` and continues I/O cannot
+    extend the dispatch past this deadline — the timeout branch returns
+    immediately and lets the abandoned task finish (or not) in the
+    background, it never awaits that task's own completion.
+
+    Hard termination against an invoker that ignores cancellation is a
+    two-part mitigation, both scoped to this one ``build_graph()`` call
+    (each graph instance owns its own abandoned-task registry):
+
+    1. If ``provider_invoker`` also implements ``AbortableProviderInvoker``
+       (an optional capability, checked structurally), its ``abort()`` is
+       fired alongside ``.cancel()`` on timeout -- a second, independent
+       chance to force resource release (e.g. closing an underlying
+       transport) that does not depend on the invoker's own coroutine ever
+       noticing cancellation.
+    2. Every abandoned task (the cancelled ``invoke()`` and, when present,
+       the ``abort()`` call) is tracked in a bounded registry. Once
+       ``max_abandoned_invocations`` abandoned tasks are outstanding, a new
+       dispatch fails closed immediately (``provider_outcome: circuit_open``)
+       instead of piling more uncooperative background work on top --
+       bounding "accumulate without a bound" even when neither invoker
+       cooperation nor ``abort()`` actually stops anything. Only meaningful
+       when ``invocation_timeout_seconds`` is set; otherwise no task is ever
+       abandoned in the first place.
     """
 
     reg = registry if registry is not None else BackendRegistry()
+    abandoned_tasks: set[asyncio.Task] = set()
 
     async def route_node(state: PerpetuaState) -> dict:
         """Apply the optional hardware-affinity routing policy."""
@@ -152,6 +195,24 @@ def build_graph(
                 )
             )
 
+        if invocation_timeout_seconds is not None and len(abandoned_tasks) >= max_abandoned_invocations:
+            # Circuit breaker: refuse to start a NEW invocation while too
+            # many prior ones remain abandoned (cancelled but not
+            # confirmed finished). This bounds resource accumulation
+            # regardless of whether the invoker ever cooperates with
+            # cancellation or implements AbortableProviderInvoker below --
+            # it does not need either to be SAFE, only to recover quickly
+            # once abandoned tasks actually finish and clear themselves.
+            _record("failed", reason="TooManyAbandonedInvocations")
+            return {
+                "error": (
+                    f"refusing dispatch: {len(abandoned_tasks)} abandoned "
+                    f"provider invocations have not yet released their "
+                    f"resources"
+                ),
+                "metadata": {**metadata, "provider_outcome": "circuit_open"},
+            }
+
         try:
             if invocation_timeout_seconds is not None:
                 # Only wrapped in a real Task on the timeout path -- an
@@ -174,27 +235,24 @@ def build_graph(
                     # and move on without waiting further -- the task may
                     # still be running, abandoned, but the dispatch settles.
                     #
-                    # KNOWN LIMITATION (not fixed here): .cancel() only
-                    # requests cooperative cancellation. An invoker that
-                    # catches CancelledError and keeps running (proven by
-                    # test_dispatch_settles_on_deadline_even_when_invoker_
-                    # suppresses_cancellation in test_outbound_ledger.py)
-                    # keeps consuming whatever resources it holds --
-                    # connections, sockets, memory -- until it eventually
-                    # finishes or the process exits; repeated timeouts
-                    # against such an invoker can accumulate abandoned work
-                    # without a hard bound. A real fix needs a provider
-                    # boundary that supports hard termination (e.g. closing
-                    # the underlying transport out from under the invoker,
-                    # or running invocation in a separately killable
-                    # process/thread) -- neither exists yet, since
-                    # ProviderInvoker is currently a bare Protocol with no
-                    # cancel/close contract and no concrete network-backed
-                    # implementation in this codebase to add one to. Bounding
-                    # or backpressuring abandoned-task accumulation without
-                    # that boundary would only mask the problem, not fix it.
-                    # Tracked as a Phase-3 provider-invocation design gap.
+                    # .cancel() only requests cooperative cancellation, which
+                    # an invoker that catches CancelledError and keeps
+                    # running (proven by test_dispatch_settles_on_deadline_
+                    # even_when_invoker_suppresses_cancellation) does not
+                    # honor. Two mitigations, neither requiring the other:
+                    # (1) if the invoker also implements
+                    # AbortableProviderInvoker, fire its abort() too -- an
+                    # independent chance to force resource release (e.g.
+                    # closing a transport) that does not depend on invoke()
+                    # ever noticing cancellation; (2) track both the
+                    # cancelled task and any abort() call in a bounded
+                    # registry so repeated timeouts trip the circuit
+                    # breaker above instead of accumulating without limit.
                     invoke_task.cancel()
+                    _track_abandoned(invoke_task, abandoned_tasks)
+                    if isinstance(provider_invoker, AbortableProviderInvoker):
+                        abort_task = asyncio.ensure_future(provider_invoker.abort(request))
+                        _track_abandoned(abort_task, abandoned_tasks)
                     _record("timeout", reason="invocation exceeded dispatch deadline")
                     return {
                         "error": (
