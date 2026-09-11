@@ -20,6 +20,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -54,6 +55,44 @@ def test_ledger_appends_and_reads_back_in_order(tmp_path: Path) -> None:
 def test_ledger_rejects_a_malformed_existing_line(tmp_path: Path) -> None:
     path = tmp_path / "outbound.jsonl"
     path.write_text('{"run_id": "run-1", "outcome": "succeeded", "recorded_at": "2026-09-11T00:00:00+00:00"}\nnot json\n', encoding="utf-8")
+    ledger = JsonlOutboundLedger(path)
+
+    with pytest.raises(ValueError, match="malformed"):
+        ledger.read_all()
+
+
+def test_ledger_record_calls_fsync_after_flush(tmp_path: Path) -> None:
+    """handle.flush() only flushes Python's own buffers; a host failure can
+    still lose the entry before it reaches disk without an explicit fsync."""
+    ledger = JsonlOutboundLedger(tmp_path / "outbound.jsonl")
+
+    with patch("orama.providers.outbound_ledger.os.fsync") as mock_fsync:
+        asyncio.run(ledger.record(OutboundDispatchRecord(run_id="run-1", outcome="succeeded")))
+
+    mock_fsync.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "bad_line",
+    [
+        '{"run_id": 7, "outcome": "succeeded", "recorded_at": "2026-09-11T00:00:00+00:00"}',
+        '{"run_id": "run-1", "outcome": "sideways", "recorded_at": "2026-09-11T00:00:00+00:00"}',
+        '{"run_id": "run-1", "outcome": "succeeded"}',
+        '{"run_id": "run-1", "outcome": [], "recorded_at": "2026-09-11T00:00:00+00:00"}',
+        '{"run_id": "run-1", "outcome": "succeeded", "recorded_at": "not-a-timestamp"}',
+    ],
+    ids=["run_id-not-str", "outcome-not-allowed", "missing-recorded_at", "outcome-not-str", "recorded_at-not-iso"],
+)
+def test_ledger_rejects_syntactically_valid_but_schema_invalid_line(
+    tmp_path: Path, bad_line: str
+) -> None:
+    """A line that parses as JSON but violates the record schema (wrong
+    field types, an outcome outside the allowed vocabulary, or a missing/
+    invalid recorded_at) must be treated as tampering/corruption too, not
+    silently accepted via the dataclass constructor's lack of runtime
+    validation."""
+    path = tmp_path / "outbound.jsonl"
+    path.write_text(bad_line + "\n", encoding="utf-8")
     ledger = JsonlOutboundLedger(path)
 
     with pytest.raises(ValueError, match="malformed"):

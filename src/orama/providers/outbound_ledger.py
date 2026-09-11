@@ -7,11 +7,16 @@ the Tier-5 financial reservation/settlement ledger. The schema stays narrow
 on purpose — routing and policy evaluation remain in the graph and Telos
 respectively, while paid-call accounting remains a separate SQLite authority.
 
-Records are JSON-lines, one per dispatch, written under an asyncio lock so
-concurrent run_ids cannot interleave a line. ``read_all`` parses strictly: a
-malformed line means tampering or disk corruption and must surface, not be
-silently skipped — append-only evidence is only worth keeping if damage is
-loud.
+Records are JSON-lines, one per dispatch, written under an in-process
+asyncio lock so concurrent run_ids within the SAME process cannot
+interleave a line -- this does not coordinate multiple OS processes
+writing to the same path; see JsonlOutboundLedger's own docstring.
+``read_all`` parses and validates strictly: a malformed line, or a
+syntactically valid line that violates the record schema (wrong field
+types, an outcome outside the allowed vocabulary, a missing/invalid
+recorded_at), means tampering or disk corruption and must surface, not
+be silently skipped — append-only evidence is only worth keeping if
+damage is loud.
 
 This module is a standalone durable-persistence utility. It is not currently
 wired into ``build_graph``: the graph boundary already records dispatches
@@ -34,6 +39,9 @@ from pathlib import Path
 from typing import Any
 
 
+_ALLOWED_OUTCOMES = frozenset({"succeeded", "failed"})
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds")
 
@@ -53,6 +61,35 @@ class OutboundDispatchRecord:
     recorded_at: str = field(default_factory=_utc_now_iso)
 
 
+def _validate_persisted_payload(payload: dict[str, Any]) -> None:
+    """Enforce the on-disk record schema at readback.
+
+    ``OutboundDispatchRecord(**payload)`` alone does not enforce field
+    types or the outcome vocabulary at runtime -- a syntactically valid
+    JSON line with ``run_id: 7`` or ``outcome: "sideways"`` would otherwise
+    construct successfully, and a line missing ``recorded_at`` would
+    silently receive a *fresh* timestamp from the dataclass's
+    default_factory instead of surfacing that the persisted value is gone.
+    Both defeat the "loud on tampering/corruption" contract this ledger
+    documents. Validate explicitly before construction instead.
+    """
+    if not isinstance(payload.get("run_id"), str):
+        raise ValueError("run_id must be a string")
+    if payload.get("outcome") not in _ALLOWED_OUTCOMES:
+        raise ValueError(f"outcome must be one of {sorted(_ALLOWED_OUTCOMES)}")
+    for field_name in ("decision_ref", "provider_ref", "telos_policy_version", "error"):
+        value = payload.get(field_name)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{field_name} must be a string or null")
+    recorded_at = payload.get("recorded_at")
+    if not isinstance(recorded_at, str):
+        raise ValueError("recorded_at is required and must be a string")
+    try:
+        datetime.fromisoformat(recorded_at)
+    except ValueError as exc:
+        raise ValueError(f"recorded_at is not a valid ISO timestamp: {exc}") from exc
+
+
 class JsonlOutboundLedger:
     """JSON-lines append-only ledger of outbound provider dispatches.
 
@@ -65,6 +102,16 @@ class JsonlOutboundLedger:
     """
 
     def __init__(self, path: Path | str) -> None:
+        # Single-writer-process restriction: self._lock is an in-process
+        # asyncio.Lock, so it serializes concurrent writers only within
+        # this Python process. It does not coordinate writers in separate
+        # OS processes sharing the same ledger path -- a genuine
+        # inter-process lock (e.g. fcntl.flock, which is POSIX-only and
+        # not portable to Windows without a separate code path) is a
+        # larger, platform-specific addition than this class currently
+        # needs. If a future caller genuinely needs multiple processes
+        # appending to the same ledger file concurrently, that support
+        # must be added deliberately, not assumed to already exist here.
         self._path = Path(path)
         self._lock = asyncio.Lock()
 
@@ -87,6 +134,12 @@ class JsonlOutboundLedger:
             with self._path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
+                # flush() only moves data out of Python's own buffers into
+                # the OS page cache; a host crash before the OS itself
+                # writes that page to disk can still lose the entry. This
+                # class is documented as a durable audit log, so force the
+                # write out with fsync rather than leaving that gap.
+                os.fsync(handle.fileno())
 
     def read_all(self) -> list[OutboundDispatchRecord]:
         """Parse every record back, strictly. Raises ValueError on any malformed line."""
@@ -100,8 +153,9 @@ class JsonlOutboundLedger:
                 continue
             try:
                 payload: dict[str, Any] = json.loads(line)
+                _validate_persisted_payload(payload)
                 records.append(OutboundDispatchRecord(**payload))
-            except (json.JSONDecodeError, TypeError) as exc:
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise ValueError(
                     f"malformed ledger line {line_number} in {self._path}: {exc}"
                 ) from exc

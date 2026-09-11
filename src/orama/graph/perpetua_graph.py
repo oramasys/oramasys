@@ -173,6 +173,27 @@ def build_graph(
                     # asyncio.wait already returned at the deadline; cancel
                     # and move on without waiting further -- the task may
                     # still be running, abandoned, but the dispatch settles.
+                    #
+                    # KNOWN LIMITATION (not fixed here): .cancel() only
+                    # requests cooperative cancellation. An invoker that
+                    # catches CancelledError and keeps running (proven by
+                    # test_dispatch_settles_on_deadline_even_when_invoker_
+                    # suppresses_cancellation in test_outbound_ledger.py)
+                    # keeps consuming whatever resources it holds --
+                    # connections, sockets, memory -- until it eventually
+                    # finishes or the process exits; repeated timeouts
+                    # against such an invoker can accumulate abandoned work
+                    # without a hard bound. A real fix needs a provider
+                    # boundary that supports hard termination (e.g. closing
+                    # the underlying transport out from under the invoker,
+                    # or running invocation in a separately killable
+                    # process/thread) -- neither exists yet, since
+                    # ProviderInvoker is currently a bare Protocol with no
+                    # cancel/close contract and no concrete network-backed
+                    # implementation in this codebase to add one to. Bounding
+                    # or backpressuring abandoned-task accumulation without
+                    # that boundary would only mask the problem, not fix it.
+                    # Tracked as a Phase-3 provider-invocation design gap.
                     invoke_task.cancel()
                     _record("timeout", reason="invocation exceeded dispatch deadline")
                     return {
