@@ -13,3 +13,4 @@ build/
 .hypothesis/
 .pytest_cache/
 .claude/hooks/.logs/
+.coverage
