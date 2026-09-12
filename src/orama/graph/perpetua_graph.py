@@ -1,7 +1,9 @@
 """
 Default oramasys graph — route → dispatch → respond.
 
-- route_node: hardware affinity gate (HardwarePolicyResolver, optional)
+- route_node: hardware affinity gate, backed by agate (oramasys/agate), the
+  canonical v2 hardware authority -- never orama-system's legacy dynamic PT
+  import and never a locally-embedded duplicate resolver.
 - dispatch_node: consults BackendRegistry/select_backend and records routing
   metadata; when an explicit ProviderInvoker is injected, it performs the
   application-level invocation through that contract.
@@ -14,14 +16,13 @@ must remain behind a Telos-backed ProviderInvoker implementation.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
+from agate import HardwareAffinityError, load_policy_cached
 from perpetua_core import END, START, MiniGraph, PerpetuaState
 from perpetua_core.discovery import BackendRegistry, select_backend
 from perpetua_core.discovery.errors import NoBackendAvailableError
 from perpetua_core.graph.plugins.interrupts import Interrupt
 from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec, stable_callable_ref
-from perpetua_core.policy import HardwarePolicyResolver
 
 from orama.providers import (
     AbortableProviderInvoker,
@@ -32,7 +33,19 @@ from orama.providers import (
     ProviderMessage,
 )
 
-_POLICY_PATH = Path(__file__).parent.parent.parent / "config" / "model_hardware_policy.yml"
+_TIER_TO_REPRESENTATIVE_PROFILE = {
+    "mac": "mac-studio",
+    "windows": "win-rtx3080",
+    "shared": "mac-studio",
+}
+
+
+def _representative_profile_id(target_tier: str) -> str:
+    try:
+        return _TIER_TO_REPRESENTATIVE_PROFILE[target_tier]
+    except KeyError:
+        raise ValueError(f"unknown target_tier: {target_tier!r}") from None
+
 
 _DEFAULT_MAX_ABANDONED_INVOCATIONS = 8
 
@@ -116,21 +129,50 @@ def build_graph(
     abandoned_tasks: set[asyncio.Task] = set()
 
     async def route_node(state: PerpetuaState) -> dict:
-        """Apply the optional hardware-affinity routing policy."""
+        """Apply the hardware-affinity routing policy via agate, the
+        canonical v2 hardware authority -- never orama-system's legacy
+        dynamic PT import (v1, frozen) and never perpetua-core's own
+        now-superseded duplicate resolver."""
         meta_extra: dict = {"routed_at": "route_node"}
-        if _POLICY_PATH.exists():
-            resolver = HardwarePolicyResolver.from_file(_POLICY_PATH)
-            decision = resolver.resolve(
-                task_type=state.task_type,
-                optimize_for=state.optimize_for,
-                model_hint=state.model_hint,
-            )
-            meta_extra["routed_model"] = decision.model
-            meta_extra["routed_tier"] = decision.hardware_tier
+        profile_id = _representative_profile_id(state.target_tier)
+        store = load_policy_cached()
+
+        if state.model_hint:
+            try:
+                verdict = store.decide(state.model_hint, profile_id)
+            except HardwareAffinityError as exc:
+                return {
+                    "error": str(exc),
+                    "metadata": {**state.metadata, **meta_extra, "routed_tier": state.target_tier},
+                }
+            meta_extra["routed_model"] = state.model_hint
+            meta_extra["routed_tier"] = state.target_tier
+            meta_extra["routed_verdict"] = verdict
+        else:
+            preferred = store.preferred_model(profile_id, task_key=state.task_type)
+            if preferred is not None:
+                meta_extra["routed_model"] = preferred
+                meta_extra["routed_tier"] = state.target_tier
+                # Propagate the agate-selected model as the effective hint:
+                # a hintless request otherwise left state.model_hint empty,
+                # so dispatch_node called select_backend hintless and
+                # executed backend.models[0] -- a model different from the
+                # one routing selected and reported (CodeRabbit Major on
+                # PR #12). Routing's decision is the contract; dispatch
+                # must consume exactly what routing reported.
+                delta = {"model_hint": preferred, "metadata": {**state.metadata, **meta_extra}}
+                return delta
+
         return {"metadata": {**state.metadata, **meta_extra}}
 
     async def dispatch_node(state: PerpetuaState) -> dict:
         """Resolve a backend and contain provider failures at the dispatch boundary."""
+        if state.error is not None:
+            # A prior node (route_node's hardware-affinity gate) already
+            # failed closed. Attempting dispatch anyway would silently
+            # overwrite that error with an unrelated "no backend" failure,
+            # discarding the actual reason for the rejection.
+            return {}
         try:
             backend = select_backend(
                 reg,
@@ -180,6 +222,12 @@ def build_graph(
                     provider_ref: str | None = None,
                     policy_version: str | None = None,
                     reason: str | None = None) -> None:
+            """Append one outbound-ledger entry for this dispatch attempt.
+
+            No-op when no ledger was injected. ``reason`` must already be a
+            non-sensitive summary (exception *type name*); raw exception text
+            never reaches the ledger.
+            """
             if outbound_ledger is None:
                 return
             outbound_ledger.record(
