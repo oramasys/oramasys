@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "oramasys-telos @ git+https://github.com/oramasys/telos.git@b2143083044496d93be3ca2dc88c28135e034d9f",
     "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@717f97565583fefd34f4a43064da870c0a95fb9a",
-    "oramasys-agate @ git+https://github.com/oramasys/agate.git@41a0da9",
+    "oramasys-agate @ git+https://github.com/oramasys/agate.git@41a0da9d52e0131049a1469234ac56f6990fc635",
     "fastapi>=0.110",
     "pydantic>=2,<3",
     "uvicorn[standard]>=0.29",
