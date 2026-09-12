@@ -18,6 +18,22 @@ from perpetua_core.discovery import Backend, BackendHealth, BackendKind
 from perpetua_core.state import PerpetuaState
 
 from orama.graph.perpetua_graph import build_graph
+from orama.providers import ProviderInvocationResult
+
+
+class _CapturingInvoker:
+    """Records the executed model per request; answers with valid content."""
+
+    def __init__(self) -> None:
+        self.models: list[str] = []
+
+    async def invoke(self, request):
+        self.models.append(request.model)
+        return ProviderInvocationResult(
+            content="provider answer",
+            provider_ref="provider-ref-1",
+            decision_ref="telos-decision-1",
+        )
 
 
 class _Registry:
@@ -98,6 +114,33 @@ async def test_route_node_routes_a_default_model_when_no_hint_given():
     # that's a separate, expected concern from route_node's own job,
     # which is only to supply a verified-fit routed_model.
     assert result.metadata.get("routed_model") is not None
+
+
+@pytest.mark.asyncio
+async def test_hintless_dispatch_executes_exactly_the_routed_model():
+    """CodeRabbit Major on PR #12: a hintless request used to leave
+    state.model_hint empty, so dispatch_node called select_backend without a
+    hint and executed backend.models[0] -- a model different from the one
+    agate selected and reported in metadata["routed_model"]. route_node must
+    propagate its selection as the effective model_hint, and the captured
+    ProviderInvocationRequest must prove the parity."""
+    registry = _Registry([_mac_backend("qwen3.5-9b-mlx"), _mac_backend("llama3.1:8b")])
+    invoker = _CapturingInvoker()
+    graph = build_graph(registry=registry, provider_invoker=invoker)
+    state = PerpetuaState(
+        session_id="t4",
+        task_type="reasoning",
+        target_tier="mac",
+    )
+
+    result = await graph.ainvoke(state)
+
+    routed_model = result.metadata.get("routed_model")
+    assert routed_model is not None
+    assert invoker.models == [routed_model]
+    # The reported and executed models are the same object value, not just
+    # truthy: no silent fallback to backend.models[0].
+    assert len(invoker.models) == 1
 
 
 def test_route_node_no_longer_imports_the_superseded_duplicate_resolver():

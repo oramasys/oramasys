@@ -144,6 +144,8 @@ async def test_no_invoker_preserves_phase2_no_network_behavior() -> None:
 
 @pytest.mark.asyncio
 async def test_explicit_invoker_receives_resolved_backend_and_telos_evidence() -> None:
+    """The explicit invoker receives the resolved backend and Telos
+    evidence, and executes exactly the model routing reported."""
     invoker = _FakeInvoker()
     graph = build_graph(
         registry=_Registry(_backend()),
@@ -162,7 +164,10 @@ async def test_explicit_invoker_receives_resolved_backend_and_telos_evidence() -
     assert len(invoker.requests) == 1
     request = invoker.requests[0]
     assert request.backend.name == "ollama-local"
-    assert request.model == "qwen-test"
+    # Hintless requests execute exactly the model routing selected and
+    # reported (route_node propagates agate's preferred model as the
+    # effective hint; CodeRabbit Major on PR #12).
+    assert request.model == result.metadata["routed_model"]
     assert request.messages == (ProviderMessage(role="user", content="hello"),)
     assert request.run_id == "run-42"
     assert result.metadata["provider_ref"] == "provider-ref-1"
@@ -171,7 +176,10 @@ async def test_explicit_invoker_receives_resolved_backend_and_telos_evidence() -
 
 
 @pytest.mark.asyncio
-async def test_explicit_invoker_fails_closed_when_backend_has_no_model() -> None:
+async def test_backend_with_no_advertised_models_still_executes_the_routed_model() -> None:
+    """Routing (agate) is the model-selection authority; backend model
+    advertisement is stale discovery data, not a gate. The invocation
+    proceeds with exactly the routed model (PR #12 routed-model parity)."""
     backend = Backend(
         name="ollama-local",
         base_url="http://localhost:11434/v1",
@@ -192,8 +200,14 @@ async def test_explicit_invoker_fails_closed_when_backend_has_no_model() -> None
 
     result = await graph.ainvoke(state)
 
-    assert result.error == "backend 'ollama-local' has no model available for invocation"
-    assert invoker.requests == []
+    # Routing (agate) is the model-selection authority: a backend that
+    # advertises no models is still a valid placement for the routed model,
+    # whose identity comes from agate's policy, not stale discovery data.
+    # The invocation proceeds with exactly the routed model.
+    assert result.error is None
+    assert [request.model for request in invoker.requests] == [
+        result.metadata["routed_model"]
+    ]
 
 
 @pytest.mark.asyncio

@@ -153,6 +153,15 @@ def build_graph(
             if preferred is not None:
                 meta_extra["routed_model"] = preferred
                 meta_extra["routed_tier"] = state.target_tier
+                # Propagate the agate-selected model as the effective hint:
+                # a hintless request otherwise left state.model_hint empty,
+                # so dispatch_node called select_backend hintless and
+                # executed backend.models[0] -- a model different from the
+                # one routing selected and reported (CodeRabbit Major on
+                # PR #12). Routing's decision is the contract; dispatch
+                # must consume exactly what routing reported.
+                delta = {"model_hint": preferred, "metadata": {**state.metadata, **meta_extra}}
+                return delta
 
         return {"metadata": {**state.metadata, **meta_extra}}
 
@@ -213,6 +222,12 @@ def build_graph(
                     provider_ref: str | None = None,
                     policy_version: str | None = None,
                     reason: str | None = None) -> None:
+            """Append one outbound-ledger entry for this dispatch attempt.
+
+            No-op when no ledger was injected. ``reason`` must already be a
+            non-sensitive summary (exception *type name*); raw exception text
+            never reaches the ledger.
+            """
             if outbound_ledger is None:
                 return
             outbound_ledger.record(

@@ -94,7 +94,7 @@ async def test_successful_dispatch_persists_one_ledger_entry() -> None:
     entry = entries[0]
     assert entry.run_id == "session-1"
     assert entry.backend_name == "ollama-local"
-    assert entry.model == "qwen-test"
+    assert entry.model == result.metadata["routed_model"]
     assert entry.outcome == "success"
     assert entry.decision_ref == "telos-decision-1"
     assert entry.provider_ref == "provider-ref-1"
