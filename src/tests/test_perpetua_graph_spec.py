@@ -13,7 +13,7 @@ from orama.graph.perpetua_graph import build_graph_spec
 
 
 ROOT = Path(__file__).resolve().parents[2]
-_GRAPH_SPEC_VALIDATION_REVISION = "717f97565583fefd34f4a43064da870c0a95fb9a"
+_GRAPH_SPEC_VALIDATION_REVISION = "8dde86104e0369c8f4b1fb6f9b763f0d20132512"
 
 
 def test_default_graph_spec_round_trips_with_stable_identity() -> None:
