@@ -2,19 +2,90 @@
 
 PKCE-ready adapter. Does not import httpx/requests (Telos owns IdP egress).
 Never replaces local Bearer root; absence falls through.
+HTTP attest requires a signed, short-lived server-issued artifact — never
+``X-Twitter-User-Id`` alone.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
+import time
 from typing import Any, Mapping, Optional
 
 from orama.auth.protocol import AuthResult
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_ISSUER = "orama-twitter-oauth-artifact"
 
 
 def _enabled() -> bool:
     return os.environ.get("ORAMA_AUTH_TWITTER_X", "").strip().lower() in _TRUTHY
+
+
+def _artifact_secret() -> str | None:
+    raw = os.environ.get("ORAMA_TWITTER_ARTIFACT_SECRET", "").strip()
+    return raw or None
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    pad = "=" * ((4 - len(text) % 4) % 4)
+    return base64.urlsafe_b64decode(text + pad)
+
+
+def issue_twitter_oauth_artifact(
+    subject: str,
+    *,
+    ttl_sec: int = 300,
+    now: int | None = None,
+) -> str | None:
+    """Mint a HMAC-signed, expiring artifact after a completed OAuth ceremony."""
+    secret = _artifact_secret()
+    subject = subject.strip()
+    if not secret or not subject:
+        return None
+    ts = int(time.time()) if now is None else now
+    payload = {
+        "sub": subject,
+        "iss": _ISSUER,
+        "iat": ts,
+        "exp": ts + max(1, ttl_sec),
+    }
+    body = _b64url(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+    sig = _b64url(hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest())
+    return f"{body}.{sig}"
+
+
+def verify_twitter_oauth_artifact(token: str, *, now: int | None = None) -> str | None:
+    secret = _artifact_secret()
+    if not secret or not token or "." not in token:
+        return None
+    body, _, sig = token.partition(".")
+    expected = _b64url(hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest())
+    if len(sig) != len(expected) or not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    ts = int(time.time()) if now is None else now
+    try:
+        exp = int(payload["exp"])
+        iat = int(payload["iat"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if payload.get("iss") != _ISSUER:
+        return None
+    if iat > ts + 60 or exp <= ts:
+        return None
+    subject = str(payload.get("sub", "")).strip()
+    return subject or None
 
 
 class TwitterXOauthProvider:
@@ -87,11 +158,15 @@ class TwitterXOauthProvider:
     ) -> Optional[AuthResult]:
         if not self.is_configured():
             return None
-        # Optional attest header after ceremony; live userinfo = Telos later.
-        subject = headers.get("X-Twitter-User-Id") or headers.get("x-twitter-user-id")
-        if not subject:
+        # Spoofable user-id headers are ignored. Require a server-issued artifact.
+        artifact = (
+            headers.get("X-Twitter-OAuth-Artifact")
+            or headers.get("x-twitter-oauth-artifact")
+            or ""
+        ).strip()
+        if not artifact:
             return None
-        subject = subject.strip()
+        subject = verify_twitter_oauth_artifact(artifact)
         if not subject:
             return None
         return AuthResult(

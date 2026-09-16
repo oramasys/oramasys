@@ -57,7 +57,7 @@ Optional AuthProviders (disabled by default) never replace local secrets:
 | Env | Provider |
 |-----|----------|
 | `ORAMA_AUTH_GOOGLE_OIDC` + `ORAMA_GOOGLE_CLIENT_ID` | Google OIDC (Authlib); optional `ORAMA_GOOGLE_JWKS_JSON` for local verify |
-| `ORAMA_AUTH_TWITTER_X` + `ORAMA_TWITTER_CLIENT_ID` | X/Twitter OAuth (Authlib, PKCE-ready) |
+| `ORAMA_AUTH_TWITTER_X` + `ORAMA_TWITTER_CLIENT_ID` | X/Twitter OAuth (Authlib, PKCE-ready); HTTP attest needs `ORAMA_TWITTER_ARTIFACT_SECRET` + `X-Twitter-OAuth-Artifact` |
 | `ORAMA_AUTH_BUZZ_NIP98` | NIP-98 Nostr verify (`ORAMA_NIP98_SKEW_SEC`, `ORAMA_NIP98_REQUIRE_PAYLOAD`, `ORAMA_NIP98_REPLAY_MAX`) |
 | `ORAMA_AUTH_BITCHAT_PROXIMITY` | BitChat-compatible Noise XX over BLE-shaped proximity (`ORAMA_BITCHAT_RSSI_THRESHOLD_DBM`) |
 | `ORAMA_FLEET_BINDING_PATH` | Local binding artifact (default `.local/fleet-binding.json`) |

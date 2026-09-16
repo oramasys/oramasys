@@ -113,12 +113,14 @@ class GoogleOidcProvider:
         try:
             from joserfc import jwt
             from joserfc.jwk import KeySet
+            from joserfc.jwt import JWTClaimsRegistry
         except ImportError:
             return None
         try:
             key_set = KeySet.import_key_set(json.loads(jwks_raw))
-            claims = jwt.decode(token, key_set)
-            payload = dict(claims.claims)
+            token_obj = jwt.decode(token, key_set)
+            payload = dict(token_obj.claims)
+            JWTClaimsRegistry(exp={"essential": True}).validate(payload)
         except Exception:
             return None
         aud = payload.get("aud")
