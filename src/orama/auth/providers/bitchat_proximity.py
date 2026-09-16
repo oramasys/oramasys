@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from typing import Mapping, Optional
@@ -20,6 +21,7 @@ from orama.auth.protocol import AuthResult
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _DEFAULT_TTL_SEC = 300.0
 _SESSIONS: dict[str, "ProximitySession"] = {}
+_SESSIONS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,16 +44,19 @@ def remember_proximity_session(
     """Mint a high-entropy session credential after a successful Noise handshake."""
     ts = time.time() if now is None else now
     credential = secrets.token_urlsafe(32)
-    _SESSIONS[credential] = ProximitySession(
+    session = ProximitySession(
         attest=attest,
         credential=credential,
         expires_at=ts + max(1.0, ttl_sec),
     )
+    with _SESSIONS_LOCK:
+        _SESSIONS[credential] = session
     return credential
 
 
 def clear_proximity_sessions() -> None:
-    _SESSIONS.clear()
+    with _SESSIONS_LOCK:
+        _SESSIONS.clear()
 
 
 class BitChatProximityProvider:
@@ -92,14 +97,28 @@ class BitChatProximityProvider:
         if not credential:
             # Fingerprint-only is not proof — fall through (never disable Bearer).
             return None
-        session = _SESSIONS.get(credential)
-        if session is None or time.time() >= session.expires_at:
-            if session is not None:
+        presented_fp = (
+            headers.get("X-BitChat-Fingerprint")
+            or headers.get("x-bitchat-fingerprint")
+            or ""
+        ).strip()
+        now = time.time()
+        with _SESSIONS_LOCK:
+            session = _SESSIONS.get(credential)
+            if session is not None and now >= session.expires_at:
                 _SESSIONS.pop(credential, None)
+                session = None
+        if session is None:
             return None
         if not secrets.compare_digest(session.credential, credential):
             return None
         attest = session.attest
+        expected_fp = attest.remote_fingerprint
+        if presented_fp and (
+            len(presented_fp) != len(expected_fp)
+            or not secrets.compare_digest(presented_fp, expected_fp)
+        ):
+            return None
         return AuthResult(
             subject=attest.remote_fingerprint,
             issuer="bitchat-noise",

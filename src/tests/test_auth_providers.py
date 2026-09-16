@@ -468,6 +468,10 @@ def test_google_expired_signed_token_rejected(monkeypatch):
     result = provider.authenticate_request({"X-Google-ID-Token": valid})
     assert result is not None
     assert result.subject == "user-1"
+    not_yet = jwt.encode(
+        header, {**base_claims, "nbf": now + 600, "exp": now + 900}, key
+    )
+    assert provider.authenticate_request({"X-Google-ID-Token": not_yet}) is None
 
 
 def test_twitter_user_id_header_alone_is_not_auth(monkeypatch):

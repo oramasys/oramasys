@@ -124,9 +124,13 @@ class GoogleOidcProvider:
             return None
         try:
             key_set = KeySet.import_key_set(json.loads(jwks_raw))
-            token_obj = jwt.decode(token, key_set)
+            token_obj = jwt.decode(token, key_set, algorithms=("RS256", "ES256"))
             payload = dict(token_obj.claims)
-            JWTClaimsRegistry(exp={"essential": True}).validate(payload)
+            JWTClaimsRegistry(
+                exp={"essential": True},
+                nbf={"essential": False},
+                iat={"essential": False},
+            ).validate(payload)
         except Exception:
             return None
         aud = payload.get("aud")

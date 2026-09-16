@@ -205,6 +205,22 @@ def test_bitchat_http_attest_after_proximity(monkeypatch):
     result = provider.authenticate_request({"X-BitChat-Session": credential})
     assert result is not None
     assert result.issuer == "bitchat-noise"
+    assert (
+        provider.authenticate_request(
+            {
+                "X-BitChat-Session": credential,
+                "X-BitChat-Fingerprint": "0" * 64,
+            }
+        )
+        is None
+    )
+    matched = provider.authenticate_request(
+        {
+            "X-BitChat-Session": credential,
+            "X-BitChat-Fingerprint": attests["glass"].remote_fingerprint,
+        }
+    )
+    assert matched is not None
     # Missing proximity credential still falls through to Bearer.
     mgr = AuthManager([provider, BearerTokenProvider()])
     bearer = mgr.authenticate_request(
