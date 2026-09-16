@@ -10,6 +10,7 @@ from orama.api.authz import (
     assert_host_allowed,
     auth_enforced,
     capability_for,
+    is_loopback_host,
     manifest_keys,
     resolve_bind_host,
 )
@@ -185,3 +186,23 @@ def test_insecure_dev_loopback_listen_not_enforced(monkeypatch):
     monkeypatch.setenv("ORAMA_LISTEN_HOST", "127.0.0.1")
     monkeypatch.delenv("ORAMA_BIND_HOST", raising=False)
     assert auth_enforced() is False
+
+
+def test_insecure_dev_honors_uvicorn_host_when_listen_unset(monkeypatch, strong_token):
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
+    monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
+    monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    monkeypatch.delenv("ORAMA_LISTEN_HOST", raising=False)
+    monkeypatch.delenv("ORAMA_BIND_HOST", raising=False)
+    monkeypatch.setenv("UVICORN_HOST", ".".join(["0"] * 4))
+    assert auth_enforced() is True
+
+
+def test_loopback_host_rejects_127_prefix_hostnames():
+    assert is_loopback_host("127.0.0.1") is True
+    assert is_loopback_host("::1") is True
+    assert is_loopback_host("[::1]") is True
+    assert is_loopback_host("localhost") is True
+    assert is_loopback_host(".".join(["0"] * 4)) is False
+    assert is_loopback_host("::") is False
+    assert is_loopback_host("127.attacker.example") is False

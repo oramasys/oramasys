@@ -11,6 +11,7 @@ from orama.api.authz.manifest import (
 from orama.api.authz.middleware import AuthzMiddleware, install_authz
 from orama.api.authz.tokens import (
     auth_enforced,
+    effective_listen_host,
     extract_bearer,
     get_control_plane_token,
     is_insecure_dev,
@@ -29,6 +30,7 @@ __all__ = [
     "assert_host_allowed",
     "auth_enforced",
     "capability_for",
+    "effective_listen_host",
     "extract_bearer",
     "get_control_plane_token",
     "install_authz",

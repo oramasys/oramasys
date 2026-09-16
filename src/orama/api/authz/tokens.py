@@ -1,6 +1,7 @@
 """Control-plane token resolution and comparison (S-AuthZ)."""
 from __future__ import annotations
 
+import ipaddress
 import os
 import secrets
 from typing import Iterable
@@ -58,20 +59,25 @@ def is_lan_bound() -> bool:
 
 
 def is_loopback_host(host: str | None) -> bool:
-    """True for loopback names only (no RFC1918 classification)."""
+    """True for loopback names/IPs only (no RFC1918, no ``127.`` hostname prefix)."""
     if not host:
         return False
     h = host.strip().lower()
     if h.startswith("[") and h.endswith("]"):
         h = h[1:-1]
-    if h in {"localhost", "::1", "0:0:0:0:0:0:0:1"}:
+    if "%" in h:
+        h = h.split("%", 1)[0]
+    if h in {"localhost", "localhost."}:
         return True
-    return h.startswith("127.")
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 
 def effective_listen_host() -> str:
     """Host the process intends to bind, from launcher/env (loopback default)."""
-    for key in ("ORAMA_LISTEN_HOST", "ORAMA_BIND_HOST"):
+    for key in ("ORAMA_LISTEN_HOST", "UVICORN_HOST", "ORAMA_BIND_HOST"):
         raw = os.environ.get(key, "").strip()
         if raw:
             return raw
@@ -82,8 +88,8 @@ def auth_enforced() -> bool:
     """Auth is enforced by default; insecure-dev only on loopback, never LAN.
 
     Keys off ``ORAMA_BIND_LAN`` and the actual listen host (``ORAMA_LISTEN_HOST``
-    set by ``bin/serve``, else ``ORAMA_BIND_HOST``). Non-loopback listen never
-    skips Bearer even when ``ORAMA_INSECURE_DEV`` is set.
+    from ``bin/serve``, else ``UVICORN_HOST``, else ``ORAMA_BIND_HOST``).
+    Non-loopback listen never skips Bearer even when ``ORAMA_INSECURE_DEV`` is set.
     """
     if is_lan_bound():
         return True

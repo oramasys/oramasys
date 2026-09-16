@@ -45,9 +45,10 @@ Inbound HTTP on the glass window is capability-declared and bearer-authorized:
 | Env | Role |
 |-----|------|
 | `ORAMA_CONTROL_PLANE_TOKEN` | Shared Bearer for non-public routes (`POST /run`). **503** if unset on protected routes. |
-| `ORAMA_INSECURE_DEV` | Skip auth only when **not** LAN-bound (loopback/dev). Ignored for auth skip when `ORAMA_BIND_LAN` is set. |
+| `ORAMA_INSECURE_DEV` | Skip auth only when the **actual listen host** is loopback (`ORAMA_LISTEN_HOST` from `bin/serve`, else `UVICORN_HOST`, else `ORAMA_BIND_HOST`). Never skipped when `ORAMA_BIND_LAN` is set or the listen address is non-loopback (`0.0.0.0`, `::`, …). |
 | `ORAMA_BIND_LAN` | Bind all-interfaces; requires a non-weak control-plane token (fail-closed). |
-| `ORAMA_BIND_HOST` | Loopback host override (default `127.0.0.1`). |
+| `ORAMA_BIND_HOST` | Loopback host override (default `127.0.0.1`). Non-loopback values require LAN policy. |
+| `ORAMA_LISTEN_HOST` | Set by `bin/serve` to the validated Uvicorn host so runtime auth matches the bind. |
 | `ORAMA_LAN_BIND_HOST` | LAN host override when `ORAMA_BIND_LAN` is set. |
 
 `GET /health` stays public. Auth is **Bearer header only** (no cookie / S-Session in this release). CORS is deferred to S-Network.
