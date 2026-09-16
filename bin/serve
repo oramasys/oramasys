@@ -4,49 +4,97 @@
 # Default bind host comes from orama.api.authz.resolve_bind_host (loopback
 # unless ORAMA_BIND_LAN is set with a non-weak ORAMA_CONTROL_PLANE_TOKEN).
 # Explicit --host is allowed, but non-loopback still requires LAN policy.
+# Repeated --host flags are stripped so Uvicorn binds the last validated host.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 export PYTHONPATH="${PWD}/src${PYTHONPATH:+:$PYTHONPATH}"
 
 parse_explicit_host() {
+  # Last --host / --host= wins (Uvicorn/Click last-option semantics).
   local prev=""
+  local host=""
+  local found=0
   local arg
   for arg in "$@"; do
+    if [[ "$prev" == "--host" ]]; then
+      host="$arg"
+      found=1
+      prev=""
+      continue
+    fi
     case "$arg" in
+      --host)
+        prev="--host"
+        ;;
       --host=*)
-        printf '%s\n' "${arg#--host=}"
-        return 0
+        host="${arg#--host=}"
+        found=1
+        prev=""
+        ;;
+      *)
+        prev=""
         ;;
     esac
-    if [[ "$prev" == "--host" ]]; then
-      printf '%s\n' "$arg"
-      return 0
-    fi
-    prev="$arg"
   done
+  if [[ "$found" -eq 1 ]]; then
+    printf '%s\n' "$host"
+    return 0
+  fi
   return 1
 }
 
-has_host=0
-for arg in "$@"; do
-  case "$arg" in
-    --host|--host=*) has_host=1 ;;
-  esac
-done
+collect_non_host_args() {
+  # Copy argv into nameref dest, omitting --host / --host=* pairs.
+  local -n _orama_out=$1
+  shift
+  local prev=""
+  local arg
+  _orama_out=()
+  for arg in "$@"; do
+    if [[ "$prev" == "--host" ]]; then
+      prev=""
+      continue
+    fi
+    case "$arg" in
+      --host)
+        prev="--host"
+        continue
+        ;;
+      --host=*)
+        continue
+        ;;
+    esac
+    _orama_out+=("$arg")
+  done
+}
 
-if [[ "$has_host" -eq 0 ]]; then
-  HOST="$("${PYTHON:-python3}" -c "from orama.api.authz import resolve_bind_host; print(resolve_bind_host())")"
-else
-  HOST="$(parse_explicit_host "$@")"
-  export ORAMA_EXPLICIT_HOST="$HOST"
-  HOST="$("${PYTHON:-python3}" -c "import os; from orama.api.authz import assert_host_allowed; print(assert_host_allowed(os.environ['ORAMA_EXPLICIT_HOST']))")"
-  unset ORAMA_EXPLICIT_HOST
+orama_serve_main() {
+  local has_host=0
+  local arg
+  local HOST
+  local -a rest=()
+
+  for arg in "$@"; do
+    case "$arg" in
+      --host|--host=*) has_host=1 ;;
+    esac
+  done
+
+  if [[ "$has_host" -eq 0 ]]; then
+    HOST="$("${PYTHON:-python3}" -c "from orama.api.authz import resolve_bind_host; print(resolve_bind_host())")"
+  else
+    HOST="$(parse_explicit_host "$@")"
+    export ORAMA_EXPLICIT_HOST="$HOST"
+    HOST="$("${PYTHON:-python3}" -c "import os; from orama.api.authz import assert_host_allowed; print(assert_host_allowed(os.environ['ORAMA_EXPLICIT_HOST']))")"
+    unset ORAMA_EXPLICIT_HOST
+  fi
+
+  export ORAMA_LISTEN_HOST="$HOST"
+  collect_non_host_args rest "$@"
+  exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "${rest[@]}"
+}
+
+if [[ "${ORAMA_SERVE_LIB:-}" != "1" ]]; then
+  orama_serve_main "$@"
 fi
-
-export ORAMA_LISTEN_HOST="$HOST"
-
-if [[ "$has_host" -eq 0 ]]; then
-  exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "$@"
-fi
-
-exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app "$@"

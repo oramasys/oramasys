@@ -8,10 +8,16 @@ from orama.auth.protocol import AuthResult
 
 
 class BearerTokenProvider:
+    """Local control-plane Bearer lane — S-AuthZ / AuthManager root of trust.
+
+    Always registered last. Optional IdP providers never disable this lane
+    when they are absent, unconfigured, or offline.
+    """
+
     name = "bearer"
 
     def is_configured(self) -> bool:
-        # Bearer lane is always present; success still needs a configured token.
+        """Bearer is always present; success still needs a configured token."""
         return True
 
     def get_auth_header(self) -> Mapping[str, str]:
@@ -37,6 +43,7 @@ class BearerTokenProvider:
         url: str = "",
         body: bytes = b"",
     ) -> Optional[AuthResult]:
+        """Match ``Authorization: Bearer`` against the local control-plane token."""
         auth = headers.get("Authorization") or headers.get("authorization")
         presented = extract_bearer(auth)
         configured = get_control_plane_token()

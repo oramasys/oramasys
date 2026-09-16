@@ -28,6 +28,7 @@ class AuthManager:
         return tuple(self._providers)
 
     def authenticate_outbound(self) -> Mapping[str, str]:
+        """First configured provider that can mint outbound headers; else empty."""
         for provider in self._providers:
             if not provider.is_configured():
                 continue
@@ -48,6 +49,7 @@ class AuthManager:
         url: str = "",
         body: bytes = b"",
     ) -> bool:
+        """True when any configured provider (Bearer last) authenticates the request."""
         result = self.authenticate_request(
             headers, method=method, url=url, body=body
         )

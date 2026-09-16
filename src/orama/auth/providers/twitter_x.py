@@ -26,8 +26,11 @@ def _enabled() -> bool:
 
 
 def _artifact_secret() -> str | None:
+    """Return the HMAC secret, or None if unset/empty/shorter than 32 UTF-8 bytes."""
     raw = os.environ.get("ORAMA_TWITTER_ARTIFACT_SECRET", "").strip()
-    return raw or None
+    if not raw or len(raw.encode("utf-8")) < 32:
+        return None
+    return raw
 
 
 def _b64url(data: bytes) -> str:
@@ -45,7 +48,10 @@ def issue_twitter_oauth_artifact(
     ttl_sec: int = 300,
     now: int | None = None,
 ) -> str | None:
-    """Mint a HMAC-signed, expiring artifact after a completed OAuth ceremony."""
+    """Mint a HMAC-signed, expiring artifact after a completed OAuth ceremony.
+
+    Requires ``ORAMA_TWITTER_ARTIFACT_SECRET`` of at least 32 UTF-8 bytes.
+    """
     secret = _artifact_secret()
     subject = subject.strip()
     if not secret or not subject:
@@ -63,6 +69,7 @@ def issue_twitter_oauth_artifact(
 
 
 def verify_twitter_oauth_artifact(token: str, *, now: int | None = None) -> str | None:
+    """Return the artifact subject, or None if the secret/token is unusable."""
     secret = _artifact_secret()
     if not secret or not token or "." not in token:
         return None
@@ -89,6 +96,12 @@ def verify_twitter_oauth_artifact(token: str, *, now: int | None = None) -> str 
 
 
 class TwitterXOauthProvider:
+    """Optional X/Twitter OAuth adapter (Authlib/PKCE ceremony; HTTP attest via HMAC).
+
+    Absence of client id / artifact secret never disables Bearer. HTTP attest
+    requires ``X-Twitter-OAuth-Artifact``; spoofable user-id headers are ignored.
+    """
+
     name = "twitter_x"
 
     AUTHORIZE_URL = "https://twitter.com/i/oauth2/authorize"
@@ -156,6 +169,7 @@ class TwitterXOauthProvider:
         url: str = "",
         body: bytes = b"",
     ) -> Optional[AuthResult]:
+        """Verify a server-issued OAuth artifact; None if not applicable or invalid."""
         if not self.is_configured():
             return None
         # Spoofable user-id headers are ignored. Require a server-issued artifact.

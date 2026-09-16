@@ -390,6 +390,25 @@ def test_nip98_replay_admit_is_atomic():
     assert cache.admit("abc", now=11.0, expires_at=100.0) is False
 
 
+def test_nip98_replay_cache_fails_closed_when_full_of_live_markers():
+    cache = ReplayCache(max_size=2, ttl_sec=60)
+    assert cache.admit("keep-a", now=10.0, expires_at=100.0) is True
+    assert cache.admit("keep-b", now=10.0, expires_at=100.0) is True
+    assert cache.admit("new-c", now=10.0, expires_at=100.0) is False
+    assert cache.seen("keep-a", now=10.0) is True
+    assert cache.seen("keep-b", now=10.0) is True
+    assert cache.seen("new-c", now=10.0) is False
+
+
+def test_nip98_replay_cache_purges_expired_regardless_of_insertion_order():
+    cache = ReplayCache(max_size=1, ttl_sec=60)
+    assert cache.admit("long-lived", now=10.0, expires_at=200.0) is True
+    assert cache.admit("short-lived", now=11.0, expires_at=20.0) is False
+    assert cache.admit("after-expiry", now=201.0, expires_at=300.0) is True
+    assert cache.seen("long-lived", now=201.0) is False
+    assert cache.seen("after-expiry", now=201.0) is True
+
+
 def test_buzz_empty_url_does_not_fallback_to_localhost(monkeypatch, nostr_key):
     monkeypatch.setenv("ORAMA_AUTH_BUZZ_NIP98", "1")
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "test-control-plane-token-32b")
@@ -454,7 +473,7 @@ def test_google_expired_signed_token_rejected(monkeypatch):
 def test_twitter_user_id_header_alone_is_not_auth(monkeypatch):
     monkeypatch.setenv("ORAMA_AUTH_TWITTER_X", "1")
     monkeypatch.setenv("ORAMA_TWITTER_CLIENT_ID", "twitter-client")
-    monkeypatch.setenv("ORAMA_TWITTER_ARTIFACT_SECRET", "twitter-artifact-secret-32b")
+    monkeypatch.setenv("ORAMA_TWITTER_ARTIFACT_SECRET", "twitter-artifact-hmac-secret-32b")
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "test-control-plane-token-32b")
     provider = TwitterXOauthProvider()
     assert provider.authenticate_request({"X-Twitter-User-Id": "12345"}) is None
@@ -466,6 +485,25 @@ def test_twitter_user_id_header_alone_is_not_auth(monkeypatch):
     expired = issue_twitter_oauth_artifact("12345", ttl_sec=1, now=int(time.time()) - 30)
     assert verify_twitter_oauth_artifact(expired) is None
     mgr = AuthManager([provider, BearerTokenProvider()])
+    bearer = mgr.authenticate_request(
+        {"Authorization": "Bearer test-control-plane-token-32b"}
+    )
+    assert bearer is not None and bearer.provider == "bearer"
+
+
+def test_twitter_short_artifact_secret_fails_closed(monkeypatch):
+    monkeypatch.setenv("ORAMA_AUTH_TWITTER_X", "1")
+    monkeypatch.setenv("ORAMA_TWITTER_CLIENT_ID", "twitter-client")
+    monkeypatch.setenv("ORAMA_TWITTER_ARTIFACT_SECRET", "too-short")
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "test-control-plane-token-32b")
+    assert issue_twitter_oauth_artifact("12345") is None
+    assert (
+        TwitterXOauthProvider().authenticate_request(
+            {"X-Twitter-OAuth-Artifact": "not-a-real-token"}
+        )
+        is None
+    )
+    mgr = AuthManager([TwitterXOauthProvider(), BearerTokenProvider()])
     bearer = mgr.authenticate_request(
         {"Authorization": "Bearer test-control-plane-token-32b"}
     )

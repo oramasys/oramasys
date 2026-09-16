@@ -20,6 +20,11 @@ def _enabled() -> bool:
 
 
 class GoogleOidcProvider:
+    """Optional Google OIDC adapter.
+
+    Unconfigured / missing JWKS falls through; never disables Bearer.
+    """
+
     name = "google"
 
     # Authlib metadata URL (documentation / ceremony wiring). Live fetch = Telos.
@@ -83,6 +88,7 @@ class GoogleOidcProvider:
         url: str = "",
         body: bytes = b"",
     ) -> Optional[AuthResult]:
+        """Verify ``X-Google-ID-Token`` when JWKS is injected; else fall through."""
         if not self.is_configured():
             return None
         # Optional lane: look for explicit Google ID token header.

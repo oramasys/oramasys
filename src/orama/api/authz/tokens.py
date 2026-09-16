@@ -37,6 +37,7 @@ def get_control_plane_token() -> str | None:
 
 
 def is_weak_token(token: str | None) -> bool:
+    """True for missing, placeholder, or extremely short control-plane tokens."""
     if token is None:
         return True
     normalized = token.strip().lower()
@@ -52,6 +53,7 @@ def is_insecure_dev() -> bool:
 
 
 def is_lan_bound() -> bool:
+    """True when ``ORAMA_BIND_LAN`` requests a non-loopback listen address."""
     return _truthy(os.environ.get("ORAMA_BIND_LAN"))
 
 
