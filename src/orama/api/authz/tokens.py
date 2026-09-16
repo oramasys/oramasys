@@ -55,9 +55,39 @@ def is_lan_bound() -> bool:
     return _truthy(os.environ.get("ORAMA_BIND_LAN"))
 
 
+def is_loopback_host(host: str | None) -> bool:
+    """True for loopback names only (no RFC1918 classification)."""
+    if not host:
+        return False
+    h = host.strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    if h in {"localhost", "::1", "0:0:0:0:0:0:0:1"}:
+        return True
+    return h.startswith("127.")
+
+
+def effective_listen_host() -> str:
+    """Host the process intends to bind, from launcher/env (loopback default)."""
+    for key in ("ORAMA_LISTEN_HOST", "ORAMA_BIND_HOST"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            return raw
+    return "127.0.0.1"
+
+
 def auth_enforced() -> bool:
-    """Auth is enforced by default; insecure-dev only when not LAN-bound."""
-    if is_insecure_dev() and not is_lan_bound():
+    """Auth is enforced by default; insecure-dev only on loopback, never LAN.
+
+    Keys off ``ORAMA_BIND_LAN`` and the actual listen host (``ORAMA_LISTEN_HOST``
+    set by ``bin/serve``, else ``ORAMA_BIND_HOST``). Non-loopback listen never
+    skips Bearer even when ``ORAMA_INSECURE_DEV`` is set.
+    """
+    if is_lan_bound():
+        return True
+    if not is_loopback_host(effective_listen_host()):
+        return True
+    if is_insecure_dev():
         return False
     return True
 

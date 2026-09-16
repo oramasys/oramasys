@@ -3,9 +3,29 @@
 # --app-dir src puts the src-layout package on sys.path without an install.
 # Default bind host comes from orama.api.authz.resolve_bind_host (loopback
 # unless ORAMA_BIND_LAN is set with a non-weak ORAMA_CONTROL_PLANE_TOKEN).
+# Explicit --host is allowed, but non-loopback still requires LAN policy.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH="${PWD}/src${PYTHONPATH:+:$PYTHONPATH}"
+
+parse_explicit_host() {
+  local prev=""
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --host=*)
+        printf '%s\n' "${arg#--host=}"
+        return 0
+        ;;
+    esac
+    if [[ "$prev" == "--host" ]]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    prev="$arg"
+  done
+  return 1
+}
 
 has_host=0
 for arg in "$@"; do
@@ -16,6 +36,16 @@ done
 
 if [[ "$has_host" -eq 0 ]]; then
   HOST="$("${PYTHON:-python3}" -c "from orama.api.authz import resolve_bind_host; print(resolve_bind_host())")"
+else
+  HOST="$(parse_explicit_host "$@")"
+  export ORAMA_EXPLICIT_HOST="$HOST"
+  HOST="$("${PYTHON:-python3}" -c "import os; from orama.api.authz import assert_host_allowed; print(assert_host_allowed(os.environ['ORAMA_EXPLICIT_HOST']))")"
+  unset ORAMA_EXPLICIT_HOST
+fi
+
+export ORAMA_LISTEN_HOST="$HOST"
+
+if [[ "$has_host" -eq 0 ]]; then
   exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "$@"
 fi
 

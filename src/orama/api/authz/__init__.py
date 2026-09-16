@@ -1,5 +1,5 @@
 """S-AuthZ: HTTP control-plane capability manifest + bearer middleware."""
-from orama.api.authz.bind import LanBindError, resolve_bind_host
+from orama.api.authz.bind import LanBindError, assert_host_allowed, resolve_bind_host
 from orama.api.authz.manifest import (
     ROUTE_MANIFEST,
     RouteCapability,
@@ -15,6 +15,7 @@ from orama.api.authz.tokens import (
     get_control_plane_token,
     is_insecure_dev,
     is_lan_bound,
+    is_loopback_host,
     is_weak_token,
     token_matches,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "ROUTE_MANIFEST",
     "RouteCapability",
     "RouteSpec",
+    "assert_host_allowed",
     "auth_enforced",
     "capability_for",
     "extract_bearer",
@@ -32,6 +34,7 @@ __all__ = [
     "install_authz",
     "is_insecure_dev",
     "is_lan_bound",
+    "is_loopback_host",
     "is_weak_token",
     "manifest_keys",
     "requires_auth",

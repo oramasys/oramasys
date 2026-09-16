@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import os
 
-from orama.api.authz.tokens import get_control_plane_token, is_lan_bound, is_weak_token
+from orama.api.authz.tokens import (
+    get_control_plane_token,
+    is_lan_bound,
+    is_loopback_host,
+    is_weak_token,
+)
 
 
 class LanBindError(RuntimeError):
@@ -15,13 +20,30 @@ def _all_interfaces_host() -> str:
     return ".".join(["0"] * 4)
 
 
+def assert_host_allowed(host: str) -> str:
+    """Reject non-loopback hosts unless LAN bind + non-weak token."""
+    host = host.strip()
+    if not host:
+        raise LanBindError("bind host must be non-empty")
+    if is_loopback_host(host):
+        return host
+    token = get_control_plane_token()
+    if not is_lan_bound() or is_weak_token(token):
+        raise LanBindError(
+            "non-loopback bind requires ORAMA_BIND_LAN and a non-weak "
+            "ORAMA_CONTROL_PLANE_TOKEN"
+        )
+    return host
+
+
 def resolve_bind_host() -> str:
     """Return bind host for the glass window.
 
-    Default: loopback (`127.0.0.1` or ``ORAMA_BIND_HOST``).
+    Default: loopback (`127.0.0.1` or ``ORAMA_BIND_HOST`` if loopback).
     When ``ORAMA_BIND_LAN`` is truthy: require a non-weak
     ``ORAMA_CONTROL_PLANE_TOKEN``, then return ``ORAMA_LAN_BIND_HOST`` or
     all-interfaces.
+    Non-loopback ``ORAMA_BIND_HOST`` without LAN policy is refused.
     """
     if is_lan_bound():
         token = get_control_plane_token()
@@ -34,4 +56,5 @@ def resolve_bind_host() -> str:
         return override or _all_interfaces_host()
 
     override = os.environ.get("ORAMA_BIND_HOST", "").strip()
-    return override or "127.0.0.1"
+    host = override or "127.0.0.1"
+    return assert_host_allowed(host)

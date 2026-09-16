@@ -7,6 +7,8 @@ from httpx import ASGITransport, AsyncClient
 from orama.api.authz import (
     LanBindError,
     ROUTE_MANIFEST,
+    assert_host_allowed,
+    auth_enforced,
     capability_for,
     manifest_keys,
     resolve_bind_host,
@@ -83,6 +85,8 @@ async def test_run_insecure_dev_loopback_skips_auth(monkeypatch):
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    monkeypatch.delenv("ORAMA_LISTEN_HOST", raising=False)
+    monkeypatch.delenv("ORAMA_BIND_HOST", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/run", json=_RUN_PAYLOAD)
     assert resp.status_code == 200
@@ -139,3 +143,45 @@ def test_manifest_covers_app_routes():
     assert capability_for("GET", "/health").value == "public"
     assert capability_for("POST", "/run").value == "mutate"
     assert len(ROUTE_MANIFEST) >= 2
+
+
+def test_non_loopback_bind_host_requires_lan_policy(monkeypatch):
+    monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    monkeypatch.setenv("ORAMA_BIND_HOST", ".".join(["0"] * 4))
+    with pytest.raises(LanBindError):
+        resolve_bind_host()
+
+
+def test_assert_host_allows_loopback_without_lan(monkeypatch):
+    monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    assert assert_host_allowed("127.0.0.1") == "127.0.0.1"
+
+
+def test_assert_host_rejects_explicit_non_loopback_without_lan(monkeypatch, strong_token):
+    monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
+    with pytest.raises(LanBindError):
+        assert_host_allowed(".".join(["0"] * 4))
+
+
+def test_assert_host_allows_non_loopback_with_lan_and_strong_token(monkeypatch, strong_token):
+    monkeypatch.setenv("ORAMA_BIND_LAN", "1")
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
+    host = ".".join(["0"] * 4)
+    assert assert_host_allowed(host) == host
+
+
+def test_insecure_dev_still_enforced_when_listen_host_not_loopback(monkeypatch, strong_token):
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
+    monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
+    monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    monkeypatch.setenv("ORAMA_LISTEN_HOST", ".".join(["0"] * 4))
+    assert auth_enforced() is True
+
+
+def test_insecure_dev_loopback_listen_not_enforced(monkeypatch):
+    monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
+    monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    monkeypatch.setenv("ORAMA_LISTEN_HOST", "127.0.0.1")
+    monkeypatch.delenv("ORAMA_BIND_HOST", raising=False)
+    assert auth_enforced() is False
