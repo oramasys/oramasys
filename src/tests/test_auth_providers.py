@@ -24,6 +24,10 @@ from orama.auth.providers import (
     GoogleOidcProvider,
     TwitterXOauthProvider,
 )
+from orama.auth.providers.twitter_x import (
+    issue_twitter_oauth_artifact,
+    verify_twitter_oauth_artifact,
+)
 
 
 def test_stubs_importable_and_not_configured():
@@ -298,3 +302,171 @@ def test_google_and_twitter_feature_flags(monkeypatch):
     assert "accounts.google.com" in cfg["server_metadata_url"]
     x = TwitterXOauthProvider()
     assert "code_challenge_method" in x.oauth_client_config()["client_kwargs"]
+
+
+def test_nip98_missing_content_is_nip98_error(nostr_key):
+    now = int(time.time())
+    url = "http://test/run"
+    event = _sign_event(
+        nostr_key,
+        {
+            "content": "",
+            "kind": 27235,
+            "created_at": now,
+            "tags": [["u", url], ["method", "GET"]],
+        },
+    )
+    del event["content"]
+    with pytest.raises(Nip98Error, match="content"):
+        verify_nip98(
+            authorization=_nostr_header(event),
+            method="GET",
+            url=url,
+            now=now,
+            replay=ReplayCache(),
+        )
+
+
+def test_nip98_empty_url_fails_closed(nostr_key):
+    now = int(time.time())
+    event = _sign_event(
+        nostr_key,
+        {
+            "content": "",
+            "kind": 27235,
+            "created_at": now,
+            "tags": [["u", "http://test/run"], ["method", "GET"]],
+        },
+    )
+    with pytest.raises(Nip98Error, match="url required"):
+        verify_nip98(
+            authorization=_nostr_header(event),
+            method="GET",
+            url="",
+            now=now,
+            replay=ReplayCache(),
+        )
+
+
+def test_nip98_replay_covers_full_skew_window(nostr_key):
+    skew = 60
+    created_at = 1_700_000_050
+    first_now = 1_700_000_000  # event is 50s in the future
+    later_now = 1_700_000_065  # cache ttl of 60s from first_now would have expired
+    url = "http://test/run"
+    event = _sign_event(
+        nostr_key,
+        {
+            "content": "",
+            "kind": 27235,
+            "created_at": created_at,
+            "tags": [["u", url], ["method", "GET"]],
+        },
+    )
+    cache = ReplayCache(ttl_sec=float(skew))
+    header = _nostr_header(event)
+    verify_nip98(
+        authorization=header,
+        method="GET",
+        url=url,
+        skew_sec=skew,
+        now=first_now,
+        replay=cache,
+    )
+    with pytest.raises(Nip98Error, match="replay"):
+        verify_nip98(
+            authorization=header,
+            method="GET",
+            url=url,
+            skew_sec=skew,
+            now=later_now,
+            replay=cache,
+        )
+
+
+def test_nip98_replay_admit_is_atomic():
+    cache = ReplayCache()
+    assert cache.admit("abc", now=10.0, expires_at=100.0) is True
+    assert cache.admit("abc", now=11.0, expires_at=100.0) is False
+
+
+def test_buzz_empty_url_does_not_fallback_to_localhost(monkeypatch, nostr_key):
+    monkeypatch.setenv("ORAMA_AUTH_BUZZ_NIP98", "1")
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "test-control-plane-token-32b")
+    now = int(time.time())
+    event = _sign_event(
+        nostr_key,
+        {
+            "content": "",
+            "kind": 27235,
+            "created_at": now,
+            "tags": [["u", "http://localhost/"], ["method", "GET"]],
+        },
+    )
+    provider = BuzzNostrProvider()
+    assert (
+        provider.authenticate_request(
+            {"Authorization": _nostr_header(event)}, method="GET", url=""
+        )
+        is None
+    )
+    mgr = AuthManager([provider, BearerTokenProvider()])
+    result = mgr.authenticate_request(
+        {"Authorization": "Bearer test-control-plane-token-32b"},
+        method="GET",
+        url="",
+    )
+    assert result is not None
+    assert result.provider == "bearer"
+
+
+def test_google_expired_signed_token_rejected(monkeypatch):
+    from joserfc import jwt
+    from joserfc.jwk import RSAKey
+
+    key = RSAKey.generate_key(auto_kid=True)
+    jwks = json.dumps({"keys": [key.as_dict(private=False)]})
+    monkeypatch.setenv("ORAMA_AUTH_GOOGLE_OIDC", "1")
+    monkeypatch.setenv("ORAMA_GOOGLE_CLIENT_ID", "google-client")
+    monkeypatch.setenv("ORAMA_GOOGLE_JWKS_JSON", jwks)
+    now = int(time.time())
+    header = {"alg": "RS256", "kid": key.kid}
+    base_claims = {
+        "sub": "user-1",
+        "iss": "https://accounts.google.com",
+        "aud": "google-client",
+        "iat": now - 120,
+        "nbf": now - 120,
+    }
+    expired = jwt.encode(
+        header, {**base_claims, "exp": now - 30}, key
+    )
+    valid = jwt.encode(
+        header, {**base_claims, "exp": now + 600}, key
+    )
+    provider = GoogleOidcProvider()
+    assert provider.authenticate_request({"X-Google-ID-Token": expired}) is None
+    result = provider.authenticate_request({"X-Google-ID-Token": valid})
+    assert result is not None
+    assert result.subject == "user-1"
+
+
+def test_twitter_user_id_header_alone_is_not_auth(monkeypatch):
+    monkeypatch.setenv("ORAMA_AUTH_TWITTER_X", "1")
+    monkeypatch.setenv("ORAMA_TWITTER_CLIENT_ID", "twitter-client")
+    monkeypatch.setenv("ORAMA_TWITTER_ARTIFACT_SECRET", "twitter-artifact-secret-32b")
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "test-control-plane-token-32b")
+    provider = TwitterXOauthProvider()
+    assert provider.authenticate_request({"X-Twitter-User-Id": "12345"}) is None
+    artifact = issue_twitter_oauth_artifact("12345")
+    assert artifact is not None
+    result = provider.authenticate_request({"X-Twitter-OAuth-Artifact": artifact})
+    assert result is not None
+    assert result.subject == "12345"
+    expired = issue_twitter_oauth_artifact("12345", ttl_sec=1, now=int(time.time()) - 30)
+    assert verify_twitter_oauth_artifact(expired) is None
+    mgr = AuthManager([provider, BearerTokenProvider()])
+    bearer = mgr.authenticate_request(
+        {"Authorization": "Bearer test-control-plane-token-32b"}
+    )
+    assert bearer is not None and bearer.provider == "bearer"
