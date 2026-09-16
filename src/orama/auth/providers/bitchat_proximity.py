@@ -2,27 +2,52 @@
 
 Optional enabling only. Absence of BLE/radio never disables Bearer.
 Identity subject = SHA-256 fingerprint of the remote Noise static key.
+HTTP attest requires a high-entropy expiring session credential minted at
+handshake — the fingerprint header is an identifier, not a secret.
 Does not vendor the BitChat Swift/Android mesh; does not authorize /run alone.
 """
 from __future__ import annotations
 
 import os
+import secrets
+import time
+from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from orama.auth.bitchat.ble import ProximityAttest
 from orama.auth.protocol import AuthResult
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
-_SESSIONS: dict[str, ProximityAttest] = {}
+_DEFAULT_TTL_SEC = 300.0
+_SESSIONS: dict[str, "ProximitySession"] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class ProximitySession:
+    attest: ProximityAttest
+    credential: str
+    expires_at: float
 
 
 def _enabled() -> bool:
     return os.environ.get("ORAMA_AUTH_BITCHAT_PROXIMITY", "").strip().lower() in _TRUTHY
 
 
-def remember_proximity_session(attest: ProximityAttest) -> None:
-    """Record a completed BLE Noise handshake for optional HTTP attest headers."""
-    _SESSIONS[attest.remote_fingerprint] = attest
+def remember_proximity_session(
+    attest: ProximityAttest,
+    *,
+    ttl_sec: float = _DEFAULT_TTL_SEC,
+    now: float | None = None,
+) -> str:
+    """Mint a high-entropy session credential after a successful Noise handshake."""
+    ts = time.time() if now is None else now
+    credential = secrets.token_urlsafe(32)
+    _SESSIONS[credential] = ProximitySession(
+        attest=attest,
+        credential=credential,
+        expires_at=ts + max(1.0, ttl_sec),
+    )
+    return credential
 
 
 def clear_proximity_sessions() -> None:
@@ -59,17 +84,22 @@ class BitChatProximityProvider:
     ) -> Optional[AuthResult]:
         if not self.is_configured():
             return None
-        fp = (
-            headers.get("X-BitChat-Fingerprint")
-            or headers.get("x-bitchat-fingerprint")
+        credential = (
+            headers.get("X-BitChat-Session")
+            or headers.get("x-bitchat-session")
             or ""
-        ).strip().lower()
-        if not fp:
-            # No proximity attest presented — fall through (never disable Bearer).
+        ).strip()
+        if not credential:
+            # Fingerprint-only is not proof — fall through (never disable Bearer).
             return None
-        attest = _SESSIONS.get(fp)
-        if attest is None:
+        session = _SESSIONS.get(credential)
+        if session is None or time.time() >= session.expires_at:
+            if session is not None:
+                _SESSIONS.pop(credential, None)
             return None
+        if not secrets.compare_digest(session.credential, credential):
+            return None
+        attest = session.attest
         return AuthResult(
             subject=attest.remote_fingerprint,
             issuer="bitchat-noise",

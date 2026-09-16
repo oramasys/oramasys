@@ -65,8 +65,14 @@ class BleDevice:
 class ProximityBleMesh:
     """In-process BLE mesh: only in-range peers exchange GATT writes."""
 
-    def __init__(self, rssi_threshold_dbm: int = DEFAULT_RSSI_THRESHOLD_DBM) -> None:
-        self.rssi_threshold_dbm = rssi_threshold_dbm
+    def __init__(self, rssi_threshold_dbm: int | None = None) -> None:
+        self.rssi_threshold_dbm = (
+            DEFAULT_RSSI_THRESHOLD_DBM
+            if rssi_threshold_dbm is None
+            else rssi_threshold_dbm
+        )
+        if rssi_threshold_dbm is None:
+            self.rssi_threshold_dbm = rssi_threshold_from_env()
         self._devices: dict[str, BleDevice] = {}
         self._lock = threading.Lock()
 

@@ -175,24 +175,37 @@ def test_ceremony_binds_fingerprint_after_proximity(tmp_path):
     assert store.load() is not None
 
 
+def test_ble_rssi_threshold_env_configures_mesh(monkeypatch):
+    monkeypatch.setenv("ORAMA_BITCHAT_RSSI_THRESHOLD_DBM", "-50")
+    mesh = ProximityBleMesh()
+    assert mesh.rssi_threshold_dbm == -50
+    mesh.attach("phone", {"glass": -60})
+    mesh.attach("glass", {"phone": -60})
+    assert mesh.in_range("phone", "glass") is False
+
+
 def test_bitchat_http_attest_after_proximity(monkeypatch):
     clear_proximity_sessions()
     monkeypatch.setenv("ORAMA_AUTH_BITCHAT_PROXIMITY", "1")
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "test-control-plane-token-32b")
-    mesh = ProximityBleMesh()
+    mesh = ProximityBleMesh(rssi_threshold_dbm=-70)
     mesh.attach("phone", {"glass": -35})
     mesh.attach("glass", {"phone": -35})
     _phone, _glass, attests, errors = _run_proximity(mesh, "phone", "glass")
     assert errors == []
-    remember_proximity_session(attests["glass"])
+    credential = remember_proximity_session(attests["glass"])
     provider = BitChatProximityProvider()
     assert provider.is_configured() is True
-    result = provider.authenticate_request(
-        {"X-BitChat-Fingerprint": attests["glass"].remote_fingerprint}
+    assert (
+        provider.authenticate_request(
+            {"X-BitChat-Fingerprint": attests["glass"].remote_fingerprint}
+        )
+        is None
     )
+    result = provider.authenticate_request({"X-BitChat-Session": credential})
     assert result is not None
     assert result.issuer == "bitchat-noise"
-    # Missing proximity header still falls through to Bearer.
+    # Missing proximity credential still falls through to Bearer.
     mgr = AuthManager([provider, BearerTokenProvider()])
     bearer = mgr.authenticate_request(
         {"Authorization": "Bearer test-control-plane-token-32b"}
