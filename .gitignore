@@ -7,7 +7,12 @@ build/
 .pytest_cache/
 *.db
 .env
+.env.local
 .DS_Store
+
+# local-only fleet secrets / IdP binding (never commit)
+.local/
+.state/
 
 # generated test/tooling artifacts
 .hypothesis/

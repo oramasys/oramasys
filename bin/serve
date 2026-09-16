@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # Thin executable — launch the oramasys FastAPI surface (orama.api.server:app).
 # --app-dir src puts the src-layout package on sys.path without an install.
+# Default bind host comes from orama.api.authz.resolve_bind_host (loopback
+# unless ORAMA_BIND_LAN is set with a non-weak ORAMA_CONTROL_PLANE_TOKEN).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export PYTHONPATH="${PWD}/src${PYTHONPATH:+:$PYTHONPATH}"
+
+has_host=0
+for arg in "$@"; do
+  case "$arg" in
+    --host|--host=*) has_host=1 ;;
+  esac
+done
+
+if [[ "$has_host" -eq 0 ]]; then
+  HOST="$("${PYTHON:-python3}" -c "from orama.api.authz import resolve_bind_host; print(resolve_bind_host())")"
+  exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "$@"
+fi
+
 exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app "$@"

@@ -3,6 +3,18 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 from orama.api.server import app
 
+_TOKEN = "test-control-plane-token-32b"
+
+
+@pytest.fixture(autouse=True)
+def _auth_env(monkeypatch):
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", _TOKEN)
+    monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_TOKEN}"}
+
 
 async def test_health_endpoint():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -19,7 +31,7 @@ async def test_run_endpoint_returns_200():
         "target_tier": "shared",
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/run", json=payload)
+        resp = await client.post("/run", json=payload, headers=_auth_headers())
     assert resp.status_code == 200
     body = resp.json()
     assert body["session_id"] == "test-session"
@@ -30,7 +42,7 @@ async def test_run_endpoint_returns_200():
 async def test_run_response_has_result():
     payload = {"session_id": "s2", "task": "hello"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/run", json=payload)
+        resp = await client.post("/run", json=payload, headers=_auth_headers())
     body = resp.json()
     assert body["result"] is not None
 
