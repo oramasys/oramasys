@@ -81,7 +81,7 @@ def build_default_auth_manager() -> AuthManager:
     from orama.auth.providers.google_oidc import GoogleOidcProvider
     from orama.auth.providers.twitter_x import TwitterXOauthProvider
 
-    # Doc 49 order: BUZZ → Twitter/X → Google → (stubs) → Bearer last.
+    # Doc 49 order: BUZZ → Twitter/X → Google → BitChat proximity → Firebase stub → Bearer last.
     ordered: list[AuthProvider] = [
         BuzzNostrProvider(),
         TwitterXOauthProvider(),

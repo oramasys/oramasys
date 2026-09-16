@@ -59,9 +59,10 @@ Optional AuthProviders (disabled by default) never replace local secrets:
 | `ORAMA_AUTH_GOOGLE_OIDC` + `ORAMA_GOOGLE_CLIENT_ID` | Google OIDC (Authlib); optional `ORAMA_GOOGLE_JWKS_JSON` for local verify |
 | `ORAMA_AUTH_TWITTER_X` + `ORAMA_TWITTER_CLIENT_ID` | X/Twitter OAuth (Authlib, PKCE-ready) |
 | `ORAMA_AUTH_BUZZ_NIP98` | NIP-98 Nostr verify (`ORAMA_NIP98_SKEW_SEC`, `ORAMA_NIP98_REQUIRE_PAYLOAD`, `ORAMA_NIP98_REPLAY_MAX`) |
+| `ORAMA_AUTH_BITCHAT_PROXIMITY` | BitChat-compatible Noise XX over BLE-shaped proximity (`ORAMA_BITCHAT_RSSI_THRESHOLD_DBM`) |
 | `ORAMA_FLEET_BINDING_PATH` | Local binding artifact (default `.local/fleet-binding.json`) |
 
-BitChat proximity and Firebase-shaped adapters are **stubs** (not configured). Gossip HMAC (`GOSSIP_SHARED_SECRET`) remains a separate mesh channel — do not merge with HTTP Bearer.
+Firebase-shaped adapter remains a **stub** (never root of trust). BitChat is optional proximity attest of a Noise static-key fingerprint — it never authorizes `POST /run` or gossip alone, and missing BLE never disables Bearer. Gossip HMAC (`GOSSIP_SHARED_SECRET`) remains a separate mesh channel — do not merge with HTTP Bearer.
 
 ## Network-security architecture
 

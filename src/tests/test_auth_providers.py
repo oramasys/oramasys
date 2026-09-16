@@ -31,12 +31,17 @@ def test_stubs_importable_and_not_configured():
     assert FirebaseShapedProvider().is_configured() is False
     assert BitChatProximityProvider().authenticate_request({}) is None
     assert FirebaseShapedProvider().authenticate_request({}) is None
+    assert BitChatProximityProvider().is_configured() is False
+    assert FirebaseShapedProvider().is_configured() is False
+    assert BitChatProximityProvider().authenticate_request({}) is None
+    assert FirebaseShapedProvider().authenticate_request({}) is None
 
 
 def test_optional_providers_disabled_by_default(monkeypatch):
     monkeypatch.delenv("ORAMA_AUTH_GOOGLE_OIDC", raising=False)
     monkeypatch.delenv("ORAMA_AUTH_TWITTER_X", raising=False)
     monkeypatch.delenv("ORAMA_AUTH_BUZZ_NIP98", raising=False)
+    monkeypatch.delenv("ORAMA_AUTH_BITCHAT_PROXIMITY", raising=False)
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "test-control-plane-token-32b")
     mgr = build_default_auth_manager()
     configured = [p.name for p in mgr.providers if p.is_configured()]

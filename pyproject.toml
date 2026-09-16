@@ -20,6 +20,8 @@ dependencies = [
     "joserfc>=1.0",
     # NIP-98 Schnorr verify for BuzzNostrProvider (inline crypto preference).
     "coincurve>=20.0",
+    # BitChat-compatible Noise XX (X25519 + ChaCha20-Poly1305).
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
