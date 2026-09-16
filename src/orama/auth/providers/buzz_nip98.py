@@ -46,8 +46,9 @@ class BuzzNostrProvider:
     name = "buzz-nip98"
 
     def __init__(self, replay: ReplayCache | None = None) -> None:
+        skew = _skew_sec()
         self._replay = replay or ReplayCache(
-            max_size=_replay_max(), ttl_sec=float(_skew_sec())
+            max_size=_replay_max(), ttl_sec=float(skew * 2)
         )
 
     def is_configured(self) -> bool:
@@ -83,11 +84,14 @@ class BuzzNostrProvider:
         scheme = auth.split(None, 1)[0].lower()
         if scheme != "nostr":
             return None
+        if not url:
+            # Fail closed: never bind u-tag against a substituted localhost URL.
+            return None
         try:
             result = verify_nip98(
                 authorization=auth,
                 method=method,
-                url=url or "http://localhost/",
+                url=url,
                 body=body,
                 skew_sec=_skew_sec(),
                 require_payload=_require_payload(),

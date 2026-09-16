@@ -39,6 +39,22 @@ def compute_event_id(event: Mapping[str, Any]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _require_event_fields(event: Mapping[str, Any]) -> None:
+    """Fail closed on missing/invalid fields used by NIP-01 id computation."""
+    if not isinstance(event.get("pubkey"), str) or not event["pubkey"]:
+        raise Nip98Error("pubkey required")
+    if not isinstance(event.get("created_at"), int):
+        raise Nip98Error("created_at must be int")
+    if not isinstance(event.get("kind"), int):
+        raise Nip98Error("kind must be int")
+    if not isinstance(event.get("tags"), list):
+        raise Nip98Error("tags must be a list")
+    if not isinstance(event.get("content"), str):
+        raise Nip98Error("content must be a string")
+    if not isinstance(event.get("sig"), str) or not event["sig"]:
+        raise Nip98Error("sig required")
+
+
 def _tag_value(tags: list, name: str) -> str | None:
     for tag in tags:
         if isinstance(tag, (list, tuple)) and len(tag) >= 2 and tag[0] == name:
@@ -98,26 +114,27 @@ def verify_nip98(
 
     If authorization is missing or not ``Nostr``, raises Nip98Error with
     ``not_applicable`` message so callers can fall through.
+    Empty ``url`` fails closed (no localhost substitution).
     """
     event = parse_nostr_authorization(authorization)
     if event is None:
         raise Nip98Error("not_applicable")
 
-    kind = event.get("kind")
+    if not url:
+        raise Nip98Error("url required")
+
+    _require_event_fields(event)
+
+    kind = event["kind"]
     if kind != 27235:
         raise Nip98Error("kind must be 27235")
 
-    created_at = event.get("created_at")
-    if not isinstance(created_at, int):
-        raise Nip98Error("created_at must be int")
+    created_at = event["created_at"]
     ts = int(time.time()) if now is None else now
     if abs(ts - created_at) > skew_sec:
         raise Nip98Error("created_at outside skew window")
 
-    tags = event.get("tags")
-    if not isinstance(tags, list):
-        raise Nip98Error("tags must be a list")
-
+    tags = event["tags"]
     u_tag = _tag_value(tags, "u")
     if u_tag != url:
         raise Nip98Error("u tag mismatch")
@@ -136,21 +153,20 @@ def verify_nip98(
         if payload_tag != expected:
             raise Nip98Error("payload hash mismatch")
 
-    pubkey = event.get("pubkey")
-    sig = event.get("sig")
-    if not isinstance(pubkey, str) or not isinstance(sig, str):
-        raise Nip98Error("pubkey/sig required")
-
+    pubkey = event["pubkey"]
+    sig = event["sig"]
     event_id = compute_event_id(event)
     claimed_id = event.get("id")
     if claimed_id is not None and claimed_id != event_id:
         raise Nip98Error("event id mismatch")
 
-    cache = replay if replay is not None else _DEFAULT_REPLAY
-    if cache.seen(event_id, now=float(ts)):
-        raise Nip98Error("replay")
     if not _verify_schnorr(pubkey, event_id, sig):
         raise Nip98Error("bad signature")
-    cache.remember(event_id, now=float(ts))
+
+    cache = replay if replay is not None else _DEFAULT_REPLAY
+    # Keep the id until the last moment it would still pass the skew window.
+    expires_at = float(created_at + skew_sec)
+    if not cache.admit(event_id, now=float(ts), expires_at=expires_at):
+        raise Nip98Error("replay")
 
     return Nip98Result(pubkey=pubkey, event_id=event_id, event=event)
