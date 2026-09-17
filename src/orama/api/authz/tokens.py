@@ -4,7 +4,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import secrets
-from typing import Iterable
+from typing import Iterable, Mapping
 
 # Weak placeholders rejected especially before LAN bind.
 _WEAK_TOKENS = frozenset(
@@ -76,7 +76,16 @@ def is_loopback_host(host: str | None) -> bool:
 
 
 def effective_listen_host() -> str:
-    """Host the process intends to bind, from launcher/env (loopback default)."""
+    """Host the process *declares* it will bind, from launcher/env (loopback default).
+
+    This is declared intent, not proof: a process started without going
+    through ``bin/serve`` (direct ``uvicorn --host 0.0.0.0``, a container
+    CMD, a systemd unit) sets none of these variables, and this function
+    then silently reports the loopback default even though the real bind
+    may be non-loopback. A security decision MUST NOT rely on this alone
+    -- see ``observed_listen_host`` for the per-request ground truth that
+    ``auth_enforced`` also checks.
+    """
     for key in ("ORAMA_LISTEN_HOST", "UVICORN_HOST", "ORAMA_BIND_HOST"):
         raw = os.environ.get(key, "").strip()
         if raw:
@@ -84,16 +93,53 @@ def effective_listen_host() -> str:
     return "127.0.0.1"
 
 
-def auth_enforced() -> bool:
+def observed_listen_host(scope: Mapping[str, object] | None) -> str | None:
+    """Ground-truth bind host for one request, read from the ASGI ``scope``.
+
+    Per the ASGI spec, ``scope["server"]`` is the interface the connection
+    actually arrived on -- populated by the real server (uvicorn et al.)
+    regardless of how the process was launched, unlike
+    ``effective_listen_host()`` which only reflects declared launcher
+    intent and silently defaults to loopback when nothing declares
+    otherwise. Returns ``None`` when no usable server tuple is present, so
+    callers can fail closed instead of assuming loopback.
+    """
+    if not scope:
+        return None
+    server = scope.get("server")
+    if not server or not isinstance(server, (tuple, list)) or not server[0]:
+        return None
+    return str(server[0])
+
+
+def auth_enforced(scope: Mapping[str, object] | None = None) -> bool:
     """Auth is enforced by default; insecure-dev only on loopback, never LAN.
 
-    Keys off ``ORAMA_BIND_LAN`` and the actual listen host (``ORAMA_LISTEN_HOST``
-    from ``bin/serve``, else ``UVICORN_HOST``, else ``ORAMA_BIND_HOST``).
-    Non-loopback listen never skips Bearer even when ``ORAMA_INSECURE_DEV`` is set.
+    Two independent host signals gate the ``ORAMA_INSECURE_DEV`` escape
+    hatch, and either one reporting non-loopback is enough to keep auth on:
+
+    1. ``effective_listen_host()`` -- declared launcher intent
+       (``ORAMA_LISTEN_HOST`` from ``bin/serve``, else ``UVICORN_HOST``,
+       else ``ORAMA_BIND_HOST``).
+    2. ``observed_listen_host(scope)`` -- ground truth from the live ASGI
+       request, when a scope is supplied. This closes the gap where a
+       process is started without any of those three variables set:
+       declared intent alone would silently default to loopback and let
+       ``ORAMA_INSECURE_DEV`` disable auth on a listener that is actually
+       LAN/internet exposed.
+
+    Callers handling a real request (the auth middleware) MUST pass the
+    request's ``scope``. Callers with no request in flight (tests, CLI
+    banners) may omit it, in which case only declared intent is checked --
+    identical to this function's behavior before ``observed_listen_host``
+    existed.
     """
     if is_lan_bound():
         return True
     if not is_loopback_host(effective_listen_host()):
+        return True
+    observed = observed_listen_host(scope)
+    if observed is not None and not is_loopback_host(observed):
         return True
     if is_insecure_dev():
         return False

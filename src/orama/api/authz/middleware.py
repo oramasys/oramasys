@@ -30,7 +30,7 @@ class AuthzMiddleware(BaseHTTPMiddleware):
         if not requires_auth(capability):
             return await call_next(request)
 
-        if not auth_enforced():
+        if not auth_enforced(request.scope):
             return await call_next(request)
 
         configured = get_control_plane_token()
