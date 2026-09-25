@@ -8,6 +8,7 @@ the kernel never imports `oramasys` (one-way boundary).
 
 ```
 bin/            # thin executables (bin/serve → uvicorn orama.api.server:app)
+scripts/        # repo tooling (Telos authority check; reporting/ PR comment+summary)
 src/
   orama/        # the package (import orama)
     api/        # FastAPI surface (server.py: app) + authz/ (S-AuthZ)
@@ -26,6 +27,9 @@ Source lives under `src/` (PyPA src-layout); imports stay `import orama` via
 `pythonpath = ["src"]`.
 
 ## Develop
+
+PR reporting (v2): prefer `scripts/reporting/report_pr.py` (comment-first). Body append for the `## Summary` convention: `scripts/reporting/append_pr_summary.py`. `gh` is a local trusted subprocess — not Telos. See `docs/reporting/text-metadata-integrity-and-review-completeness.md`.
+
 
 ```bash
 make dev-install                    # venv + editable installs
