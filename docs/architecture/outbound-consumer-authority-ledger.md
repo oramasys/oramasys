@@ -6,7 +6,7 @@ it is not a runtime dispatch or financial ledger.
 | Consumer path | Direct network client | Security authority | Evidence | Status |
 | --- | --- | --- | --- | --- |
 | `src/orama/gateway/dialer.py` | No | `telos.SecureDialer` via `ModelServerDialer` | `src/tests/test_model_server_dialer.py`, `src/tests/test_gateway_telos_conformance.py` | Enforced |
-| Core discovery probe | No Oramasys-owned client | Perpetua Core (`717f97565583fefd34f4a43064da870c0a95fb9a`) delegates endpoint handling to Telos | `src/tests/test_core_telos_discovery_contract.py`, `src/tests/test_perpetua_graph_spec.py` | Dependency-pinned and tested |
+| Oramasys discovery health probe | No | `telos.request` via `orama.discovery.probe` (exact-candidate authorizer); Core keeps pure store/selection only | `src/tests/test_core_telos_discovery_contract.py`, `src/tests/test_discovery_health_probe.py` | Composition-owned |
 | `src/orama/graph/perpetua_graph.py` provider dispatch | No | Injected `ProviderInvoker` contract; result requires opaque provider and decision references | `src/tests/test_provider_transport_contract.py` | Delegated boundary |
 | Production-source scan | N/A | `scripts/check_telos_network_authority.py` rejects independent HTTP, socket, and network-command paths | `src/tests/test_telos_network_authority.py` | Enforced |
 

@@ -12,7 +12,7 @@ stack.
 | Path | Status |
 | --- | --- |
 | Gateway config/health secure dial | Telos-backed compatibility façade |
-| Perpetua Core discovery health probe | pinned to Telos-backed Core revision |
+| Oramasys discovery health probe | Telos-backed composition (`orama.discovery`) |
 | FastAPI server | inbound only |
 | graph dispatch | backend selection/application orchestration |
 | provider invocation | contract/injection seam; real transport must be Telos-backed |
@@ -81,18 +81,18 @@ The gate intentionally scans production source rather than the test tree, so
 FastAPI/http test clients and deterministic test doubles remain available.
 
 Cross-repository conformance tests must prove more than symbol presence. For
-security-sensitive consumers such as Perpetua Core discovery, the test parses
-the consumer AST and verifies the actual outbound call chain: the probe must
-dispatch through `telos.request`, use exact-candidate Telos authorization, carry
-`EndpointPurpose.HEALTH_PROBE`, and bind the required `TransportPolicy` access
-flags. A decoy Telos import, disconnected policy object, or raw fallback must
-fail the conformance test.
+security-sensitive consumers such as Oramasys discovery composition, the test
+parses the consumer AST and verifies the actual outbound call chain: the probe
+must dispatch through `telos.request`, use exact-candidate Telos authorization,
+carry `EndpointPurpose.HEALTH_PROBE`, and bind the required `TransportPolicy`
+access flags. A decoy Telos import, disconnected policy object, or raw fallback
+must fail the conformance test.
 
 ## Cross-repo boundary
 
-Perpetua Core may express discovery/execution intent but does not become a
-second endpoint-security authority. Its health-probe convergence uses Telos for
-semantic exact-candidate authorization and transport safety.
+Perpetua Core retains pure backend data types and selection logic only. Oramasys
+owns discovery probe/registry I/O and uses Telos for semantic exact-candidate
+authorization and transport safety. Core must not depend on Telos.
 
 Phylax remains the generic security/safety/runtime-admission and monitorability
 owner, excluding endpoint-specific security.

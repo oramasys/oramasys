@@ -5,7 +5,8 @@ import inspect
 from textwrap import dedent
 
 import pytest
-from perpetua_core.discovery import probe
+
+from orama.discovery import probe
 
 _FORBIDDEN_TRANSPORT_IMPORTS = frozenset(
     {"httpx", "requests", "aiohttp", "urllib.request", "socket"}
@@ -330,7 +331,7 @@ def _minimal_probe_source(*, request_target: str = "request", allow_public: bool
     )
 
 
-def test_core_health_probe_structurally_uses_telos_security_contract() -> None:
+def test_oramasys_health_probe_structurally_uses_telos_security_contract() -> None:
     _assert_telos_probe_contract(inspect.getsource(probe))
 
 
