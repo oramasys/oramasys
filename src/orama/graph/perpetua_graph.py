@@ -4,7 +4,7 @@ Default oramasys graph — route → dispatch → respond.
 - route_node: hardware affinity gate, backed by agate (oramasys/agate), the
   canonical v2 hardware authority -- never orama-system's legacy dynamic PT
   import and never a locally-embedded duplicate resolver.
-- dispatch_node: consults BackendRegistry/select_backend and records routing
+- dispatch_node: consults orama.discovery.DiscoveryBackendRegistry + core select_backend
   metadata; when an explicit ProviderInvoker is injected, it performs the
   application-level invocation through that contract.
 - respond_node: emits provider content when present, otherwise preserves the
@@ -21,6 +21,8 @@ from agate import HardwareAffinityError, load_policy_cached
 from perpetua_core import END, START, MiniGraph, PerpetuaState
 from perpetua_core.discovery import BackendRegistry, select_backend
 from perpetua_core.discovery.errors import NoBackendAvailableError
+
+from orama.discovery import DiscoveryBackendRegistry
 from perpetua_core.graph.plugins.interrupts import Interrupt
 from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec, stable_callable_ref
 
@@ -125,7 +127,7 @@ def build_graph(
        abandoned in the first place.
     """
 
-    reg = registry if registry is not None else BackendRegistry()
+    reg = registry if registry is not None else DiscoveryBackendRegistry()
     abandoned_tasks: set[asyncio.Task] = set()
 
     async def route_node(state: PerpetuaState) -> dict:
