@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +34,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from canonicalize import sha256_canonical_text  # noqa: E402
+from gh_cli import run_gh  # noqa: E402
 from grant_lib import (  # noqa: E402
     GrantError,
     content_digest_for_append,
@@ -73,7 +73,7 @@ def post_comment(
     # Digest available for operators / future grant binding; comments themselves
     # do not require lost-update guards.
     _ = sha256_canonical_text(body)
-    proc = subprocess.run(
+    proc = run_gh(
         [
             gh,
             "pr",
@@ -83,10 +83,7 @@ def post_comment(
             repo,
             "--body",
             body,
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
+        ]
     )
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()

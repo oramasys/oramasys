@@ -43,6 +43,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from canonicalize import sha256_canonical_file  # noqa: E402
+from gh_cli import run_gh, strip_transport_newline  # noqa: E402
 from grant_lib import (  # noqa: E402
     follow_up_already_present,
     mark_remote_applied_for_append,
@@ -112,23 +113,19 @@ def _resolve_git_backup_dir() -> Path:
 
 
 def _gh_view_body(gh: str, repo: str, pr: str) -> str:
-    proc = subprocess.run(
-        [gh, "pr", "view", pr, "--repo", repo, "--json", "body", "--jq", ".body"],
-        text=True,
-        capture_output=True,
-        check=False,
+    proc = run_gh(
+        [gh, "pr", "view", pr, "--repo", repo, "--json", "body", "--jq", ".body"]
     )
     if proc.returncode != 0:
         raise SystemExit(f"error: gh pr view failed: {(proc.stderr or '').strip()}")
-    return proc.stdout
+    # jq prints one extra LF. The writer still stores merged + one LF; do not
+    # strip that written newline or meaningful blank lines disappear.
+    return strip_transport_newline(proc.stdout)
 
 
 def _gh_edit_body(gh: str, repo: str, pr: str, body_file: Path) -> None:
-    proc = subprocess.run(
-        [gh, "pr", "edit", pr, "--repo", repo, "--body-file", str(body_file)],
-        text=True,
-        capture_output=True,
-        check=False,
+    proc = run_gh(
+        [gh, "pr", "edit", pr, "--repo", repo, "--body-file", str(body_file)]
     )
     if proc.returncode != 0:
         raise SystemExit(f"error: gh pr edit failed: {(proc.stderr or '').strip()}")

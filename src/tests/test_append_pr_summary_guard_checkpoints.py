@@ -88,7 +88,8 @@ if [[ "$1" == pr && "$2" == view ]]; then
 concurrent operator edit
 {CURSOR_END}' > '{body_file}'
   fi
-  printf '%s' "$(cat '{body_file}')"
+  cat '{body_file}'
+  printf '\\n'
   exit 0
 fi
 if [[ "$1" == pr && "$2" == edit ]]; then
