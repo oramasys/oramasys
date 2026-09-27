@@ -39,28 +39,29 @@ class DiscoveryBackendRegistry(BackendRegistry):
         url = f"http://{ip}:{port}/v1"
         name = name or f"{kind.value}-{ip}"
         backend = await self._probe_and_record(name, url, kind)
-        if backend is None or backend.health is not BackendHealth.ONLINE:
+        if backend.health is not BackendHealth.ONLINE:
             raise BackendOfflineError(f"{name} @ {url} did not respond")
         return backend
 
+    def _store(self, backend: Backend) -> None:
+        """Replace any observation with this name, including a stale ONLINE one."""
+        record = getattr(self, "record", None)
+        if callable(record):
+            record(backend)
+            return
+        self._backends[backend.name] = backend
+
     async def _probe_and_record(
         self, name: str, url: str, kind: BackendKind
-    ) -> Backend | None:
+    ) -> Backend:
         probe = await health_probe(url)
-        now = datetime.now(timezone.utc)
         backend = Backend(
             name=name,
             base_url=url,
             kind=kind,
             models=probe.models,
             health=probe.health,
-            last_seen=now,
+            last_seen=datetime.now(timezone.utc),
         )
-        if probe.health is BackendHealth.ONLINE:
-            # Prefer Core's pure store API when present; fall back for pin lag.
-            record = getattr(self, "record", None)
-            if callable(record):
-                record(backend)
-            else:
-                self._backends[backend.name] = backend
+        self._store(backend)
         return backend

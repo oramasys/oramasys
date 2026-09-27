@@ -12,7 +12,7 @@ import pytest
 from perpetua_core.discovery.backend import BackendHealth, BackendKind
 
 from orama.discovery import probe as probe_module
-from orama.discovery.probe import health_probe
+from orama.discovery.probe import ProbeResult, health_probe
 from orama.discovery.registry import DiscoveryBackendRegistry
 
 
@@ -160,6 +160,29 @@ async def test_discovery_registry_autodetect_with_no_seeds_is_empty():
     registry = DiscoveryBackendRegistry()
     assert await registry.autodetect(()) == []
     assert registry.all() == []
+
+
+@pytest.mark.asyncio
+async def test_failed_reprobe_replaces_stale_online(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = json.dumps({"data": [{"id": "local-model"}]}).encode()
+    port = _start_server("HTTP/1.1 200 OK", body)
+    registry = DiscoveryBackendRegistry()
+    seed = ("loopback-ollama", f"http://127.0.0.1:{port}/v1", BackendKind.OLLAMA)
+    await registry.autodetect((seed,))
+    assert [backend.name for backend in registry.online()] == ["loopback-ollama"]
+
+    async def offline(base_url: str, *, timeout: float = 1.5) -> ProbeResult:
+        assert base_url == seed[1]
+        return ProbeResult(BackendHealth.OFFLINE, ())
+
+    monkeypatch.setattr("orama.discovery.registry.health_probe", offline)
+    found = await registry.autodetect((seed,))
+
+    assert found[0].health is BackendHealth.OFFLINE
+    assert registry.online() == []
+    stored = registry.find("loopback-ollama")
+    assert stored is not None
+    assert stored.health is BackendHealth.OFFLINE
 
 
 def test_discovery_module_has_no_hardcoded_lan_seeds() -> None:
