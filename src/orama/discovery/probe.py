@@ -54,6 +54,7 @@ def _transport_failure(exc: Exception) -> bool:
 
 
 async def health_probe(base_url: str, *, timeout: float = _TIMEOUT_S) -> ProbeResult:
+    """Probe ``base_url`` through Telos and return advisory health plus model ids."""
     url = base_url.rstrip("/") + "/models"
     try:
         response = await asyncio.to_thread(

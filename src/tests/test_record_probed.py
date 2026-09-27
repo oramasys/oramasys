@@ -14,10 +14,10 @@ from orama.discovery.probe import ProbeResult
 
 class _Store:
     def __init__(self) -> None:
-        self.saved: list[Backend] = []
+        self.saved: dict[str, Backend] = {}
 
     def record(self, backend: Backend) -> None:
-        self.saved.append(backend)
+        self.saved[backend.name] = backend
 
 
 def _candidate(health: BackendHealth) -> Backend:
@@ -38,9 +38,10 @@ def test_record_probed_discards_supplied_online_health(monkeypatch: pytest.Monke
 
     monkeypatch.setattr("orama.discovery.observe.health_probe", offline)
     store = _Store()
+    store.record(_candidate(BackendHealth.ONLINE))
 
     observed = asyncio.run(record_probed(store, _candidate(BackendHealth.ONLINE)))
 
     assert observed.health is BackendHealth.OFFLINE
     assert observed.models == ()
-    assert store.saved == [observed]
+    assert store.saved == {"ollama-local": observed}
