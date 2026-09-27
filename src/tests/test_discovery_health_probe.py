@@ -82,6 +82,19 @@ async def test_health_probe_allows_loopback_and_reports_online():
 
 
 @pytest.mark.asyncio
+async def test_health_probe_ignores_non_string_model_ids():
+    body = json.dumps(
+        {"data": [{"id": "llama3"}, {"id": 7}, {"id": None}, "not-a-model"]}
+    ).encode()
+    port = _start_server("HTTP/1.1 200 OK", body)
+
+    result = await health_probe(f"http://127.0.0.1:{port}/v1")
+
+    assert result.health is BackendHealth.ONLINE
+    assert result.models == ("llama3",)
+
+
+@pytest.mark.asyncio
 async def test_health_probe_reports_offline_on_non_200():
     port = _start_server("HTTP/1.1 500 Internal Server Error", b"")
     result = await health_probe(f"http://127.0.0.1:{port}/v1")

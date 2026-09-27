@@ -88,7 +88,11 @@ async def health_probe(base_url: str, *, timeout: float = _TIMEOUT_S) -> ProbeRe
         return ProbeResult(BackendHealth.OFFLINE, ())
     try:
         body = json.loads(response.body)
-        models = tuple(item["id"] for item in body.get("data", []) if "id" in item)
+        models = tuple(
+            item["id"]
+            for item in body.get("data", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        )
     except (ValueError, KeyError, TypeError):
         return ProbeResult(BackendHealth.DEGRADED, ())
     return ProbeResult(BackendHealth.ONLINE, models)
