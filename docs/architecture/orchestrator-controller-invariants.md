@@ -16,7 +16,7 @@ claim. Telos provides transport, Phylax provides admission and capability
 verification, and this application composes: it submits declared jobs and renders
 controller state but never reimplements claim semantics.
 
-## The 27 invariants, by family
+## The 29 invariants, by family
 
 | Family | Ids | Rule in one line |
 | --- | --- | --- |
@@ -28,6 +28,7 @@ controller state but never reimplements claim semantics.
 | Egress and privacy | IC-21 … IC-23 | redact before egress; no topology/paths/identity in any artifact; tamper evidence on the card |
 | Outcomes | IC-24, IC-25 | explicit `400`/`401`/`403`/`409`, never a generic success; denials audited without proof material |
 | Dependency direction | IC-26, IC-27 | one-way imports (Core only); this application composes and never becomes a second job-state writer |
+| Projections | IC-28, IC-29 | projected task/principal/round values must match their canonical owner exactly and reject before lookup; the common header is additive to §4.2 |
 
 Full text, including the envelope-card and agent-state building blocks and the
 per-invariant test list, lives in the spec's §3 and §10.1. That document is
