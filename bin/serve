@@ -91,6 +91,9 @@ orama_serve_main() {
 
   export ORAMA_LISTEN_HOST="$HOST"
   collect_non_host_args "$@"
+  if [[ "${#ORAMA_NON_HOST_ARGS[@]}" -eq 0 ]]; then
+    exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST"
+  fi
   exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "${ORAMA_NON_HOST_ARGS[@]}"
 }
 

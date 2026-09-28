@@ -20,6 +20,20 @@ def _run_lib(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _write_fake_python(tmp_path: Path) -> Path:
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"-c\" ]]; then\n"
+        "  printf '%s\\n' \"${ORAMA_EXPLICIT_HOST:-127.0.0.1}\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '<%s>\\n' \"$@\"\n"
+    )
+    fake_python.chmod(0o755)
+    return fake_python
+
+
 def test_parse_explicit_host_last_wins():
     result = _run_lib(
         'parse_explicit_host --reload --host 127.0.0.1 --host=::1 --port 9\n'
@@ -52,3 +66,27 @@ def test_collect_non_host_args_allows_an_empty_result():
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "0"
+
+
+def test_serve_allows_host_only_with_bash32_nounset(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["PYTHON"] = str(_write_fake_python(tmp_path))
+
+    result = subprocess.run(
+        ["bash", str(SERVE), "--host", "127.0.0.1"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "<-m>",
+        "<uvicorn>",
+        "<--app-dir>",
+        "<src>",
+        "<orama.api.server:app>",
+        "<--host>",
+        "<127.0.0.1>",
+    ]
