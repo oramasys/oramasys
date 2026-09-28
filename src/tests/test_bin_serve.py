@@ -53,6 +53,21 @@ def test_parse_explicit_host_equals_then_space_last_wins():
     assert result.stdout.strip() == "0.0.0.0"
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        'parse_explicit_host --host -x\n',
+        'parse_explicit_host --host=--port\n',
+        'parse_explicit_host --host " "\n',
+        'parse_explicit_host --host=" "\n',
+    ],
+)
+def test_parse_explicit_host_rejects_malformed_values(script: str) -> None:
+    result = _run_lib(script)
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+
+
 def test_collect_non_host_args_strips_all_host_flags():
     result = _run_lib(
         "collect_non_host_args --reload --host 127.0.0.1 --host=0.0.0.0 --port 8080\n"
@@ -144,6 +159,10 @@ def test_serve_preserves_non_host_argument_boundaries_with_bash32(
         ("--host=",),
         ("--host", "127.0.0.1", "--host"),
         ("--host", "--port", "8123"),
+        ("--host", "-x"),
+        ("--host=--port",),
+        ("--host", " "),
+        ("--host= ",),
     ],
 )
 def test_serve_rejects_malformed_host_flags_before_launch(

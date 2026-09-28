@@ -12,6 +12,17 @@ export PYTHONPATH="${PWD}/src${PYTHONPATH:+:$PYTHONPATH}"
 # Script-owned filtered Uvicorn arguments. Bash 3.2 lacks local -n.
 ORAMA_NON_HOST_ARGS=()
 
+# Reject empty/whitespace-only hosts and values that look like CLI options.
+normalize_explicit_host_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ -z "$value" || "$value" == -* ]]; then
+    return 1
+  fi
+  printf '%s' "$value"
+}
+
 parse_explicit_host() {
   # Last --host / --host= wins (Uvicorn/Click last-option semantics).
   local prev=""
@@ -20,10 +31,9 @@ parse_explicit_host() {
   local arg
   for arg in "$@"; do
     if [[ "$prev" == "--host" ]]; then
-      if [[ -z "$arg" || "$arg" == --* ]]; then
+      if ! host="$(normalize_explicit_host_value "$arg")"; then
         return 1
       fi
-      host="$arg"
       found=1
       prev=""
       continue
@@ -33,8 +43,7 @@ parse_explicit_host() {
         prev="--host"
         ;;
       --host=*)
-        host="${arg#--host=}"
-        if [[ -z "$host" ]]; then
+        if ! host="$(normalize_explicit_host_value "${arg#--host=}")"; then
           return 1
         fi
         found=1
