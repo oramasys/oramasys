@@ -38,8 +38,17 @@ def test_parse_explicit_host_equals_then_space_last_wins():
 
 def test_collect_non_host_args_strips_all_host_flags():
     result = _run_lib(
-        "collect_non_host_args rest --reload --host 127.0.0.1 --host=0.0.0.0 --port 8080\n"
-        'printf "%s\\n" "${rest[@]}"\n'
+        "collect_non_host_args --reload --host 127.0.0.1 --host=0.0.0.0 --port 8080\n"
+        'printf "%s\\n" "${ORAMA_NON_HOST_ARGS[@]}"\n'
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["--reload", "--port", "8080"]
+
+
+def test_collect_non_host_args_allows_an_empty_result():
+    result = _run_lib(
+        "collect_non_host_args --host 127.0.0.1\n"
+        'printf "%s\\n" "${#ORAMA_NON_HOST_ARGS[@]}"\n'
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0"

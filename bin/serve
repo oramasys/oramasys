@@ -45,12 +45,11 @@ parse_explicit_host() {
 }
 
 collect_non_host_args() {
-  # Copy argv into nameref dest, omitting --host / --host=* pairs.
-  local -n _orama_out=$1
-  shift
+  # Populate the script-owned array, omitting --host / --host=* pairs.
+  # macOS ships Bash 3.2, which has arrays but not Bash 4.3's local -n.
+  ORAMA_NON_HOST_ARGS=()
   local prev=""
   local arg
-  _orama_out=()
   for arg in "$@"; do
     if [[ "$prev" == "--host" ]]; then
       prev=""
@@ -65,7 +64,7 @@ collect_non_host_args() {
         continue
         ;;
     esac
-    _orama_out+=("$arg")
+    ORAMA_NON_HOST_ARGS+=("$arg")
   done
 }
 
@@ -73,7 +72,7 @@ orama_serve_main() {
   local has_host=0
   local arg
   local HOST
-  local -a rest=()
+  local -a ORAMA_NON_HOST_ARGS=()
 
   for arg in "$@"; do
     case "$arg" in
@@ -91,8 +90,8 @@ orama_serve_main() {
   fi
 
   export ORAMA_LISTEN_HOST="$HOST"
-  collect_non_host_args rest "$@"
-  exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "${rest[@]}"
+  collect_non_host_args "$@"
+  exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "${ORAMA_NON_HOST_ARGS[@]}"
 }
 
 if [[ "${ORAMA_SERVE_LIB:-}" != "1" ]]; then
