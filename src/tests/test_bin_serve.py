@@ -62,7 +62,7 @@ def test_collect_non_host_args_strips_all_host_flags():
 def test_collect_non_host_args_allows_an_empty_result():
     result = _run_lib(
         "collect_non_host_args --host 127.0.0.1\n"
-        'printf "%s\\n" "${#ORAMA_NON_HOST_ARGS[@]}"\n'
+        'printf "%s\\n" "$ORAMA_NON_HOST_ARGS_COUNT"\n'
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "0"

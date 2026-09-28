@@ -48,6 +48,7 @@ collect_non_host_args() {
   # Populate the script-owned array, omitting --host / --host=* pairs.
   # macOS ships Bash 3.2, which has arrays but not Bash 4.3's local -n.
   ORAMA_NON_HOST_ARGS=()
+  ORAMA_NON_HOST_ARGS_COUNT=0
   local prev=""
   local arg
   for arg in "$@"; do
@@ -65,6 +66,7 @@ collect_non_host_args() {
         ;;
     esac
     ORAMA_NON_HOST_ARGS+=("$arg")
+    ORAMA_NON_HOST_ARGS_COUNT=$((ORAMA_NON_HOST_ARGS_COUNT + 1))
   done
 }
 
@@ -91,7 +93,7 @@ orama_serve_main() {
 
   export ORAMA_LISTEN_HOST="$HOST"
   collect_non_host_args "$@"
-  if [[ "${#ORAMA_NON_HOST_ARGS[@]}" -eq 0 ]]; then
+  if [[ "$ORAMA_NON_HOST_ARGS_COUNT" -eq 0 ]]; then
     exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST"
   fi
   exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "${ORAMA_NON_HOST_ARGS[@]}"
