@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SERVE = Path(__file__).resolve().parents[2] / "bin" / "serve"
 SYSTEM_BASH = Path("/bin/bash")
 
@@ -135,13 +137,30 @@ def test_serve_preserves_non_host_argument_boundaries_with_bash32(
     ]
 
 
-def test_serve_rejects_host_flag_without_a_value() -> None:
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--host",),
+        ("--host=",),
+        ("--host", "127.0.0.1", "--host"),
+        ("--host", "--port", "8123"),
+    ],
+)
+def test_serve_rejects_malformed_host_flags_before_launch(
+    tmp_path: Path,
+    args: tuple[str, ...],
+) -> None:
+    env = os.environ.copy()
+    env["PYTHON"] = str(_write_fake_python(tmp_path))
+
     result = subprocess.run(
-        [str(SYSTEM_BASH), str(SERVE), "--host"],
+        [str(SYSTEM_BASH), str(SERVE), *args],
         capture_output=True,
         text=True,
+        env=env,
         check=False,
     )
 
     assert result.returncode == 64, result.stderr
     assert "requires a value" in result.stderr
+    assert result.stdout == ""

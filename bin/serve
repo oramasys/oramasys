@@ -20,6 +20,9 @@ parse_explicit_host() {
   local arg
   for arg in "$@"; do
     if [[ "$prev" == "--host" ]]; then
+      if [[ -z "$arg" || "$arg" == --* ]]; then
+        return 1
+      fi
       host="$arg"
       found=1
       prev=""
@@ -31,6 +34,9 @@ parse_explicit_host() {
         ;;
       --host=*)
         host="${arg#--host=}"
+        if [[ -z "$host" ]]; then
+          return 1
+        fi
         found=1
         prev=""
         ;;
@@ -39,6 +45,9 @@ parse_explicit_host() {
         ;;
     esac
   done
+  if [[ "$prev" == "--host" ]]; then
+    return 1
+  fi
   if [[ "$found" -eq 1 ]]; then
     printf '%s\n' "$host"
     return 0
