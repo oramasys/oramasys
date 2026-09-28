@@ -9,6 +9,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PYTHONPATH="${PWD}/src${PYTHONPATH:+:$PYTHONPATH}"
+# Script-owned filtered Uvicorn arguments. Bash 3.2 lacks local -n.
+ORAMA_NON_HOST_ARGS=()
+
+# Reject empty/whitespace-only hosts and values that look like CLI options.
+normalize_explicit_host_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ -z "$value" || "$value" == -* ]]; then
+    return 1
+  fi
+  printf '%s' "$value"
+}
 
 parse_explicit_host() {
   # Last --host / --host= wins (Uvicorn/Click last-option semantics).
@@ -18,7 +31,9 @@ parse_explicit_host() {
   local arg
   for arg in "$@"; do
     if [[ "$prev" == "--host" ]]; then
-      host="$arg"
+      if ! host="$(normalize_explicit_host_value "$arg")"; then
+        return 1
+      fi
       found=1
       prev=""
       continue
@@ -28,7 +43,9 @@ parse_explicit_host() {
         prev="--host"
         ;;
       --host=*)
-        host="${arg#--host=}"
+        if ! host="$(normalize_explicit_host_value "${arg#--host=}")"; then
+          return 1
+        fi
         found=1
         prev=""
         ;;
@@ -37,6 +54,9 @@ parse_explicit_host() {
         ;;
     esac
   done
+  if [[ "$prev" == "--host" ]]; then
+    return 1
+  fi
   if [[ "$found" -eq 1 ]]; then
     printf '%s\n' "$host"
     return 0
@@ -48,7 +68,6 @@ collect_non_host_args() {
   # Populate the script-owned array, omitting --host / --host=* pairs.
   # macOS ships Bash 3.2, which has arrays but not Bash 4.3's local -n.
   ORAMA_NON_HOST_ARGS=()
-  ORAMA_NON_HOST_ARGS_COUNT=0
   local prev=""
   local arg
   for arg in "$@"; do
@@ -66,7 +85,6 @@ collect_non_host_args() {
         ;;
     esac
     ORAMA_NON_HOST_ARGS+=("$arg")
-    ORAMA_NON_HOST_ARGS_COUNT=$((ORAMA_NON_HOST_ARGS_COUNT + 1))
   done
 }
 
@@ -74,7 +92,6 @@ orama_serve_main() {
   local has_host=0
   local arg
   local HOST
-  local -a ORAMA_NON_HOST_ARGS=()
 
   for arg in "$@"; do
     case "$arg" in
@@ -85,7 +102,10 @@ orama_serve_main() {
   if [[ "$has_host" -eq 0 ]]; then
     HOST="$("${PYTHON:-python3}" -c "from orama.api.authz import resolve_bind_host; print(resolve_bind_host())")"
   else
-    HOST="$(parse_explicit_host "$@")"
+    if ! HOST="$(parse_explicit_host "$@")"; then
+      printf '%s\n' "bin/serve: --host requires a value" >&2
+      exit 64
+    fi
     export ORAMA_EXPLICIT_HOST="$HOST"
     HOST="$("${PYTHON:-python3}" -c "import os; from orama.api.authz import assert_host_allowed; print(assert_host_allowed(os.environ['ORAMA_EXPLICIT_HOST']))")"
     unset ORAMA_EXPLICIT_HOST
@@ -93,10 +113,11 @@ orama_serve_main() {
 
   export ORAMA_LISTEN_HOST="$HOST"
   collect_non_host_args "$@"
-  if [[ "$ORAMA_NON_HOST_ARGS_COUNT" -eq 0 ]]; then
-    exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST"
-  fi
-  exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app --host "$HOST" "${ORAMA_NON_HOST_ARGS[@]}"
+  # Bash 3.2 set -u treats a bare empty "${array[@]}" as unbound.
+  # ${name[@]+...} skips that expansion when the filtered list is empty,
+  # so one exec covers host-only and extra-argument launches.
+  exec "${PYTHON:-python3}" -m uvicorn --app-dir src orama.api.server:app \
+    --host "$HOST" "${ORAMA_NON_HOST_ARGS[@]+"${ORAMA_NON_HOST_ARGS[@]}"}"
 }
 
 if [[ "${ORAMA_SERVE_LIB:-}" != "1" ]]; then
