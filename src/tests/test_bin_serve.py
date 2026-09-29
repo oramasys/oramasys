@@ -12,6 +12,7 @@ SYSTEM_BASH = Path("/bin/bash")
 
 
 def _run_lib(script: str) -> subprocess.CompletedProcess[str]:
+    """Source bin/serve as a library and run a bash snippet against it."""
     env = os.environ.copy()
     env["ORAMA_SERVE_LIB"] = "1"
     return subprocess.run(
@@ -24,6 +25,7 @@ def _run_lib(script: str) -> subprocess.CompletedProcess[str]:
 
 
 def _write_fake_python(tmp_path: Path) -> Path:
+    """Write a PYTHON stand-in that echoes argv, or the explicit host for -c."""
     fake_python = tmp_path / "python"
     fake_python.write_text(
         "#!/usr/bin/env bash\n"
@@ -38,6 +40,7 @@ def _write_fake_python(tmp_path: Path) -> Path:
 
 
 def test_parse_explicit_host_last_wins():
+    """The last --host or --host= value wins, matching Uvicorn."""
     result = _run_lib(
         'parse_explicit_host --reload --host 127.0.0.1 --host=::1 --port 9\n'
     )
@@ -46,6 +49,7 @@ def test_parse_explicit_host_last_wins():
 
 
 def test_parse_explicit_host_equals_then_space_last_wins():
+    """A later --host VALUE overrides an earlier --host=VALUE."""
     result = _run_lib(
         'parse_explicit_host --host=127.0.0.1 --host 0.0.0.0\n'
     )
@@ -69,6 +73,7 @@ def test_parse_explicit_host_rejects_malformed_values(
     script: str,
     stderr_fragment: str,
 ) -> None:
+    """Malformed host tokens fail in the parser and name the failure on stderr."""
     result = _run_lib(script)
     assert result.returncode == 1, result.stderr
     assert result.stdout == ""
@@ -76,6 +81,7 @@ def test_parse_explicit_host_rejects_malformed_values(
 
 
 def test_collect_non_host_args_strips_all_host_flags():
+    """--host and --host= pairs are removed; other arguments stay in order."""
     result = _run_lib(
         "collect_non_host_args --reload --host 127.0.0.1 --host=0.0.0.0 --port 8080\n"
         'printf "%s\\n" "${ORAMA_NON_HOST_ARGS[@]}"\n'
@@ -85,6 +91,7 @@ def test_collect_non_host_args_strips_all_host_flags():
 
 
 def test_collect_non_host_args_allows_an_empty_result():
+    """A host-only argv leaves the filtered list empty without a nounset error."""
     result = _run_lib(
         "collect_non_host_args --host 127.0.0.1\n"
         'printf "%s\\n" "${ORAMA_NON_HOST_ARGS[@]+"${ORAMA_NON_HOST_ARGS[@]}"}"\n'
@@ -94,6 +101,7 @@ def test_collect_non_host_args_allows_an_empty_result():
 
 
 def test_serve_allows_host_only_with_bash32_nounset(tmp_path: Path) -> None:
+    """Host-only launch reaches Uvicorn under set -u when no extra args remain."""
     env = os.environ.copy()
     env["PYTHON"] = str(_write_fake_python(tmp_path))
 
@@ -120,6 +128,7 @@ def test_serve_allows_host_only_with_bash32_nounset(tmp_path: Path) -> None:
 def test_serve_preserves_non_host_argument_boundaries_with_bash32(
     tmp_path: Path,
 ) -> None:
+    """Non-host arguments, including blanks and spaces, reach Uvicorn intact."""
     env = os.environ.copy()
     env["PYTHON"] = str(_write_fake_python(tmp_path))
 
@@ -177,6 +186,7 @@ def test_serve_rejects_malformed_host_flags_before_launch(
     args: tuple[str, ...],
     stderr_fragment: str,
 ) -> None:
+    """Malformed --host flags exit 64 with a bin/serve diagnostic and do not launch."""
     env = os.environ.copy()
     env["PYTHON"] = str(_write_fake_python(tmp_path))
 
