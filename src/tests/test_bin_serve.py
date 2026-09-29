@@ -61,6 +61,8 @@ def test_parse_explicit_host_equals_then_space_last_wins():
         ('parse_explicit_host --host " "\n', "empty or looks like an option"),
         ('parse_explicit_host --host=" "\n', "empty or looks like an option"),
         ('parse_explicit_host --host\n', "requires a value"),
+        ('parse_explicit_host --port 9\n', "could not parse --host"),
+        ('parse_explicit_host\n', "could not parse --host"),
     ],
 )
 def test_parse_explicit_host_rejects_malformed_values(

@@ -64,6 +64,9 @@ parse_explicit_host() {
     printf '%s\n' "$host"
     return 0
   fi
+  # No --host token survived the scan. The launcher only calls this after
+  # seeing --host/--host=; this line covers library callers and drift.
+  printf '%s\n' "bin/serve: could not parse --host" >&2
   return 1
 }
 
