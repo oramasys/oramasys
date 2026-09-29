@@ -54,18 +54,23 @@ def test_parse_explicit_host_equals_then_space_last_wins():
 
 
 @pytest.mark.parametrize(
-    "script",
+    ("script", "stderr_fragment"),
     [
-        'parse_explicit_host --host -x\n',
-        'parse_explicit_host --host=--port\n',
-        'parse_explicit_host --host " "\n',
-        'parse_explicit_host --host=" "\n',
+        ('parse_explicit_host --host -x\n', "empty or looks like an option"),
+        ('parse_explicit_host --host=--port\n', "empty or looks like an option"),
+        ('parse_explicit_host --host " "\n', "empty or looks like an option"),
+        ('parse_explicit_host --host=" "\n', "empty or looks like an option"),
+        ('parse_explicit_host --host\n', "requires a value"),
     ],
 )
-def test_parse_explicit_host_rejects_malformed_values(script: str) -> None:
+def test_parse_explicit_host_rejects_malformed_values(
+    script: str,
+    stderr_fragment: str,
+) -> None:
     result = _run_lib(script)
     assert result.returncode == 1, result.stderr
     assert result.stdout == ""
+    assert stderr_fragment in result.stderr
 
 
 def test_collect_non_host_args_strips_all_host_flags():
@@ -153,21 +158,22 @@ def test_serve_preserves_non_host_argument_boundaries_with_bash32(
 
 
 @pytest.mark.parametrize(
-    "args",
+    ("args", "stderr_fragment"),
     [
-        ("--host",),
-        ("--host=",),
-        ("--host", "127.0.0.1", "--host"),
-        ("--host", "--port", "8123"),
-        ("--host", "-x"),
-        ("--host=--port",),
-        ("--host", " "),
-        ("--host= ",),
+        (("--host",), "requires a value"),
+        (("--host", "127.0.0.1", "--host"), "requires a value"),
+        (("--host=",), "empty or looks like an option"),
+        (("--host", "--port", "8123"), "empty or looks like an option"),
+        (("--host", "-x"), "empty or looks like an option"),
+        (("--host=--port",), "empty or looks like an option"),
+        (("--host", " "), "empty or looks like an option"),
+        (("--host= ",), "empty or looks like an option"),
     ],
 )
 def test_serve_rejects_malformed_host_flags_before_launch(
     tmp_path: Path,
     args: tuple[str, ...],
+    stderr_fragment: str,
 ) -> None:
     env = os.environ.copy()
     env["PYTHON"] = str(_write_fake_python(tmp_path))
@@ -181,5 +187,5 @@ def test_serve_rejects_malformed_host_flags_before_launch(
     )
 
     assert result.returncode == 64, result.stderr
-    assert "requires a value" in result.stderr
+    assert stderr_fragment in result.stderr
     assert result.stdout == ""

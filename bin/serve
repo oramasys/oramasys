@@ -32,6 +32,7 @@ parse_explicit_host() {
   for arg in "$@"; do
     if [[ "$prev" == "--host" ]]; then
       if ! host="$(normalize_explicit_host_value "$arg")"; then
+        printf '%s\n' "bin/serve: --host value is empty or looks like an option" >&2
         return 1
       fi
       found=1
@@ -44,6 +45,7 @@ parse_explicit_host() {
         ;;
       --host=*)
         if ! host="$(normalize_explicit_host_value "${arg#--host=}")"; then
+          printf '%s\n' "bin/serve: --host value is empty or looks like an option" >&2
           return 1
         fi
         found=1
@@ -55,6 +57,7 @@ parse_explicit_host() {
     esac
   done
   if [[ "$prev" == "--host" ]]; then
+    printf '%s\n' "bin/serve: --host requires a value" >&2
     return 1
   fi
   if [[ "$found" -eq 1 ]]; then
@@ -103,7 +106,6 @@ orama_serve_main() {
     HOST="$("${PYTHON:-python3}" -c "from orama.api.authz import resolve_bind_host; print(resolve_bind_host())")"
   else
     if ! HOST="$(parse_explicit_host "$@")"; then
-      printf '%s\n' "bin/serve: --host requires a value" >&2
       exit 64
     fi
     export ORAMA_EXPLICIT_HOST="$HOST"
