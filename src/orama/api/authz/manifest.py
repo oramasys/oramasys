@@ -29,6 +29,12 @@ class RouteSpec:
 ROUTE_MANIFEST: tuple[RouteSpec, ...] = (
     RouteSpec("GET", "/health", RouteCapability.PUBLIC),
     RouteSpec("POST", "/run", RouteCapability.MUTATE),
+    RouteSpec("GET", "/api/knowledge/search", RouteCapability.READ),
+    RouteSpec("POST", "/api/mcp", RouteCapability.READ),
+    RouteSpec("POST", "/api/a2a", RouteCapability.READ),
+    RouteSpec("GET", "/.well-known/agent-card.json", RouteCapability.PUBLIC),
+    # D2: data-free HTML shell. Isolated; drop this spec to require Bearer for GET /knowledge.
+    RouteSpec("GET", "/knowledge", RouteCapability.PUBLIC),
 )
 
 # FastAPI / OpenAPI surfaces: public for alpha (operator docs on loopback).
