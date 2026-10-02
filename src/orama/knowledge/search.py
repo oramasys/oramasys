@@ -116,44 +116,47 @@ def search_docs(
     if not terms:
         return []
     root = docs_root()
-    if not root.is_dir():
-        return []
     hits: list[tuple[int, dict[str, Any]]] = []
     scanned = 0
-    for path in root.rglob("*.md"):
-        if deadline is not None and time.monotonic() >= deadline:
-            break
-        scanned += 1
-        if scanned > _max_files_scan():
-            break
-        try:
-            resolved = path.resolve()
-            resolved.relative_to(root)
-            if not resolved.is_file() or resolved.stat().st_size > _MAX_DOC_BYTES:
+    try:
+        if not root.is_dir():
+            return []
+        for path in root.rglob("*.md"):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            scanned += 1
+            if scanned > _max_files_scan():
+                break
+            try:
+                resolved = path.resolve()
+                resolved.relative_to(root)
+                if not resolved.is_file() or resolved.stat().st_size > _MAX_DOC_BYTES:
+                    continue
+                text = resolved.read_text(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
                 continue
-            text = resolved.read_text(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            continue
-        folded = _fold(text).lower()
-        title = next(
-            (line.lstrip("# ").strip() for line in text.splitlines() if line.startswith("#")),
-            path.stem,
-        )
-        title_lower = _fold(title).lower()
-        score = sum(folded.count(term) + (5 if term in title_lower else 0) for term in terms)
-        if not score:
-            continue
-        hits.append(
-            (
-                score,
-                {
-                    "title": title,
-                    "path": resolved.relative_to(root).as_posix(),
-                    "excerpt": _excerpt(text, terms),
-                    "score": score,
-                },
+            folded = _fold(text).lower()
+            title = next(
+                (line.lstrip("# ").strip() for line in text.splitlines() if line.startswith("#")),
+                path.stem,
             )
-        )
+            title_lower = _fold(title).lower()
+            score = sum(folded.count(term) + (5 if term in title_lower else 0) for term in terms)
+            if not score:
+                continue
+            hits.append(
+                (
+                    score,
+                    {
+                        "title": title,
+                        "path": resolved.relative_to(root).as_posix(),
+                        "excerpt": _excerpt(text, terms),
+                        "score": score,
+                    },
+                )
+            )
+    except OSError:
+        pass
     hits.sort(key=lambda item: (-item[0], item[1]["path"]))
     return [hit for _, hit in hits[:limit]]
 
