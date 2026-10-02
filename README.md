@@ -68,7 +68,7 @@ Read-only Markdown search over the local docs tree, shared by the HTTP API, MCP,
 | `POST /api/mcp` | `READ` — `initialize`, `server/discover`, `notifications/initialized` (202), `tools/list`, `tools/call` `search_docs` |
 | `POST /api/a2a` | `READ` — `message/send` runs a docs search; `tasks/get`/`tasks/cancel` → JSON-RPC -32001; no push notifications |
 | `GET /.well-known/agent-card.json` | `PUBLIC` — metadata only; `securitySchemes.bearer` |
-| `GET /knowledge` | `PUBLIC` — static HTML/JS shell, no doc content. Paste the token in the page; it stays in memory and is sent on each `fetch`. Isolated so this PUBLIC entry is easy to drop. |
+| `GET /knowledge` | `PUBLIC` — data-free HTML shell. Token stays in page memory. Response CSP hashes inline JS/CSS (no `unsafe-inline`); `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. Isolated so this PUBLIC entry is easy to drop. |
 
 Intentional divergence from orama-system #371: v1 made Class-0 knowledge public-read. v2 does **not**. Loopback `ORAMA_INSECURE_DEV=1` still skips Bearer for every route, which is the local no-token UX without opening a LAN filesystem scan.
 

@@ -1,7 +1,6 @@
 """Thin HTTP handlers for the Knowledge Portal (each ≤ 10 lines)."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -10,11 +9,11 @@ from starlette.responses import HTMLResponse, JSONResponse
 from orama.knowledge import a2a as a2a_mod
 from orama.knowledge import mcp as mcp_mod
 from orama.knowledge.jsonrpc import QUERY_MAX, rpc_body, rpc_error
+from orama.knowledge.page import render_shell
 from orama.knowledge.search import SearchUnavailable, bounded_search
 
 router = APIRouter()
 # Isolated public shell: data-free HTML only. Drop this route + PUBLIC spec to revert D2.
-_PAGE = Path(__file__).resolve().with_name("static") / "index.html"
 
 
 @router.get("/api/knowledge/search", tags=["knowledge"])
@@ -53,4 +52,5 @@ async def well_known_agent_card(request: Request) -> dict[str, Any]:
 
 @router.get("/knowledge", include_in_schema=False, tags=["knowledge"])
 async def knowledge_page() -> HTMLResponse:
-    return HTMLResponse(_PAGE.read_text(encoding="utf-8"))
+    html, headers = render_shell()
+    return HTMLResponse(html, headers=headers)

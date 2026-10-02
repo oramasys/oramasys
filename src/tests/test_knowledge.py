@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from orama.api.authz.manifest import RouteCapability, capability_for
 from orama.api.server import app
 from orama.knowledge import search as search_mod
+from orama.knowledge.page import shell_headers
 
 _TOKEN = "test-control-plane-token-32b"
 _MCP_HEADERS = {
@@ -97,9 +98,22 @@ async def test_knowledge_page_public_and_data_free(docs_root, monkeypatch, beare
     assert "text/html" in resp.headers["content-type"]
     body = resp.text
     assert "Search documentation" in body
-    assert "connect-src 'self'" in body
+    assert "unsafe-inline" not in body
     assert "Amplifier" not in body
     assert _TOKEN not in body
+    csp = resp.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    assert "connect-src 'self'" in csp
+    assert "base-uri 'none'" in csp
+    assert "form-action 'none'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "unsafe-inline" not in csp
+    assert csp == shell_headers(body)["Content-Security-Policy"]
+    assert "sha256-" in csp
+    assert resp.headers["x-frame-options"] == "DENY"
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    assert resp.headers["cache-control"] == "no-store"
 
 
 async def test_authenticated_search_returns_hits(docs_root, bearer_env):
@@ -444,6 +458,18 @@ def test_search_skips_oversized_file(tmp_path, monkeypatch):
     monkeypatch.setattr(search_mod, "_MAX_DOC_BYTES", 8)
     hits = search_mod.search_docs("keep-me-token")
     assert hits == []
+
+
+def test_search_walk_oserror_does_not_raise(monkeypatch):
+    class _Boom:
+        def is_dir(self) -> bool:
+            return True
+
+        def rglob(self, pattern: str):
+            raise OSError("walk failed")
+
+    monkeypatch.setattr(search_mod, "docs_root", lambda: _Boom())
+    assert search_mod.search_docs("human") == []
 
 
 async def test_mcp_method_not_found_and_bad_params(docs_root, bearer_env):
