@@ -25,6 +25,7 @@ from orama.graph.grant_verifier import (
     AdjustmentGrantRefused,
 )
 from orama.graph.perpetua_graph import graph
+from orama.knowledge import router as knowledge_router
 
 _log = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ def create_app(
     install_authz(app)
     from orama.workspace.api import router as workspace_router
     app.include_router(workspace_router)
+    app.include_router(knowledge_router)
     active_runner = runner or UnconfiguredGraphRunner()
     active_graph = graph if compiled_graph is None else compiled_graph
 
