@@ -21,6 +21,7 @@ from perpetua_core.graph import spec as core_spec
 SNAPSHOT = Path(__file__).parent / "fixtures" / "graph-ownership-registry.json"
 PINNED_SHA256 = "c1bf6b519f703184745e61142f259ae8eb73d163210bb1395437f8a82c2b402f"
 REGISTRY: dict[str, Any] = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+assert len({r["record"] for r in REGISTRY["records"]}) == len(REGISTRY["records"]), "duplicate record"
 RECORDS = {record["record"]: record for record in REGISTRY["records"]}
 
 
@@ -80,7 +81,7 @@ def test_computes_fields_live_only_in_the_core_spec() -> None:
     """Fields that change produced state belong to the structural GraphSpec."""
     for record in RECORDS.values():
         computing = [f for f in record["fields"] if f["category"] == "computes"]
-        if record["owner"] != "perpetua-core":
+        if record["record"] != "GraphSpec":
             assert not computing, record["record"]
 
 
