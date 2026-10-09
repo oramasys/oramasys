@@ -27,7 +27,12 @@ class Budgets(PolicyRecord):
 
 
 class EffectDeclaration(PolicyRecord):
-    """Effect intent and safe replay disposition; attempt IDs are evidence only."""
+    """Declared replay intent, not permission or a deduplication implementation.
+
+    ``operation_id`` is the logical-operation component of a future durable
+    effect key. A valid declaration does not prove provider idempotency, restore
+    an execution cursor or authorize replay; durable admission remains gated.
+    """
     node: str = Field(min_length=1, max_length=128)
     kind: Literal["pure", "untrusted", "provider"]
     replay: Literal["deny", "idempotent"] = "deny"
@@ -117,9 +122,16 @@ class PolicyBinding:
 
 
 def bind_policy(graph: GraphSpec, policy: GraphPolicy, *, reference: str) -> PolicyBinding:
-    """Lint the exact structure binding and node declarations before returning a view."""
+    """Validate structure before restrict-only lint and return a non-authoritative view.
+
+    Duplicate declarations must fail before indexing could discard a forbidden
+    choice. Binding never schedules work, approves effects or enables replay.
+    """
     if graph.graph_id != policy.graph_id:
         raise ValueError("policy graph_id does not match structural graph_id")
+    from perpetua_core.graph.lint import validate_graph_spec
+
+    validate_graph_spec(graph)
     path = PurePosixPath(reference)
     if not reference or path.is_absolute() or ".." in path.parts or "\\" in reference or ":" in reference:
         raise ValueError("policy reference must be a repository-relative path")

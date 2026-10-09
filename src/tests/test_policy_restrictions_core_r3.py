@@ -110,3 +110,21 @@ def test_graphs_without_regions_ignore_restrictions() -> None:
     strict = policy_for(spec, reducer_restrictions=ReducerRestrictions(required_fields=("x",)),
                         join_restrictions=JoinRestrictions(allowed_kinds=("all",)))
     assert bind(spec, strict).graph.graph_id == spec.graph_id
+
+
+@pytest.mark.parametrize("declaration", ["reducers", "joins"])
+def test_invalid_duplicate_declarations_cannot_bypass_restrictions(declaration: str) -> None:
+    """Policy must not collapse duplicate declarations into an allowed last value."""
+    from perpetua_core.graph.spec import GraphSpec, JoinSpec, ReducerSpec
+    original = graph()
+    changes = {"reducers": (ReducerSpec("messages", "last"), ReducerSpec("messages", "concat"))}
+    if declaration == "joins":
+        changes = {"joins": (JoinSpec("plan", "any"), JoinSpec("plan", "quorum", quorum=2))}
+    invalid = GraphSpec.create(max_steps=original.max_steps, nodes=original.nodes,
+                               edges=original.edges, **changes)
+    restrictions = dict(
+        reducer_restrictions=ReducerRestrictions(forbidden=(ForbiddenReducer(field="*", kind="last"),)),
+        join_restrictions=JoinRestrictions(allowed_kinds=("all", "quorum")),
+    )
+    with pytest.raises(ValueError, match="GS208|GS210"):
+        bind(invalid, policy_for(invalid, **restrictions))
