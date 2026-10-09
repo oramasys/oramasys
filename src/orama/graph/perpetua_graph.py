@@ -419,4 +419,18 @@ def build_graph_spec() -> GraphSpec:
     )
 
 
+def build_application_graph_definition():
+    """Transclude a validated, separately versioned policy without changing Core's hash.
+
+    This is a planning/lint view, not an execution or approval capability.
+    Runtime hardware, authorization and Telos egress gates remain mandatory.
+    """
+    from pathlib import Path
+    from orama.compat.policy import bind_policy, load_policy
+
+    reference = "src/orama/graph/policies/default.json"
+    policy = load_policy(Path(__file__).parent / "policies" / "default.json")
+    return bind_policy(build_graph_spec(), policy, reference=reference)
+
+
 graph = build_graph()
