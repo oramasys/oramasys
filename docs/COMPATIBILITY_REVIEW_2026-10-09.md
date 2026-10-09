@@ -1,9 +1,9 @@
 # Compatibility implementation handoff — 2026-10-09
 
 Canonical design and preserved research:
-[Orama revision 3 index](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/loop-graph-compatibility-2026-10-09/README.md),
-[resolutions](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/loop-graph-compatibility-2026-10-09/REVISION-3-RESOLUTIONS.md),
-and [durable approval contract](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/2026-10-09-compatibility-refusal-hitl-contract.md).
+[Orama revision 3 index](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/README.md),
+[resolutions](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/REVISION-3-RESOLUTIONS.md),
+and [durable approval contract](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/2026-10-09-compatibility-refusal-hitl-contract.md).
 PT's evidence plan and append-only memory follow-up link to the same authority.
 These paths refer to the coordinated open Orama PR branch, not merged main.
 
@@ -47,7 +47,7 @@ now both name the merged Core commit `04759a5` (tree-identical to the reviewed
 
 Production foreign effects and automatic deferred approvals stay refused.
 Budget/effect policy files are lintable intent; they are not an admission or
-dedupe engine. See the [active decisions](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/loop-graph-compatibility-2026-10-09/EXECUTION-REVISION-4.md)
+dedupe engine. See the [active decisions](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/EXECUTION-REVISION-4.md)
 and [oracle reproduction](../tests/oracles/README.md).
 
 ## Budget stop and portable gap errors (follow-up)
