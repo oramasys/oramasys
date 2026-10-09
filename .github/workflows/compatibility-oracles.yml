@@ -46,4 +46,7 @@ jobs:
           python -m pip install --no-deps --no-build-isolation -e ./core-candidate -e .
           python -m pip check
       - name: Full application suite and real offline oracle cells
+        env:
+          # The candidate Core must provide R3; its tests cannot be skipped here.
+          ORAMA_REQUIRE_CORE_R3: "1"
         run: python -m pytest -q src/tests tests/oracles
