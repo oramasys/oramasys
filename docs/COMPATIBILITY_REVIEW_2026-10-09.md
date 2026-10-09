@@ -1,11 +1,11 @@
 # Compatibility implementation handoff — 2026-10-09
 
 Canonical design and preserved research:
-[Orama revision 3 index](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/README.md),
-[resolutions](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/REVISION-3-RESOLUTIONS.md),
-and [durable approval contract](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/2026-10-09-compatibility-refusal-hitl-contract.md).
+[Orama revision 3 index](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/loop-graph-compatibility-2026-10-09/README.md),
+[resolutions](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/loop-graph-compatibility-2026-10-09/REVISION-3-RESOLUTIONS.md),
+and [durable approval contract](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/2026-10-09-compatibility-refusal-hitl-contract.md).
 PT's evidence plan and append-only memory follow-up link to the same authority.
-These paths are local publication targets, not claims of remote availability.
+These paths refer to the coordinated open Orama PR branch, not merged main.
 
 New native compatibility facades, explicit replacement activation and lazy
 caller-installed LangChain/LangGraph bridges belong here. Both v0.x and v1.x
@@ -27,3 +27,24 @@ Admission belongs to Phylax, hardware to Agate, and endpoint security to Telos.
 Foreign objects require enforceable sandbox/process egress controls; merely
 wrapping them in a node is not a security boundary. Until durable HITL bindings
 and use accounting exist, overrides remain denied/pending.
+
+## Revision 4 approved slice
+
+The earlier text describes the revision 3 handoff. The operator subsequently
+approved D-LG-1's separate policy file/transclusion and D-LG-4 Phase 1.
+This PR now implements import-free graph_tool, a lazy offline-only agent-as-node
+bridge, tiered gap errors, strict graph-policy binding and the application
+definition's linked summary. It does not activate replacement imports.
+
+The real offline framework suite plus application suite passes 271 tests;
+the framework-free application suite passes 261. The ten oracle cells never
+use importorskip and prohibit socket connections. A built-wheel smoke confirms
+the separate default policy JSON is packaged and loadable.
+The test-only lock/workflow uses an immutable Core candidate overlay.
+The production dependency pin remains 8dde861 until Core's merge; the overlay
+covers the intervening registry/dependency changes as well as the adapter repair.
+
+Production foreign effects and automatic deferred approvals stay refused.
+Budget/effect policy files are lintable intent; they are not an admission or
+dedupe engine. See the [active decisions](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/loop-graph-compatibility-2026-10-09/EXECUTION-REVISION-4.md)
+and [oracle reproduction](../tests/oracles/README.md).
