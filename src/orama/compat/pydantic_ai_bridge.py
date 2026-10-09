@@ -46,8 +46,13 @@ def as_node(agent: object, *, prompt_from: Callable[[PerpetuaState], str],
         try:
             result = await agent.run(prompt_from(state), deps=deps_from(state), usage_limits=usage_limits)
         except UsageLimitExceeded:
-            return {"error": "agent budget exhausted", "metadata": {
-                **state.metadata, "compat_terminal_reason": "budget_exhausted"}}
+            # Stop the run: returning a delta would let downstream nodes, including
+            # effect nodes, keep executing after the ceiling. Core's structural
+            # interrupt halts traversal without widening Core's terminal taxonomy.
+            raise Interrupt("agent budget exhausted", payload={
+                "reason": "budget_exhausted", "compat_terminal_reason": "budget_exhausted",
+                "resumable": False,
+            }) from None
         output = result.output
         if isinstance(output, DeferredToolRequests):
             raise Interrupt("agent tool approval pending", payload={

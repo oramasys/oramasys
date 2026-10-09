@@ -67,9 +67,19 @@ def test_real_tool_runs_offline() -> None:
 
 
 def test_budget_exhausted_is_wrapper_termination() -> None:
-    """A request ceiling stops the wrapper without changing Core's terminal taxonomy."""
-    state = run(Agent(TestModel()), UsageLimits(request_limit=0))
-    assert state.metadata["compat_terminal_reason"] == "budget_exhausted"
+    """A request ceiling stops the whole run without changing Core's terminal taxonomy."""
+    downstream: list[str] = []
+    node = as_node(Agent(TestModel()), prompt_from=lambda state: "prompt",
+                   deps_from=lambda state: None, output_key="answer", offline_test=True,
+                   usage_limits=UsageLimits(request_limit=0))
+    graph = (MiniGraph().add_node("agent", node)
+             .add_node("after", lambda state: downstream.append("after") or {})
+             .add_edge(START, "agent").add_edge("agent", "after").add_edge("after", END))
+    state = asyncio.run(graph.ainvoke(PerpetuaState(session_id="oracle")))
+    assert state.status == "interrupted"
+    assert state.metadata["interrupt_payload"]["compat_terminal_reason"] == "budget_exhausted"
+    assert state.metadata["interrupt_payload"]["resumable"] is False
+    assert downstream == []
     assert "answer" not in state.scratchpad
 
 

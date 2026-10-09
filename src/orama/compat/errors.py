@@ -30,6 +30,11 @@ class CompatGapModuleError(ModuleNotFoundError):
         explain(matrix_row)
         self.matrix_row = matrix_row
         super().__init__(f"Unsupported module {fullname!r}; compatibility row {matrix_row}", name=fullname)
+        self.fullname = fullname
+
+    def __reduce__(self):
+        """Rebuild from the constructor arguments so the error survives process boundaries."""
+        return (type(self), (self.fullname, self.matrix_row))
 
 
 class CompatGapAttributeError(AttributeError):
@@ -39,6 +44,11 @@ class CompatGapAttributeError(AttributeError):
         explain(matrix_row)
         self.matrix_row = matrix_row
         super().__init__(f"Unsupported symbol {fullname!r}; compatibility row {matrix_row}")
+        self.fullname = fullname
+
+    def __reduce__(self):
+        """Rebuild from the constructor arguments so the error survives process boundaries."""
+        return (type(self), (self.fullname, self.matrix_row))
 
 
 def unsupported_symbol(module: str, symbol: str, matrix_row: str) -> None:

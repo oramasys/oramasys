@@ -48,3 +48,17 @@ Production foreign effects and automatic deferred approvals stay refused.
 Budget/effect policy files are lintable intent; they are not an admission or
 dedupe engine. See the [active decisions](https://github.com/diazMelgarejo/orama-system/blob/docs/loop-graph-compatibility-r3/docs/v2/references/loop-graph-compatibility-2026-10-09/EXECUTION-REVISION-4.md)
 and [oracle reproduction](../tests/oracles/README.md).
+
+## Budget stop and portable gap errors (follow-up)
+
+- **Budget exhaustion now stops the run.** `as_node` returned an error delta
+  on `UsageLimitExceeded`, so downstream nodes, including effect nodes, still
+  executed and the final status was `done`. It now raises Core's structural
+  `Interrupt` with payload reason `budget_exhausted` and `resumable: false`.
+  The oracle test uses a two-node graph and asserts the downstream node never
+  runs; it fails on the previous head.
+- **Gap errors survive pickling.** Both gap error classes rebuild from their
+  constructor arguments, so diagnostics cross worker and process boundaries.
+
+Verification on Python 3.12 against Core candidate `b9b4477`: oracle
+environment 284 passed; framework-free application suite 271 passed.

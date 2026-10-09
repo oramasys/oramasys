@@ -69,3 +69,16 @@ def test_finder_returning_none_can_fall_through(monkeypatch: pytest.MonkeyPatch,
         assert "compat_installed_fixture" in attempts
     finally:
         sys.modules.pop("compat_installed_fixture", None)
+
+
+def test_gap_errors_survive_pickling() -> None:
+    """Gap diagnostics must cross process boundaries (workers, log shipping) intact."""
+    import pickle
+    from orama.compat.errors import CompatGapAttributeError, CompatGapModuleError
+
+    for error in (CompatGapModuleError("langgraph.pregel", "G18"),
+                  CompatGapAttributeError("langgraph.types.Send", "G18")):
+        copy = pickle.loads(pickle.dumps(error))
+        assert type(copy) is type(error)
+        assert copy.matrix_row == "G18" and str(copy) == str(error)
+    assert pickle.loads(pickle.dumps(CompatGapModuleError("langgraph.pregel", "G18"))).name == "langgraph.pregel"
