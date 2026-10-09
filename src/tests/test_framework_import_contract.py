@@ -24,6 +24,20 @@ ALLOWLIST = {"compat/pydantic_ai_bridge.py": {"pydantic_ai"}}
 SOURCE = Path(__file__).resolve().parents[1] / PACKAGE
 
 
+def static_string(node: ast.AST) -> str | None:
+    """Resolve only literal strings, literal concatenation and literal-only f-strings."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = static_string(node.left), static_string(node.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.JoinedStr):
+        pieces = [static_string(piece) for piece in node.values]
+        if all(piece is not None for piece in pieces):
+            return "".join(pieces)
+    return None
+
+
 def classify(source: str) -> list[tuple[str, str]]:
     """Classify framework imports without exempting else bodies or defaults."""
     findings: list[tuple[str, str]] = []
@@ -54,9 +68,11 @@ def classify(source: str) -> list[tuple[str, str]]:
             names = [node.module]
         elif isinstance(node, ast.Call):
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-            if name in {"import_module", "__import__"} and node.args and isinstance(node.args[0], ast.Constant):
-                value = node.args[0].value
-                if isinstance(value, str) and is_framework(value):
+            if name in {"import_module", "__import__"}:
+                value = static_string(node.args[0]) if node.args else None
+                if value is None:
+                    findings.append(("<unresolved>", "TYPING" if typing else "DYNAMIC_UNRESOLVED"))
+                elif is_framework(value):
                     findings.append((value.split(".")[0], "TYPING" if typing else "DYNAMIC"))
         for name in names:
             if is_framework(name):
@@ -137,3 +153,22 @@ def test_scanner_adversarial_cases(source: str, kind: str) -> None:
 def test_lookalikes_are_not_frameworks() -> None:
     """Do not flag Pydantic itself or similarly named independent modules."""
     assert classify("import pydantic\nimport langgraphish\nimport langchainish\nimport pydantic_aiish") == []
+
+
+@pytest.mark.parametrize("expression", [
+    '"lang" + "graph"',
+    '("langchain_" + "text_splitters")',
+    'f"langgraph"',
+])
+def test_computed_literal_imports_in_lazy_functions_are_detected(expression: str) -> None:
+    """A lazy function must not conceal a statically computable framework import."""
+    findings = classify(f"def load():\n importlib.import_module({expression})")
+    assert len(findings) == 1
+    assert findings[0][1] == "DYNAMIC"
+
+
+def test_unresolved_dynamic_import_requires_explicit_review() -> None:
+    """A nonliteral argument must produce evidence rather than silently disappear."""
+    assert classify("def load(name):\n importlib.import_module(name)") == [
+        ("<unresolved>", "DYNAMIC_UNRESOLVED")
+    ]
