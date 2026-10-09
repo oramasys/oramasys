@@ -11,6 +11,8 @@ permissions:
 jobs:
   offline-oracles:
     runs-on: ubuntu-latest
+    env:
+      ORAMA_DOCS_V2_REGISTRY: docs-candidate/docs/v2/references/loop-graph-compatibility-2026-10-09/ownership-registry.json
     strategy:
       fail-fast: false
       matrix:
@@ -18,6 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
+      - name: Check out immutable canonical registry profiles
+        uses: actions/checkout@v4
+        with:
+          repository: diazMelgarejo/orama-system
+          ref: 7b7f9d84e43f0709115588a95b13a78badb8369f
+          path: docs-candidate
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -46,4 +55,7 @@ jobs:
           python -m pip install --no-deps --no-build-isolation -e ./core-candidate -e .
           python -m pip check
       - name: Full application suite and real offline oracle cells
+        env:
+          # The candidate Core must provide R3; its tests cannot be skipped here.
+          ORAMA_REQUIRE_CORE_R3: "1"
         run: python -m pytest -q src/tests tests/oracles
