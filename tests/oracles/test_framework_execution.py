@@ -78,3 +78,19 @@ def test_real_agent_registers_graph_tool_schema_and_executes() -> None:
     result = asyncio.run(agent.run("offline"))
     assert result.output == "done"
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("target", ["b", "c", END])
+def test_real_langgraph_advisory_targets_allow_native_routes(target: str) -> None:
+    """Check the exact candidate with declared, undeclared and terminal routes."""
+    graph = MiniGraph().add_node("a", lambda state: {})
+    for name in ("b", "c"):
+        graph.add_node(name, lambda state, selected=name: {"scratchpad": {"route": selected}})
+        graph.add_edge(name, END)
+    graph.add_edge(START, "a")
+    graph.add_edge("a", ConditionalEdge(lambda state: target, ("b",)))
+    state = PerpetuaState(session_id="advisory-oracle")
+    native = asyncio.run(graph.compile().ainvoke(state))
+    exported = asyncio.run(LangGraphExporter.to_langgraph(graph, PerpetuaState).ainvoke(state))
+    assert native.scratchpad == exported["scratchpad"]
+    assert native.scratchpad == ({} if target == END else {"route": target})

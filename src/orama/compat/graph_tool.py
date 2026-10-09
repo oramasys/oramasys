@@ -18,6 +18,8 @@ def graph_tool(name: str, graph: object, *, input_model: type, state_from: objec
         result = await graph.ainvoke(state_from(request))
         if result.status != "done" or result.error is not None:
             raise RuntimeError("graph did not complete successfully")
+        if output_key not in result.scratchpad:
+            raise RuntimeError(f"graph completed without output key {output_key!r}")
         return result.scratchpad[output_key]
 
     invoke.__name__ = name

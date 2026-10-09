@@ -50,3 +50,14 @@ def test_graph_tool_does_not_report_stale_output_after_refusal(status, error) ->
                       state_from=lambda payload: None, output_key="output")
     with pytest.raises(RuntimeError, match="did not complete"):
         asyncio.run(tool(Input(text="hello")))
+
+
+def test_graph_tool_reports_missing_output_key() -> None:
+    """Successful execution without the requested output raises a useful error."""
+    graph = MiniGraph().add_node("a", lambda state: {})
+    graph.add_edge(START, "a").add_edge("a", END)
+    tool = graph_tool("missing_output", graph.compile(), input_model=Input,
+                      state_from=lambda payload: PerpetuaState(session_id="tool"),
+                      output_key="answer")
+    with pytest.raises(RuntimeError, match="graph completed without output key 'answer'"):
+        asyncio.run(tool(Input(text="hello")))

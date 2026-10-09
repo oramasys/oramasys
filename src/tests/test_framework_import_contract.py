@@ -10,8 +10,15 @@ import tomllib
 
 import pytest
 
-ROOTS = {"langchain", "langchain_core", "langchain_community", "langchain_openai",
-         "langgraph", "pydantic_ai", "pydantic_ai_slim"}
+FAMILIES = ("langchain", "langgraph", "pydantic_ai")
+
+
+def is_framework(name: str) -> bool:
+    """Match framework families while excluding independent lookalikes."""
+    root = name.split(".")[0]
+    return any(root == family or root.startswith(family + "_") for family in FAMILIES)
+
+
 PACKAGE = "orama"
 ALLOWLIST = {"compat/pydantic_ai_bridge.py": {"pydantic_ai"}}
 SOURCE = Path(__file__).resolve().parents[1] / PACKAGE
@@ -49,10 +56,10 @@ def classify(source: str) -> list[tuple[str, str]]:
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
             if name in {"import_module", "__import__"} and node.args and isinstance(node.args[0], ast.Constant):
                 value = node.args[0].value
-                if isinstance(value, str) and value.split(".")[0] in ROOTS:
+                if isinstance(value, str) and is_framework(value):
                     findings.append((value.split(".")[0], "TYPING" if typing else "DYNAMIC"))
         for name in names:
-            if name.split(".")[0] in ROOTS:
+            if is_framework(name):
                 findings.append((name.split(".")[0], "TYPING" if typing else "LAZY" if lazy else "EAGER"))
         for child in ast.iter_child_nodes(node):
             walk(child, lazy, typing)
@@ -81,7 +88,7 @@ import importlib, importlib.abc, pkgutil, sys
 hits = []
 class Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {ROOTS!r}:
+        if any(fullname.split('.')[0] == family or fullname.split('.')[0].startswith(family + '_')\n               for family in {FAMILIES!r}):
             hits.append(fullname)
             raise ModuleNotFoundError('framework import blocked', name=fullname)
 sys.meta_path.insert(0, Blocker())
@@ -109,6 +116,10 @@ def test_published_metadata_has_no_framework_dependencies() -> None:
 
 @pytest.mark.parametrize(("source", "kind"), [
     ("import langgraph", "EAGER"),
+    ("import langchain_text_splitters", "EAGER"),
+    ("importlib.import_module('langchain_anthropic')", "DYNAMIC"),
+    ("import langgraph_sdk", "EAGER"),
+    ("import pydantic_ai_slim", "EAGER"),
     ("from langchain_core.runnables import Runnable", "EAGER"),
     ("def f():\n import langgraph", "LAZY"),
     ("class C:\n def f(self):\n  import pydantic_ai", "LAZY"),
@@ -125,4 +136,4 @@ def test_scanner_adversarial_cases(source: str, kind: str) -> None:
 
 def test_lookalikes_are_not_frameworks() -> None:
     """Do not flag Pydantic itself or similarly named independent modules."""
-    assert classify("import pydantic\nimport langgraphish") == []
+    assert classify("import pydantic\nimport langgraphish\nimport langchainish\nimport pydantic_aiish") == []
