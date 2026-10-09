@@ -1,0 +1,12 @@
+{
+  "policy_schema_version": "1",
+  "graph_id": "156f31453650d9769997bfecd1315114bb5ca12325d97fe4501af93f3c1aa536",
+  "revision": 1,
+  "budgets": {},
+  "effects": [
+    {"node": "route", "kind": "untrusted", "replay": "deny"},
+    {"node": "dispatch", "kind": "provider", "replay": "deny"},
+    {"node": "respond", "kind": "pure", "replay": "deny"}
+  ],
+  "approval": "deny-until-durable"
+}

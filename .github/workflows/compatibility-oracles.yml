@@ -1,0 +1,49 @@
+name: compatibility oracles
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-oracles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Read immutable Core test candidate
+        id: core
+        run: |
+          python - <<'PY'
+          import os, re
+          from pathlib import Path
+          sha = Path("requirements/compatibility-core-candidate.txt").read_text().strip()
+          if not re.fullmatch(r"[0-9a-f]{40}", sha):
+              raise SystemExit("Core test candidate must be an immutable commit")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write(f"sha={sha}\n")
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: oramasys/perpetua-core
+          ref: ${{ steps.core.outputs.sha }}
+          path: core-candidate
+          persist-credentials: false
+      - name: Install isolated pinned oracle environment
+        run: |
+          python -m pip install -r requirements/compatibility-oracles-py312.txt
+          python -m pip install --no-deps --no-build-isolation -e ./core-candidate -e .
+          python -m pip check
+      - name: Full application suite and real offline oracle cells
+        run: python -m pytest -q src/tests tests/oracles
