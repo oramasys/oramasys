@@ -8,11 +8,13 @@ _TOKEN = "test-control-plane-token-32b"
 
 @pytest.fixture(autouse=True)
 def _auth_env(monkeypatch):
+    """Test helper: auth env."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", _TOKEN)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
 
 
 def _auth_headers() -> dict[str, str]:
+    """Test helper: auth headers."""
     return {"Authorization": f"Bearer {_TOKEN}"}
 
 
@@ -25,6 +27,7 @@ class _DirectRunner:
 
 
 async def test_health_endpoint() -> None:
+    """Health endpoint."""
     async with AsyncClient(transport=ASGITransport(app=create_app(runner=_DirectRunner())), base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200
@@ -32,6 +35,7 @@ async def test_health_endpoint() -> None:
 
 
 async def test_run_endpoint_returns_200() -> None:
+    """Run endpoint returns 200."""
     payload = {
         "session_id": "test-session",
         "task": "Explain hardware routing.",
@@ -48,6 +52,7 @@ async def test_run_endpoint_returns_200() -> None:
 
 
 async def test_run_response_has_result() -> None:
+    """Run response has result."""
     payload = {"session_id": "s2", "task": "hello"}
     async with AsyncClient(transport=ASGITransport(app=create_app(runner=_DirectRunner())), base_url="http://test") as client:
         resp = await client.post("/run", json=payload, headers=_auth_headers())
