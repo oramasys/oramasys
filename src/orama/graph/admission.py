@@ -6,16 +6,25 @@ mapping for one invocation. Resolution is a plain dictionary lookup: no import, 
 ``getattr`` walk, no case folding, no alias, no fallback. Anything else refuses.
 
 This is not a sandbox for trusted code; it only guarantees artifact strings never reach
-dynamic imports. Admission decisions (Phylax, Agate, Telos) are later T1 slices.
+dynamic imports.
+
+The second half of the module is the T1 admission record: ``ArtifactBinding`` (one
+immutable, domain-tagged digest per run), owner ports for Phylax, Agate and Telos, and
+``admit_artifact``, which returns a discriminated ``AdmissionDecision`` built only from
+actual owner decisions and fails closed on anything missing, stale or unavailable.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal, Protocol, TypeAlias
 
 # Lowercase ASCII token: letter first, then letters, digits, '-' or '_'; at most 64 chars.
 # fullmatch (not match with '$') so a trailing newline cannot slip through.
@@ -86,3 +95,246 @@ class CallableRegistry:
         if expected_digest is not None and binding.artifact_digest != expected_digest:
             raise AdmissionRefused("callable_binding.digest_changed")
         return binding.target
+
+
+# --- T1: artifact identity and admission decisions ---------------------------
+#
+# Canonical encoding (frozen for T1): compact JSON, sorted keys, ASCII only, wrapped
+# with a domain tag, a kind and a schema version, then SHA-256. A digest of one kind can
+# never be replayed as another kind. Times are aware UTC datetimes from an injected
+# clock; nothing here sleeps or reads the wall clock directly.
+
+DIGEST_DOMAIN = "oramasys.admission"
+DIGEST_SCHEMA = 1
+
+EvidenceClass: TypeAlias = Literal["observed", "derived", "reconstructed"]
+Owner: TypeAlias = Literal["phylax", "agate", "telos"]
+Outcome: TypeAlias = Literal["allow", "refuse", "pending"]
+Clock: TypeAlias = Callable[[], datetime]
+
+
+def canonical_digest(kind: str, payload: Mapping[str, Any]) -> str:
+    body = json.dumps(
+        {"domain": DIGEST_DOMAIN, "schema": DIGEST_SCHEMA, "kind": kind, "payload": payload},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return "sha256:" + hashlib.sha256(body.encode("ascii")).hexdigest()
+
+
+def _digest(value: object, name: str) -> str:
+    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+        raise AdmissionRefused(f"artifact_binding.bad_{name}")
+    return value
+
+
+def _text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise AdmissionRefused(f"{name}.required")
+    return value
+
+
+def _utc_now(clock: Clock) -> datetime:
+    now = clock()
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise AdmissionRefused("clock.not_utc_aware")
+    return now.astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactBinding:
+    """Immutable identity of everything one run executes (contract §2)."""
+
+    graph_id: str
+    implementation_digest: str
+    state_schema_version: str
+    policy_digest: str
+    registry_profile_digest: str
+    provider_contract_digests: tuple[str, ...]
+    execution_semantics_version: str
+
+    FIELDS = (
+        "graph_id",
+        "implementation_digest",
+        "state_schema_version",
+        "policy_digest",
+        "registry_profile_digest",
+        "provider_contract_digests",
+        "execution_semantics_version",
+    )
+
+    def __post_init__(self) -> None:
+        for name in ("graph_id", "implementation_digest", "policy_digest", "registry_profile_digest"):
+            _digest(getattr(self, name), name)
+        _text(self.state_schema_version, "state_schema_version")
+        _text(self.execution_semantics_version, "execution_semantics_version")
+        providers = tuple(_digest(d, "provider_contract_digest") for d in self.provider_contract_digests)
+        if len(set(providers)) != len(providers):
+            raise AdmissionRefused("artifact_binding.duplicate_provider_contract")
+        object.__setattr__(self, "provider_contract_digests", tuple(sorted(providers)))
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> ArtifactBinding:
+        keys = set(raw)
+        if keys != set(cls.FIELDS):
+            raise AdmissionRefused("artifact_binding.fields_mismatch")
+        values = dict(raw)
+        values["provider_contract_digests"] = tuple(values["provider_contract_digests"])
+        return cls(**values)
+
+    def digest(self) -> str:
+        payload = {name: getattr(self, name) for name in self.FIELDS}
+        payload["provider_contract_digests"] = list(self.provider_contract_digests)
+        return canonical_digest("artifact_binding", payload)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionContext:
+    """Who asks to run what. Authenticated upstream; never self-authorizing."""
+
+    run_id: str
+    principal_id: str
+    capability: str
+    model: str
+    endpoint_purposes: tuple[str, ...]
+    policy_summary_digest: str
+
+    def __post_init__(self) -> None:
+        for name in ("run_id", "principal_id", "capability", "model"):
+            _text(getattr(self, name), name)
+        _digest(self.policy_summary_digest, "policy_summary_digest")
+        purposes = tuple(self.endpoint_purposes)
+        if any(not isinstance(p, str) or not p for p in purposes) or len(set(purposes)) != len(purposes):
+            raise AdmissionRefused("endpoint_purposes.invalid")
+        object.__setattr__(self, "endpoint_purposes", tuple(sorted(purposes)))
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerDecision:
+    """One owner's actual decision, as reported by its adapter."""
+
+    owner: Owner
+    allowed: bool
+    reason_code: str
+    decision_ref: str
+    expires_at: datetime | None
+    authority_epoch: int | None = None
+    evidence_class: EvidenceClass = "observed"
+    overridable: bool = False
+
+
+class PhylaxAdmission(Protocol):
+    def admit(self, binding: ArtifactBinding, context: AdmissionContext) -> OwnerDecision: ...
+
+    def is_current(self, decision: OwnerDecision) -> bool: ...
+
+
+class AgateFit(Protocol):
+    def assess(self, context: AdmissionContext) -> OwnerDecision: ...
+
+    def is_current(self, decision: OwnerDecision) -> bool: ...
+
+
+class TelosEndpoints(Protocol):
+    def authorize(self, context: AdmissionContext) -> tuple[OwnerDecision, ...]: ...
+
+    def is_current(self, decision: OwnerDecision) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionProviders:
+    phylax: PhylaxAdmission | None
+    agate: AgateFit | None
+    telos: TelosEndpoints | None
+
+    def checker(self, owner: Owner) -> Callable[[OwnerDecision], bool] | None:
+        provider = getattr(self, owner)
+        return None if provider is None else provider.is_current
+
+
+def production_providers() -> AdmissionProviders | None:
+    """Real owner adapters are wired by trusted application construction. Until they
+    are, production has none, and admission refuses. Never a fake fallback."""
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionDecision:
+    """Discriminated allow/refuse/pending result (contract §3). Never a Boolean."""
+
+    outcome: Outcome
+    reason_code: str
+    decision_id: str
+    binding_digest: str
+    owner_decisions: tuple[OwnerDecision, ...]
+    issued_at: datetime
+    expires_at: datetime | None
+    max_steps: int
+    authority_epoch: int | None
+
+    def covers(self, binding: ArtifactBinding) -> bool:
+        return self.binding_digest == binding.digest()
+
+
+def admit_artifact(
+    binding: ArtifactBinding,
+    context: AdmissionContext,
+    providers: AdmissionProviders | None,
+    *,
+    clock: Clock,
+    max_steps: int,
+) -> AdmissionDecision:
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
+        raise AdmissionRefused("admission.max_steps_invalid")
+    now = _utc_now(clock)
+    digest = binding.digest()
+    collected: list[OwnerDecision] = []
+
+    def result(outcome: Outcome, reason: str) -> AdmissionDecision:
+        allowed = outcome == "allow"
+        expiries = [d.expires_at for d in collected if d.expires_at is not None]
+        epochs = [d.authority_epoch for d in collected if d.owner == "phylax"]
+        return AdmissionDecision(
+            outcome=outcome,
+            reason_code=reason,
+            decision_id=secrets.token_urlsafe(18),
+            binding_digest=digest,
+            owner_decisions=tuple(collected),
+            issued_at=now,
+            expires_at=min(expiries) if allowed and expiries else None,
+            max_steps=max_steps,
+            authority_epoch=epochs[0] if epochs else None,
+        )
+
+    if context.policy_summary_digest != binding.policy_digest:
+        return result("refuse", "admission.stale_policy")
+    if providers is None or None in (providers.phylax, providers.agate, providers.telos):
+        return result("refuse", "admission.enforcement_unavailable")
+
+    calls: tuple[tuple[Owner, Callable[[], Any]], ...] = (
+        ("phylax", lambda: (providers.phylax.admit(binding, context),)),  # type: ignore[union-attr]
+        ("agate", lambda: (providers.agate.assess(context),)),  # type: ignore[union-attr]
+        ("telos", lambda: tuple(providers.telos.authorize(context))),  # type: ignore[union-attr]
+    )
+    for owner, call in calls:
+        try:
+            decisions = call()
+        except Exception:  # noqa: BLE001 - an unavailable owner refuses, never a default allow
+            return result("refuse", f"admission.{owner}_unavailable")
+        for decision in decisions:
+            if not isinstance(decision, OwnerDecision) or decision.owner != owner:
+                return result("refuse", f"admission.{owner}_bad_decision")
+            collected.append(decision)
+            if decision.evidence_class != "observed":
+                return result("refuse", "admission.evidence_not_observed")
+            if not decision.allowed:
+                outcome: Outcome = "pending" if decision.overridable else "refuse"
+                return result(outcome, f"{owner}.{decision.reason_code}")
+            if decision.expires_at is None:
+                return result("refuse", "admission.decision_without_expiry")
+            if decision.expires_at <= now:
+                return result("refuse", "admission.expired")
+    if not any(d.owner == "phylax" and d.authority_epoch is not None for d in collected):
+        return result("refuse", "admission.authority_epoch_missing")
+    return result("allow", "admission.allowed")

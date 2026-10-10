@@ -1,0 +1,44 @@
+name: T1 Core gate candidate
+
+# Runs the T1 admission gate against the candidate Core revision that carries the
+# neutral DispatchGate seam (oramasys/perpetua-core#10). The production pin stays on
+# the qualified Core until that revision is merged and qualified; this job proves the
+# gate in lockstep meanwhile. ORAMA_REQUIRE_CORE_GATE makes a missing seam a failure,
+# never a silent skip.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  core-gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    runs-on: ubuntu-latest
+    env:
+      ORAMA_REQUIRE_CORE_GATE: "1"
+      CORE_GATE_CANDIDATE: 73c54cd867825d7e9e1e9fbb54fb1adc98e35218
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Oramasys, then the candidate Core with the T1 seam
+        run: |
+          python -m pip install --no-cache-dir '.[dev]'
+          python -m pip install --no-cache-dir --no-deps --force-reinstall \
+            "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@${CORE_GATE_CANDIDATE}"
+          python -m pip check
+      - name: T1 admission and gate tests against the candidate Core
+        run: |
+          python -m pytest -q src/tests/test_artifact_admission.py \
+            src/tests/test_admission_decision.py src/tests/test_execution_guard.py \
+            src/tests/core_gate
