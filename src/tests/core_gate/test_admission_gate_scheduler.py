@@ -205,6 +205,33 @@ async def test_fanout_batch_holds_settle_after_the_region_is_published(tmp_path)
     assert list(ledger.batch_hold_states("run-1", batch_id).values()) == ["settled", "settled"]
 
 
+async def test_any_join_retains_an_excluded_branch_hold_for_reconciliation(tmp_path):
+    """An omitted branch is never silently refunded after a successful any join."""
+    from perpetua_core.graph.engine import END, FanOut, Join, MiniGraph
+
+    gate, _, _, ledger, _ = make(tmp_path)
+    graph = MiniGraph()
+    graph.add_node("plan", lambda s: {})
+    graph.add_node("accepted", lambda s: {"scratchpad": {"accepted": True}})
+
+    def fails(_):
+        """Model a branch that may have started but did not publish a delta."""
+        raise RuntimeError("branch failed after dispatch")
+
+    graph.add_node("failed", fails)
+    graph.add_node("after", lambda s: {})
+    graph.set_entry("plan")
+    graph.add_edge("plan", FanOut(("accepted", "failed"), "after", Join("any")))
+    graph.add_edge("after", END)
+
+    await graph.compile().ainvoke(fresh(), gate=gate)
+
+    batch_id, = ledger.batch_ids("run-1")
+    states = ledger.batch_hold_states("run-1", batch_id)
+    assert states[f"{batch_id}:accepted"] == "settled"
+    assert states[f"{batch_id}:failed"] == "held"
+
+
 async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
     """Expiry before reducer refuses the fold."""
     from perpetua_core.graph.engine import END, FanOut, MiniGraph
