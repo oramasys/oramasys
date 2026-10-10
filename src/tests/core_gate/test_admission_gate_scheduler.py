@@ -183,6 +183,28 @@ async def test_fanout_batch_is_reserved_all_or_nothing(tmp_path):
     assert ledger.used("run-1") == 1
 
 
+async def test_fanout_batch_holds_settle_after_the_region_is_published(tmp_path):
+    """Core's shared batch token lets the gate settle admitted branch holds."""
+    from perpetua_core.graph.engine import END, FanOut, MiniGraph
+    from perpetua_core.graph.reducers import Reducer
+
+    gate, _, _, ledger, _ = make(tmp_path)
+    graph = MiniGraph()
+    graph.add_node("plan", lambda s: {})
+    graph.add_node("b1", lambda s: {"messages": [{"branch": "b1"}]})
+    graph.add_node("b2", lambda s: {"messages": [{"branch": "b2"}]})
+    graph.add_node("after", lambda s: {})
+    graph.add_reducer("messages", Reducer("concat"))
+    graph.set_entry("plan")
+    graph.add_edge("plan", FanOut(("b1", "b2"), "after"))
+    graph.add_edge("after", END)
+
+    await graph.compile().ainvoke(fresh(), gate=gate)
+
+    batch_id, = ledger.batch_ids("run-1")
+    assert list(ledger.batch_hold_states("run-1", batch_id).values()) == ["settled", "settled"]
+
+
 async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
     """Expiry before reducer refuses the fold."""
     from perpetua_core.graph.engine import END, FanOut, MiniGraph

@@ -149,6 +149,12 @@ class StepLedger:
             " PRIMARY KEY (run_id, batch_id))"
         )
         self._db.execute(
+            "CREATE TABLE IF NOT EXISTS batch_attempts ("
+            " run_id TEXT NOT NULL, batch_id TEXT NOT NULL, attempt_id TEXT NOT NULL,"
+            " PRIMARY KEY (run_id, batch_id, attempt_id),"
+            " UNIQUE (run_id, attempt_id))"
+        )
+        self._db.execute(
             "CREATE TABLE IF NOT EXISTS unknown_dispositions ("
             " run_id TEXT NOT NULL, attempt_id TEXT NOT NULL, hold_id TEXT NOT NULL,"
             " epoch INTEGER NOT NULL, cause TEXT NOT NULL, stop_state TEXT NOT NULL,"
@@ -278,6 +284,15 @@ class StepLedger:
             if existing is not None:
                 if str(existing[0]) != payload:
                     raise ValueError("batch_id payload conflicts with existing reservation")
+                # Databases created before batch membership was materialized
+                # retain only the verified payload digest. A matching replay is
+                # enough to safely backfill the missing member index.
+                for attempt_id, _ in attempts:
+                    db.execute(
+                        "INSERT OR IGNORE INTO batch_attempts (run_id, batch_id, attempt_id) "
+                        "VALUES (?, ?, ?)",
+                        (run_id, batch_id, attempt_id),
+                    )
                 return tuple(self._hold_for(db, run_id, attempt_id) for attempt_id, _ in attempts)
             row = self._lease_row(db, run_id, epoch)
             total = sum(units for _, units in attempts)
@@ -294,6 +309,10 @@ class StepLedger:
                     "INSERT INTO attempt_holds (run_id, attempt_id, hold_id, epoch, units, state) "
                     "VALUES (?, ?, ?, ?, ?, 'held')",
                     (run_id, attempt_id, hold_id, epoch, units),
+                )
+                db.execute(
+                    "INSERT INTO batch_attempts (run_id, batch_id, attempt_id) VALUES (?, ?, ?)",
+                    (run_id, batch_id, attempt_id),
                 )
                 holds.append(AttemptHold(run_id, attempt_id, hold_id, epoch, units))
             db.execute("UPDATE leases SET used = used + ? WHERE run_id = ?", (total, run_id))
@@ -347,6 +366,80 @@ class StepLedger:
             )
             return True
 
+    def prepare_batch_commit(
+        self,
+        run_id: str,
+        batch_id: str,
+        attempt_ids: tuple[str, ...],
+        epoch: int,
+        result_digest: str,
+    ) -> bool:
+        """Prepare every admitted branch of a reserved batch atomically.
+
+        A join may publish only a subset of executed branches. This binds only
+        the admitted attempts to the region delta; every other hold remains
+        reserved until an explicit future reconciliation path handles it.
+        """
+        if not isinstance(result_digest, str) or not result_digest:
+            raise ValueError("result digest must be a non-empty string")
+        with self._tx() as db:
+            attempts = self._batch_attempt_ids(db, run_id, batch_id, attempt_ids)
+            changed = False
+            for attempt_id in attempts:
+                hold = self._hold_for(db, run_id, attempt_id)
+                if (
+                    hold.fence_epoch != epoch
+                    or self._hold_state(db, run_id, attempt_id) != "held"
+                ):
+                    raise ValueError("batch commit does not match a current held attempt")
+                existing = db.execute(
+                    "SELECT hold_id, epoch, result_digest FROM commit_intents "
+                    "WHERE run_id = ? AND attempt_id = ?",
+                    (run_id, attempt_id),
+                ).fetchone()
+                expected = (hold.hold_id, epoch, result_digest)
+                if existing is not None:
+                    if tuple(existing) != expected:
+                        raise ValueError("batch commit digest conflicts with existing intent")
+                    continue
+                db.execute(
+                    "INSERT INTO commit_intents (run_id, attempt_id, hold_id, epoch, result_digest) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (run_id, attempt_id, *expected),
+                )
+                changed = True
+            return changed
+
+    def settle_batch_commit(
+        self,
+        run_id: str,
+        batch_id: str,
+        attempt_ids: tuple[str, ...],
+        result_digest: str,
+    ) -> bool:
+        """Settle every prepared admitted branch of a batch atomically."""
+        with self._tx() as db:
+            attempts = self._batch_attempt_ids(db, run_id, batch_id, attempt_ids)
+            changed = False
+            for attempt_id in attempts:
+                intent = db.execute(
+                    "SELECT result_digest FROM commit_intents WHERE run_id = ? AND attempt_id = ?",
+                    (run_id, attempt_id),
+                ).fetchone()
+                if intent is None or str(intent[0]) != result_digest:
+                    raise ValueError("batch settlement lacks a matching commit intent")
+                state = self._hold_state(db, run_id, attempt_id)
+                if state == "settled":
+                    continue
+                if state != "held":
+                    raise ValueError("only a held attempt may settle")
+                db.execute(
+                    "UPDATE attempt_holds SET state = 'settled' WHERE run_id = ? AND attempt_id = ?",
+                    (run_id, attempt_id),
+                )
+                changed = True
+            return changed
+
     def mark_unknown(self, run_id: str, disposition: UnknownDisposition) -> None:
         """Persist an uncertain attempt without releasing its reserved units."""
         with self._tx() as db:
@@ -391,6 +484,23 @@ class StepLedger:
     def hold(self, run_id: str, attempt_id: str) -> AttemptHold:
         """Return one durable hold for an external lifecycle transition."""
         return self._hold_for(self._db, run_id, attempt_id)
+
+    def batch_ids(self, run_id: str) -> tuple[str, ...]:
+        """Return the durable fan-out batch identities for one run."""
+        rows = self._db.execute(
+            "SELECT batch_id FROM batch_reservations WHERE run_id = ? ORDER BY batch_id", (run_id,)
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def batch_hold_states(self, run_id: str, batch_id: str) -> dict[str, str]:
+        """Return the durable member states for one fan-out batch."""
+        rows = self._db.execute(
+            "SELECT member.attempt_id, hold.state FROM batch_attempts AS member "
+            "JOIN attempt_holds AS hold USING (run_id, attempt_id) "
+            "WHERE member.run_id = ? AND member.batch_id = ? ORDER BY member.attempt_id",
+            (run_id, batch_id),
+        ).fetchall()
+        return {str(attempt_id): str(state) for attempt_id, state in rows}
 
     def release_attempt(self, run_id: str, attempt_id: str, epoch: int) -> None:
         """Reject direct unknown release until a verified adjustment-grant path exists."""
@@ -448,6 +558,29 @@ class StepLedger:
         ).fetchone()
         assert row is not None
         return str(row[0])
+
+    @staticmethod
+    def _batch_attempt_ids(
+        db: sqlite3.Connection,
+        run_id: str,
+        batch_id: str,
+        attempt_ids: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Validate a non-empty admitted subset against recorded batch members."""
+        if not isinstance(batch_id, str) or not batch_id:
+            raise ValueError("batch_id must be a non-empty string")
+        if not attempt_ids or len(set(attempt_ids)) != len(attempt_ids):
+            raise ValueError("batch commit needs unique admitted attempts")
+        members = {
+            str(row[0])
+            for row in db.execute(
+                "SELECT attempt_id FROM batch_attempts WHERE run_id = ? AND batch_id = ?",
+                (run_id, batch_id),
+            )
+        }
+        if not members or not set(attempt_ids).issubset(members):
+            raise ValueError("batch commit attempts do not match the reservation")
+        return attempt_ids
 
 
 class _Immediate:
@@ -550,11 +683,20 @@ class AdmissionGate:
                 return GateDecision.refuse("ledger.attempt_invalid")
         elif request.boundary == "fanout":
             try:
-                fits = self.ledger.reserve(self.run_id, self.lease_epoch, len(request.nodes))
+                if not isinstance(request.batch_id, str) or not request.batch_id:
+                    return GateDecision.refuse("ledger.batch_id_missing")
+                self.ledger.reserve_batch(
+                    self.run_id,
+                    self.lease_epoch,
+                    request.batch_id,
+                    tuple((f"{request.batch_id}:{name}", 1) for name in request.nodes),
+                )
             except LeaseFenced:
                 return GateDecision.refuse("authority.lease_fenced")
-            if not fits:
-                return GateDecision.refuse("budget.steps_exhausted")
+            except ValueError as error:
+                if str(error) == "budget exhausted":
+                    return GateDecision.refuse("budget.steps_exhausted")
+                return GateDecision.refuse("ledger.batch_invalid")
         return GateDecision.allow()
 
     async def before_commit(self, request: CommitRequest) -> GateDecision:
@@ -562,10 +704,26 @@ class AdmissionGate:
         early = self._common()
         if early is not None:
             return early
-        if request.boundary != "node":
+        if request.boundary not in {"node", "region"}:
             return GateDecision.allow()
         if not isinstance(request.result_digest, str) or not request.result_digest:
             return GateDecision.refuse("ledger.commit_digest_missing")
+        if request.boundary == "region":
+            if not isinstance(request.batch_id, str) or not request.batch_id:
+                return GateDecision.refuse("ledger.batch_id_missing")
+            try:
+                self.ledger.prepare_batch_commit(
+                    self.run_id,
+                    request.batch_id,
+                    tuple(f"{request.batch_id}:{name}" for name in request.nodes),
+                    self.lease_epoch,
+                    request.result_digest,
+                )
+            except LeaseFenced:
+                return GateDecision.refuse("authority.lease_fenced")
+            except ValueError:
+                return GateDecision.refuse("ledger.commit_unprepared")
+            return GateDecision.allow()
         attempt_id = self._attempt_id(request.boundary, request.nodes, request.steps, request.source)
         try:
             hold = self.ledger.hold(self.run_id, attempt_id)
@@ -584,10 +742,20 @@ class AdmissionGate:
 
     async def after_commit(self, request: CommitRequest) -> None:
         """Settle the matching node hold after Core has published its delta."""
-        if request.boundary != "node":
+        if request.boundary not in {"node", "region"}:
             return
         if not isinstance(request.result_digest, str) or not request.result_digest:
             raise AdmissionRefused("ledger.commit_digest_missing")
+        if request.boundary == "region":
+            if not isinstance(request.batch_id, str) or not request.batch_id:
+                raise AdmissionRefused("ledger.batch_id_missing")
+            self.ledger.settle_batch_commit(
+                self.run_id,
+                request.batch_id,
+                tuple(f"{request.batch_id}:{name}" for name in request.nodes),
+                request.result_digest,
+            )
+            return
         attempt_id = self._attempt_id(request.boundary, request.nodes, request.steps, request.source)
         self.ledger.settle_commit(self.run_id, attempt_id, request.result_digest)
 

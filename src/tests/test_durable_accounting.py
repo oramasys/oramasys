@@ -74,8 +74,44 @@ def test_batch_reservation_is_all_or_nothing_and_idempotent(tmp_path) -> None:
     with pytest.raises(ValueError, match="payload"):
         ledger.reserve_batch("run-1", epoch, "batch-1", (("branch-a", 2),))
 
+    # A database written before the membership index existed recovers it only
+    # from a replay whose payload digest still proves identical membership.
+    ledger._db.execute("DELETE FROM batch_attempts WHERE run_id = ?", ("run-1",))
+    assert ledger.reserve_batch(
+        "run-1", epoch, "batch-1", (("branch-a", 1), ("branch-b", 1))
+    ) == holds
+    assert set(ledger.batch_hold_states("run-1", "batch-1")) == {"branch-a", "branch-b"}
+
     other = StepLedger(tmp_path / "other.sqlite3")
     other_epoch = other.open_lease("run-2", max_steps=1)
     with pytest.raises(ValueError, match="budget"):
         other.reserve_batch("run-2", other_epoch, "batch-2", (("a", 1), ("b", 1)))
     assert other.used("run-2") == 0
+
+
+def test_batch_commit_intents_settle_only_the_admitted_attempts(tmp_path) -> None:
+    """A region publication settles exactly the branch holds it admits."""
+    ledger = StepLedger(tmp_path / "ledger.sqlite3")
+    epoch = ledger.open_lease("run-1", max_steps=3)
+    ledger.reserve_batch(
+        "run-1",
+        epoch,
+        "batch-1",
+        (("batch-1:a", 1), ("batch-1:b", 1), ("batch-1:c", 1)),
+    )
+
+    assert ledger.prepare_batch_commit(
+        "run-1", "batch-1", ("batch-1:a", "batch-1:b"), epoch, "digest-a"
+    ) is True
+    assert ledger.prepare_batch_commit(
+        "run-1", "batch-1", ("batch-1:a", "batch-1:b"), epoch, "digest-a"
+    ) is False
+    assert ledger.settle_batch_commit(
+        "run-1", "batch-1", ("batch-1:a", "batch-1:b"), "digest-a"
+    ) is True
+    assert ledger.settle_batch_commit(
+        "run-1", "batch-1", ("batch-1:a", "batch-1:b"), "digest-a"
+    ) is False
+    assert ledger.hold_state("run-1", "batch-1:a") == "settled"
+    assert ledger.hold_state("run-1", "batch-1:b") == "settled"
+    assert ledger.hold_state("run-1", "batch-1:c") == "held"
