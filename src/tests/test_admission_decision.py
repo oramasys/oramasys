@@ -175,7 +175,11 @@ def test_missing_hardware_or_principal_refused():
         context(principal_id="")
     no_hw = admit_artifact(binding(), context(), replace(provs, agate=None), clock=clock, max_steps=5)
     assert no_hw.outcome == "refuse"
-    assert no_hw.reason_code == "admission.enforcement_unavailable"
+    # The default requirements (used when no requirements= is passed) still
+    # require all three owners, so a missing Agate now refuses with a more
+    # specific, actionable reason than the old generic
+    # "enforcement_unavailable" -- see admission.agate_unavailable.
+    assert no_hw.reason_code == "admission.agate_unavailable"
 
 
 def test_absent_enforcement_service_fails_closed():
@@ -238,6 +242,66 @@ def test_production_has_no_providers_and_therefore_refuses():
     assert production_providers() is None
     decision = admit_artifact(binding(), context(), production_providers(), clock=FakeClock(), max_steps=1)
     assert decision.outcome == "refuse"
+
+
+def test_pure_graph_requires_phylax_but_not_agate_or_telos():
+    from orama.graph.admission import AdmissionRequirements
+
+    requirements = AdmissionRequirements.for_effects(model_dispatch=False, endpoint_purposes=())
+    assert requirements == AdmissionRequirements(phylax=True, agate=False, telos=False)
+
+
+def test_model_dispatch_requires_agate_and_network_effect_requires_telos():
+    from orama.graph.admission import AdmissionRequirements
+
+    requirements = AdmissionRequirements.for_effects(model_dispatch=True, endpoint_purposes=("model_egress",))
+    assert requirements == AdmissionRequirements(phylax=True, agate=True, telos=True)
+
+
+def test_pure_graph_admits_with_only_phylax_configured():
+    from orama.graph.admission import AdmissionRequirements
+
+    provs = AdmissionProviders(phylax=FakePhylax(FakeClock()), agate=None, telos=None)
+    requirements = AdmissionRequirements(phylax=True, agate=False, telos=False)
+    decision = admit_artifact(
+        binding(), context(endpoint_purposes=()), provs, clock=FakeClock(), max_steps=1,
+        requirements=requirements,
+    )
+    assert decision.outcome == "allow"
+
+
+def test_model_dispatch_refuses_when_agate_not_configured_even_if_other_owners_are():
+    from orama.graph.admission import AdmissionRequirements
+
+    provs = AdmissionProviders(phylax=FakePhylax(FakeClock()), agate=None, telos=FakeTelos(FakeClock()))
+    requirements = AdmissionRequirements(phylax=True, agate=True, telos=False)
+    decision = admit_artifact(
+        binding(), context(), provs, clock=FakeClock(), max_steps=1, requirements=requirements,
+    )
+    assert decision.outcome == "refuse"
+    assert decision.reason_code == "admission.agate_unavailable"
+
+
+def test_unconfigured_telos_is_never_called_when_not_required():
+    """An owner outside the required set must not be invoked at all, not merely
+    ignored on refusal -- a provider that would raise/refuse must not leak
+    into the outcome for an effect the graph never declared."""
+    from orama.graph.admission import AdmissionRequirements
+
+    class ExplodingTelos:
+        def authorize(self, context):
+            raise AssertionError("telos must not be called for a graph with no endpoint purposes")
+
+        def is_current(self, decision):
+            raise AssertionError("telos must not be called for a graph with no endpoint purposes")
+
+    provs = AdmissionProviders(phylax=FakePhylax(FakeClock()), agate=FakeAgate(FakeClock()), telos=ExplodingTelos())
+    requirements = AdmissionRequirements(phylax=True, agate=True, telos=False)
+    decision = admit_artifact(
+        binding(), context(endpoint_purposes=()), provs, clock=FakeClock(), max_steps=1,
+        requirements=requirements,
+    )
+    assert decision.outcome == "allow"
 
 
 def test_shipped_package_never_references_test_fakes():

@@ -276,6 +276,48 @@ def production_providers() -> AdmissionProviders | None:
 
 
 @dataclass(frozen=True, slots=True)
+class AdmissionRequirements:
+    """Which owners a given graph's declared effects actually require.
+
+    Phylax is the mandatory generic admission authority for every graph,
+    regardless of effects. Agate is required only for a model-dispatch
+    effect; Telos only when the graph declares at least one endpoint
+    purpose. An owner outside this set is never called for this admission
+    (not merely ignored on refusal -- see build_admission_providers for the
+    construction-time counterpart of this rule).
+    """
+
+    phylax: bool
+    agate: bool
+    telos: bool
+
+    @classmethod
+    def for_effects(cls, *, model_dispatch: bool, endpoint_purposes: tuple[str, ...]) -> AdmissionRequirements:
+        return cls(phylax=True, agate=model_dispatch, telos=bool(endpoint_purposes))
+
+
+def build_admission_providers(
+    *,
+    phylax: PhylaxAdmission,
+    agate: AgateFit | None = None,
+    telos: TelosEndpoints | None = None,
+) -> AdmissionProviders:
+    """Wire real owner adapters for a deployment that has actually configured them.
+
+    Unlike production_providers(), this never silently defaults every owner
+    to None -- it raises immediately if the one unconditionally mandatory
+    owner (Phylax; see AdmissionRequirements) is missing, instead of
+    deferring that failure to the first admission call. Agate/Telos may be
+    None for a deployment that genuinely never dispatches a model or an
+    endpoint effect; admit_artifact() still refuses per-call if a graph
+    that DOES declare such an effect finds its required owner unconfigured.
+    """
+    if phylax is None:
+        raise AdmissionRefused("admission.misconfigured_phylax_mandatory")
+    return AdmissionProviders(phylax=phylax, agate=agate, telos=telos)
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionDecision:
     """Discriminated allow/refuse/pending result (contract §3). Never a Boolean."""
 
@@ -293,6 +335,9 @@ class AdmissionDecision:
         return self.binding_digest == binding.digest()
 
 
+_DEFAULT_REQUIREMENTS: AdmissionRequirements = AdmissionRequirements(phylax=True, agate=True, telos=True)
+
+
 def admit_artifact(
     binding: ArtifactBinding,
     context: AdmissionContext,
@@ -300,6 +345,7 @@ def admit_artifact(
     *,
     clock: Clock,
     max_steps: int,
+    requirements: AdmissionRequirements = _DEFAULT_REQUIREMENTS,
 ) -> AdmissionDecision:
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
         raise AdmissionRefused("admission.max_steps_invalid")
@@ -325,14 +371,20 @@ def admit_artifact(
 
     if context.policy_summary_digest != binding.policy_digest:
         return result("refuse", "admission.stale_policy")
-    if providers is None or None in (providers.phylax, providers.agate, providers.telos):
+    if providers is None or providers.phylax is None:
         return result("refuse", "admission.enforcement_unavailable")
+    if requirements.agate and providers.agate is None:
+        return result("refuse", "admission.agate_unavailable")
+    if requirements.telos and providers.telos is None:
+        return result("refuse", "admission.telos_unavailable")
 
-    calls: tuple[tuple[Owner, Callable[[], Any]], ...] = (
+    calls: list[tuple[Owner, Callable[[], Any]]] = [
         ("phylax", lambda: (providers.phylax.admit(binding, context),)),  # type: ignore[union-attr]
-        ("agate", lambda: (providers.agate.assess(context),)),  # type: ignore[union-attr]
-        ("telos", lambda: tuple(providers.telos.authorize(context))),  # type: ignore[union-attr]
-    )
+    ]
+    if requirements.agate:
+        calls.append(("agate", lambda: (providers.agate.assess(context),)))  # type: ignore[union-attr]
+    if requirements.telos:
+        calls.append(("telos", lambda: tuple(providers.telos.authorize(context))))  # type: ignore[union-attr]
     for owner, call in calls:
         try:
             decisions = call()
