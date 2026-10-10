@@ -108,7 +108,7 @@ def test_ci_repeats_only_the_production_core_and_the_producer_revision() -> None
 
 def test_every_workflow_action_is_pinned_to_a_full_commit() -> None:
     """Third-party actions must name a full commit SHA, never a movable tag."""
-    for wf in sorted(WORKFLOWS.glob("*.yml")):
+    for wf in sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]):
         for line in wf.read_text(encoding="utf-8").splitlines():
             m = re.search(r"uses:\s*(\S+)", line)
             if m and not m.group(1).startswith("./"):
