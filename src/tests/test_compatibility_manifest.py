@@ -71,7 +71,8 @@ def mutated(fn) -> dict:
     ("unknown profile", lambda m: m["cells"][0].update(profile="mystery")),
     ("unknown cell key", lambda m: m["cells"][0].update(skip=True)),
     ("unknown top-level key", lambda m: m.update(extra=1)),
-    ("wrong schema", lambda m: m.update(schema=2)),
+    ("old schema", lambda m: m.update(schema=1)),
+    ("future schema", lambda m: m.update(schema=3)),
     ("mutable producer ref", lambda m: m["producer_registry"].update(ref="main")),
     ("other producer ref", lambda m: m["producer_registry"].update(ref="1" * 40)),
     ("wrong repository", lambda m: m["producer_registry"].update(repository="x/y")),
@@ -106,6 +107,16 @@ def test_workflow_cells_parses_every_matrix_entry() -> None:
     ("swapped lane file", lambda t: t.replace(
         "core-file: requirements/compatibility-core-candidate.txt",
         "core-file: requirements/compatibility-core-production.txt", 1)),
+    ("extra cell with profile first", lambda t: t.replace(
+        "    steps:\n",
+        '          - profile: production\n            python-version: "3.13"\n'
+        "            core-file: requirements/compatibility-core-production.txt\n"
+        '            require-r3: "1"\n    steps:\n', 1)),
+    ("extra cell with core-file first", lambda t: t.replace(
+        "    steps:\n",
+        "          - core-file: requirements/compatibility-core-production.txt\n"
+        '            require-r3: "1"\n            profile: production\n'
+        '            python-version: "3.12"\n    steps:\n', 1)),
     ("changed interpreter", lambda t: t.replace('python-version: "3.12"', 'python-version: "3.13"', 1)),
 ])
 def test_workflow_rejects(name: str, edit) -> None:
@@ -114,3 +125,10 @@ def test_workflow_rejects(name: str, edit) -> None:
     assert broken != text, f"mutation {name} did not change the workflow"
     with pytest.raises(ManifestError):
         validate_workflow(load(), broken)
+
+
+def test_upload_artifact_action_is_pinned_to_a_full_commit() -> None:
+    """Every third-party action added by the result gate is fixed to an immutable SHA."""
+    text = ORACLES.read_text(encoding="utf-8")
+    for use in re.findall(r"uses:\s*actions/upload-artifact@(\S+)", text):
+        assert re.fullmatch(r"[0-9a-f]{40}", use), f"upload-artifact must be pinned, got {use}"
