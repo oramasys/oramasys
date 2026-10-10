@@ -16,7 +16,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        include:
+          - python-version: "3.11"
+            profile: policy-r3
+            core-file: requirements/compatibility-core-policy-r3.txt
+            require-r3: "0"
+          - python-version: "3.12"
+            profile: policy-r3
+            core-file: requirements/compatibility-core-policy-r3.txt
+            require-r3: "0"
+          - python-version: "3.11"
+            profile: core-r3
+            core-file: requirements/compatibility-core-candidate.txt
+            require-r3: "1"
+          - python-version: "3.12"
+            profile: core-r3
+            core-file: requirements/compatibility-core-candidate.txt
+            require-r3: "1"
+          - python-version: "3.11"
+            profile: production
+            core-file: requirements/compatibility-core-production.txt
+            require-r3: "1"
+          - python-version: "3.12"
+            profile: production
+            core-file: requirements/compatibility-core-production.txt
+            require-r3: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,21 +49,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: diazMelgarejo/orama-system
-          ref: 7b7f9d84e43f0709115588a95b13a78badb8369f
+          ref: 28672bf366e5a4a6917f2cb9236eaf696e70c97b
           path: docs-candidate
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Read immutable Core test candidate
+      - name: Read immutable Core lane revision
         id: core
         run: |
           python - <<'PY'
           import os, re
           from pathlib import Path
-          sha = Path("requirements/compatibility-core-candidate.txt").read_text().strip()
+          sha = Path("${{ matrix.core-file }}").read_text().strip()
           if not re.fullmatch(r"[0-9a-f]{40}", sha):
-              raise SystemExit("Core test candidate must be an immutable commit")
+              raise SystemExit("Core lane revision must be an immutable commit")
           with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
               stream.write(f"sha={sha}\n")
           PY
@@ -56,6 +80,11 @@ jobs:
           python -m pip check
       - name: Full application suite and real offline oracle cells
         env:
-          # The candidate Core must provide R3; its tests cannot be skipped here.
-          ORAMA_REQUIRE_CORE_R3: "1"
-        run: python -m pytest -q src/tests tests/oracles
+          ORAMA_REGISTRY_PROFILE: ${{ matrix.profile }}
+        run: |
+          if [ "${{ matrix.require-r3 }}" = "1" ]; then
+            export ORAMA_REQUIRE_CORE_R3=1
+          else
+            unset ORAMA_REQUIRE_CORE_R3
+          fi
+          python -m pytest -q src/tests tests/oracles
