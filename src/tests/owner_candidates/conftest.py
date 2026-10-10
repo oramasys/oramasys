@@ -11,6 +11,7 @@ import os
 
 
 def _available() -> bool:
+    """Test helper: available."""
     try:
         return all(importlib.util.find_spec(m) is not None
                    for m in ("phylax", "agate.evidence", "telos.authorizer"))

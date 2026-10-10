@@ -26,6 +26,7 @@ from tests.test_admission_decision import binding
 
 
 def test_required_core_gate_is_present_when_demanded():
+    """Required core gate is present when demanded."""
     if os.environ.get("ORAMA_REQUIRE_CORE_GATE") == "1":
         assert CORE_GATE_AVAILABLE
 
@@ -34,6 +35,7 @@ def test_required_core_gate_is_present_when_demanded():
 
 
 def test_ledger_reserves_atomically_and_never_over_commits(tmp_path):
+    """Ledger reserves atomically and never over commits."""
     ledger = StepLedger(tmp_path / "ledger.sqlite3")
     epoch = ledger.open_lease("run-1", max_steps=3)
     assert ledger.reserve("run-1", epoch, 2)
@@ -44,6 +46,7 @@ def test_ledger_reserves_atomically_and_never_over_commits(tmp_path):
 
 
 def test_reopening_a_lease_fences_the_old_holder(tmp_path):
+    """Reopening a lease fences the old holder."""
     ledger = StepLedger(tmp_path / "ledger.sqlite3")
     old = ledger.open_lease("run-1", max_steps=5)
     new = ledger.open_lease("run-1", max_steps=5)
@@ -56,6 +59,7 @@ def test_reopening_a_lease_fences_the_old_holder(tmp_path):
 
 
 def test_ledger_is_durable_and_uses_wal_full_sync(tmp_path):
+    """Ledger is durable and uses wal full sync."""
     path = tmp_path / "ledger.sqlite3"
     ledger = StepLedger(path)
     epoch = ledger.open_lease("run-1", max_steps=5)
@@ -67,6 +71,7 @@ def test_ledger_is_durable_and_uses_wal_full_sync(tmp_path):
 
 
 def test_ledger_rejects_bad_counts(tmp_path):
+    """Ledger rejects bad counts."""
     ledger = StepLedger(tmp_path / "l.sqlite3")
     epoch = ledger.open_lease("run-1", max_steps=5)
     for bad in (0, -1, True, 1.5):
@@ -77,6 +82,7 @@ def test_ledger_rejects_bad_counts(tmp_path):
 
 
 def test_gate_construction_fails_closed_without_core_seam(monkeypatch, tmp_path):
+    """Gate construction fails closed without core seam."""
     import orama.graph.execution_guard as guard
     from orama.graph.admission import AdmissionRefused
 
@@ -95,6 +101,7 @@ def test_gate_construction_fails_closed_without_core_seam(monkeypatch, tmp_path)
 
 
 def test_ledger_reports_the_lease_limit(tmp_path):
+    """Ledger reports the lease limit."""
     ledger = StepLedger(tmp_path / "l.sqlite3")
     assert ledger.limit("run-1") is None
     ledger.open_lease("run-1", max_steps=4)

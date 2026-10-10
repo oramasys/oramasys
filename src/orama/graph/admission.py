@@ -41,6 +41,7 @@ class AdmissionRefused(Exception):
     """Fail-closed refusal with a redacted, actionable reason code."""
 
     def __init__(self, reason: str) -> None:
+        """Keep the machine-readable refusal reason."""
         super().__init__(reason)
         self.reason = reason
 
@@ -52,14 +53,17 @@ class CallableRef:
     key: str
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         if not isinstance(self.key, str) or _KEY.fullmatch(self.key) is None:
             raise AdmissionRefused("callable_ref.malformed")
 
     @classmethod
     def parse(cls, raw: object) -> CallableRef:
+        """Parse a strict module:qualname key without importing anything."""
         return cls(raw)  # type: ignore[arg-type]
 
     def __str__(self) -> str:
+        """Return the canonical module:qualname key."""
         return self.key
 
 
@@ -71,6 +75,7 @@ class CallableBinding:
     artifact_digest: str
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         if not callable(self.target):
             raise AdmissionRefused("callable_binding.not_callable")
         if not isinstance(self.artifact_digest, str) or _DIGEST.fullmatch(self.artifact_digest) is None:
@@ -84,6 +89,7 @@ class CallableRegistry:
     bindings: Mapping[CallableRef, CallableBinding]
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         copied: dict[CallableRef, CallableBinding] = {}
         for ref, binding in self.bindings.items():
             if not isinstance(ref, CallableRef) or not isinstance(binding, CallableBinding):
@@ -93,9 +99,11 @@ class CallableRegistry:
 
     @classmethod
     def freeze(cls, source: Mapping[CallableRef, CallableBinding]) -> CallableRegistry:
+        """Freeze a mapping into an immutable registry for one invocation."""
         return cls(source)
 
     def resolve(self, ref: object, *, expected_digest: str | None = None) -> Callable[..., Any]:
+        """Resolve a key to its pinned callable, refusing unknown keys or changed digests."""
         if not isinstance(ref, CallableRef):
             raise AdmissionRefused("callable_ref.not_parsed")
         binding = self.bindings.get(ref)
@@ -123,6 +131,7 @@ Clock: TypeAlias = Callable[[], datetime]
 
 
 def canonical_digest(kind: str, payload: Mapping[str, Any]) -> str:
+    """Return the domain-tagged sha256 of a canonical JSON payload."""
     body = json.dumps(
         {"domain": DIGEST_DOMAIN, "schema": DIGEST_SCHEMA, "kind": kind, "payload": payload},
         sort_keys=True,
@@ -133,24 +142,28 @@ def canonical_digest(kind: str, payload: Mapping[str, Any]) -> str:
 
 
 def _digest(value: object, name: str) -> str:
+    """Validate and return a lowercase sha256 hex digest."""
     if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
         raise AdmissionRefused(f"artifact_binding.bad_{name}")
     return value
 
 
 def _graph_id(value: object) -> str:
+    """Validate and return a bare sha256 hex graph id."""
     if not isinstance(value, str) or _GRAPH_ID.fullmatch(value) is None:
         raise AdmissionRefused("artifact_binding.bad_graph_id")
     return value
 
 
 def _text(value: object, name: str) -> str:
+    """Validate and return a non-empty string."""
     if not isinstance(value, str) or not value.strip():
         raise AdmissionRefused(f"{name}.required")
     return value
 
 
 def _utc_now(clock: Clock) -> datetime:
+    """Read the clock and require an aware datetime in UTC."""
     now = clock()
     if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
         raise AdmissionRefused("clock.not_utc_aware")
@@ -180,6 +193,7 @@ class ArtifactBinding:
     )
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         _graph_id(self.graph_id)
         for name in ("implementation_digest", "policy_digest", "registry_profile_digest"):
             _digest(getattr(self, name), name)
@@ -192,6 +206,7 @@ class ArtifactBinding:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> ArtifactBinding:
+        """Build a binding from a mapping, rejecting unknown fields."""
         keys = set(raw)
         if keys != set(cls.FIELDS):
             raise AdmissionRefused("artifact_binding.fields_mismatch")
@@ -200,6 +215,7 @@ class ArtifactBinding:
         return cls(**values)
 
     def digest(self) -> str:
+        """Return the domain-tagged digest that identifies this exact artifact."""
         payload = {name: getattr(self, name) for name in self.FIELDS}
         payload["provider_contract_digests"] = list(self.provider_contract_digests)
         return canonical_digest("artifact_binding", payload)
@@ -217,6 +233,7 @@ class AdmissionContext:
     policy_summary_digest: str
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         for name in ("run_id", "principal_id", "capability", "model"):
             _text(getattr(self, name), name)
         _digest(self.policy_summary_digest, "policy_summary_digest")
@@ -241,30 +258,41 @@ class OwnerDecision:
 
 
 class PhylaxAdmission(Protocol):
-    def admit(self, binding: ArtifactBinding, context: AdmissionContext) -> OwnerDecision: ...
+    """Phylax admission provider used by the admission pipeline."""
+    def admit(self, binding: ArtifactBinding, context: AdmissionContext) -> OwnerDecision:
+        """Admit the bound artifact for the given context."""
 
-    def is_current(self, decision: OwnerDecision) -> bool: ...
+    def is_current(self, decision: OwnerDecision) -> bool:
+        """Report whether the decision is still current (unexpired and unrevoked)."""
 
 
 class AgateFit(Protocol):
-    def assess(self, context: AdmissionContext) -> OwnerDecision: ...
+    """Agate fit provider used by the admission pipeline."""
+    def assess(self, context: AdmissionContext) -> OwnerDecision:
+        """Assess hardware fit for the given context."""
 
-    def is_current(self, decision: OwnerDecision) -> bool: ...
+    def is_current(self, decision: OwnerDecision) -> bool:
+        """Report whether the decision is still current (unexpired and unrevoked)."""
 
 
 class TelosEndpoints(Protocol):
-    def authorize(self, context: AdmissionContext) -> tuple[OwnerDecision, ...]: ...
+    """Telos endpoint provider used by the admission pipeline."""
+    def authorize(self, context: AdmissionContext) -> tuple[OwnerDecision, ...]:
+        """Authorize each declared endpoint purpose."""
 
-    def is_current(self, decision: OwnerDecision) -> bool: ...
+    def is_current(self, decision: OwnerDecision) -> bool:
+        """Report whether the decision is still current (unexpired and unrevoked)."""
 
 
 @dataclass(frozen=True, slots=True)
 class AdmissionProviders:
+    """Owner providers supplied per invocation; production supplies none."""
     phylax: PhylaxAdmission | None
     agate: AgateFit | None
     telos: TelosEndpoints | None
 
     def checker(self, owner: Owner) -> Callable[[OwnerDecision], bool] | None:
+        """Return the freshness checker for an owner, or None if unconfigured."""
         provider = getattr(self, owner)
         return None if provider is None else provider.is_current
 
@@ -293,6 +321,7 @@ class AdmissionRequirements:
 
     @classmethod
     def for_effects(cls, *, model_dispatch: bool, endpoint_purposes: tuple[str, ...]) -> AdmissionRequirements:
+        """Derive required owners from the declared effects."""
         return cls(phylax=True, agate=model_dispatch, telos=bool(endpoint_purposes))
 
 
@@ -332,6 +361,7 @@ class AdmissionDecision:
     authority_epoch: int | None
 
     def covers(self, binding: ArtifactBinding) -> bool:
+        """Report whether this decision admits exactly the given binding."""
         return self.binding_digest == binding.digest()
 
 
@@ -347,6 +377,7 @@ def admit_artifact(
     max_steps: int,
     requirements: AdmissionRequirements = _DEFAULT_REQUIREMENTS,
 ) -> AdmissionDecision:
+    """Run the fixed-order admission pipeline and return allow, refuse or pending."""
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
         raise AdmissionRefused("admission.max_steps_invalid")
     now = _utc_now(clock)
@@ -354,6 +385,7 @@ def admit_artifact(
     collected: list[OwnerDecision] = []
 
     def result(outcome: Outcome, reason: str) -> AdmissionDecision:
+        """Build the admission decision for an outcome and reason."""
         allowed = outcome == "allow"
         expiries = [d.expires_at for d in collected if d.expires_at is not None]
         epochs = [d.authority_epoch for d in collected if d.owner == "phylax"]

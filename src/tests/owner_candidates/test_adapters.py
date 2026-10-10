@@ -37,17 +37,22 @@ from telos.contracts import EndpointIdentity, EndpointPurpose, EndpointRef, Endp
 
 
 class _Clock:
+    """Settable clock for deterministic tests."""
     def __init__(self) -> None:
+        """Initialise the instance and validate its arguments."""
         self.now = datetime(2026, 10, 11, tzinfo=UTC)
 
     def __call__(self) -> datetime:
+        """Return the current value."""
         return self.now
 
     def advance(self, **kw) -> None:
+        """Test helper: advance."""
         self.now += timedelta(**kw)
 
 
 def _binding(**overrides) -> ArtifactBinding:
+    """Test helper: binding."""
     base = {
         "graph_id": "a" * 64,
         "implementation_digest": "sha256:" + "1" * 64,
@@ -62,6 +67,7 @@ def _binding(**overrides) -> ArtifactBinding:
 
 
 def _context(**overrides) -> AdmissionContext:
+    """Test helper: context."""
     base = {
         "run_id": "run-1",
         "principal_id": "operator-1",
@@ -76,7 +82,9 @@ def _context(**overrides) -> AdmissionContext:
 
 @pytest.fixture
 def phylax_adapter() -> PhylaxAdapter:
+    """Test helper: phylax adapter."""
     def always_trusted(actor_id: str) -> bool:
+        """Test helper: always trusted."""
         return actor_id == "operator-1"
 
     real = RealPhylaxAuthorizer(
@@ -94,6 +102,7 @@ def phylax_adapter() -> PhylaxAdapter:
 
 
 def test_phylax_adapter_admits_a_trusted_principal_with_an_approved_capability(phylax_adapter):
+    """Phylax adapter admits a trusted principal with an approved capability."""
     decision = phylax_adapter.admit(_binding(), _context())
     assert decision.allowed is True
     assert decision.owner == "phylax"
@@ -102,11 +111,13 @@ def test_phylax_adapter_admits_a_trusted_principal_with_an_approved_capability(p
 
 
 def test_phylax_adapter_refuses_an_untrusted_principal(phylax_adapter):
+    """Phylax adapter refuses an untrusted principal."""
     decision = phylax_adapter.admit(_binding(), _context(principal_id="attacker"))
     assert decision.allowed is False
 
 
 def test_phylax_adapter_is_current_delegates_to_the_real_authorizer_not_a_local_check(phylax_adapter):
+    """Phylax adapter is current delegates to the real authorizer not a local check."""
     decision = phylax_adapter.admit(_binding(), _context())
     assert phylax_adapter.is_current(decision) is True
     # A decision this adapter never issued (forged ref) must not be current --
@@ -117,6 +128,7 @@ def test_phylax_adapter_is_current_delegates_to_the_real_authorizer_not_a_local_
 
 
 def _pick_profile_and_model(wanted: set[str]) -> tuple[str, str]:
+    """Test helper: pick profile and model."""
     policy = load_policy()
     for profile_id, profile in load_profile_store().profiles.items():
         for name, spec in policy.models.items():
@@ -126,6 +138,7 @@ def _pick_profile_and_model(wanted: set[str]) -> tuple[str, str]:
 
 
 def _observation_for(profile_id: str) -> HardwareObservation:
+    """Test helper: observation for."""
     profile = load_profile_store().profiles[profile_id]
     match = profile.match
     return HardwareObservation(
@@ -139,14 +152,17 @@ def _observation_for(profile_id: str) -> HardwareObservation:
 
 @pytest.fixture
 def agate_adapter() -> AgateAdapter:
+    """Test helper: agate adapter."""
     policy = load_policy()
     profile_id, model = _pick_profile_and_model({"PREFER", "ALLOW"})
     observation = _observation_for(profile_id)
 
     def observation_provider(context: AdmissionContext) -> HardwareObservation:
+        """Test helper: observation provider."""
         return observation
 
     def evidence_provider(context: AdmissionContext, obs: HardwareObservation) -> FitEvidence:
+        """Test helper: evidence provider."""
         return FitEvidence.derived(obs)
 
     adapter = AgateAdapter(
@@ -159,6 +175,7 @@ def agate_adapter() -> AgateAdapter:
 
 
 def test_agate_adapter_assesses_real_fit_and_carries_the_real_evidence_class(agate_adapter):
+    """Agate adapter assesses real fit and carries the real evidence class."""
     adapter, model = agate_adapter
     decision = adapter.assess(_context(model=model))
     assert decision.owner == "agate"
@@ -179,9 +196,11 @@ def agate_adapter_with_observed_evidence() -> tuple[AgateAdapter, str]:
     observation = _observation_for(profile_id)
 
     def observation_provider(context: AdmissionContext) -> HardwareObservation:
+        """Test helper: observation provider."""
         return observation
 
     def evidence_provider(context: AdmissionContext, obs: HardwareObservation) -> FitEvidence:
+        """Test helper: evidence provider."""
         return FitEvidence.observed(obs, collector="local-hardware-collector", clock=_Clock())
 
     return (
@@ -198,12 +217,14 @@ def agate_adapter_with_observed_evidence() -> tuple[AgateAdapter, str]:
 
 @pytest.fixture
 def telos_adapter() -> TelosAdapter:
+    """Test helper: telos adapter."""
     rules: dict[EndpointPurpose, set[tuple[str, str, int]]] = {
         EndpointPurpose.MODEL_EGRESS: {("https", "api.example-model.internal", 443)},
     }
     real = EndpointAuthorizer.from_exact_rules(rules, decision_ttl=timedelta(minutes=5), clock=_Clock())
 
     def identity_resolver(context: AdmissionContext, purpose: str) -> EndpointIdentity:
+        """Test helper: identity resolver."""
         return EndpointIdentity(
             endpoint=EndpointRef(scheme="https", host="api.example-model.internal", port=443),
             resolved_addresses=("203.0.113.5",),
@@ -212,6 +233,7 @@ def telos_adapter() -> TelosAdapter:
         )
 
     def request_builder(context: AdmissionContext, purpose: str, identity: EndpointIdentity) -> EndpointUseRequest:
+        """Test helper: request builder."""
         return EndpointUseRequest(
             actor_id=context.principal_id,
             workflow_id=context.run_id,
@@ -228,6 +250,7 @@ def telos_adapter() -> TelosAdapter:
 
 
 def test_telos_adapter_authorizes_a_declared_endpoint_purpose(telos_adapter):
+    """Telos adapter authorizes a declared endpoint purpose."""
     decisions = telos_adapter.authorize(_context(endpoint_purposes=("model_egress",)))
     assert len(decisions) == 1
     assert decisions[0].allowed is True
@@ -236,6 +259,7 @@ def test_telos_adapter_authorizes_a_declared_endpoint_purpose(telos_adapter):
 
 
 def test_telos_adapter_is_current_becomes_false_after_the_real_authorizer_revokes(telos_adapter):
+    """Telos adapter is current becomes false after the real authorizer revokes."""
     decisions = telos_adapter.authorize(_context(endpoint_purposes=("model_egress",)))
     telos_adapter.authorizer.revoke()
     assert telos_adapter.is_current(decisions[0]) is False
@@ -259,6 +283,7 @@ def test_full_admission_pipeline_runs_against_real_phylax_agate_telos(
 def test_full_pipeline_refuses_when_the_real_telos_decision_is_revoked_mid_run(
     phylax_adapter, agate_adapter_with_observed_evidence, telos_adapter,
 ):
+    """Full pipeline refuses when the real telos decision is revoked mid run."""
     agate, model = agate_adapter_with_observed_evidence
     providers = build_admission_providers(phylax=phylax_adapter, agate=agate, telos=telos_adapter)
     context = _context(model=model, endpoint_purposes=("model_egress",))

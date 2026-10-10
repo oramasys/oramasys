@@ -11,6 +11,7 @@ from tests.test_admission_decision import binding, context
 
 
 def make(tmp_path, *, max_steps=10, telos_ttl=60, agate_ttl=60):
+    """Test helper: make."""
     clock = FakeClock()
     phylax = FakePhylax(clock)
     from orama.graph.admission import AdmissionProviders
@@ -35,11 +36,13 @@ def make(tmp_path, *, max_steps=10, telos_ttl=60, agate_ttl=60):
 
 
 def linear(clock=None, advance=0, calls=None):
+    """Test helper: linear."""
     from perpetua_core.graph.engine import END, MiniGraph
 
     graph = MiniGraph()
 
     def a(_):
+        """Test helper: a."""
         if calls is not None:
             calls.append("a")
         if clock is not None:
@@ -55,12 +58,14 @@ def linear(clock=None, advance=0, calls=None):
 
 
 def fresh():
+    """Test helper: fresh."""
     from perpetua_core.state import PerpetuaState
 
     return PerpetuaState(session_id="t1")
 
 
 async def test_allowed_run_completes_and_charges_each_node(tmp_path):
+    """Allowed run completes and charges each node."""
     gate, _, _, ledger, _ = make(tmp_path)
     state = await linear().compile().ainvoke(fresh(), gate=gate)
     assert state.status == "done"
@@ -68,6 +73,7 @@ async def test_allowed_run_completes_and_charges_each_node(tmp_path):
 
 
 async def test_expiry_between_dispatch_and_commit_refuses_the_commit(tmp_path):
+    """Expiry between dispatch and commit refuses the commit."""
     from perpetua_core.graph.gate import GateRefused
 
     gate, clock, _, _, _ = make(tmp_path, telos_ttl=30)
@@ -80,6 +86,7 @@ async def test_expiry_between_dispatch_and_commit_refuses_the_commit(tmp_path):
 
 
 async def test_revocation_after_admission_refuses_the_next_dispatch(tmp_path):
+    """Revocation after admission refuses the next dispatch."""
     from perpetua_core.graph.gate import GateRefused
 
     gate, _, phylax, _, _ = make(tmp_path)
@@ -90,6 +97,7 @@ async def test_revocation_after_admission_refuses_the_next_dispatch(tmp_path):
 
 
 async def test_fenced_lease_refuses_before_anything_runs(tmp_path):
+    """Fenced lease refuses before anything runs."""
     from perpetua_core.graph.gate import GateRefused
 
     gate, _, _, ledger, _ = make(tmp_path)
@@ -102,6 +110,7 @@ async def test_fenced_lease_refuses_before_anything_runs(tmp_path):
 
 
 async def test_stop_comes_after_authority_and_ends_the_run(tmp_path):
+    """Stop comes after authority and ends the run."""
     gate, _, _, _, stop = make(tmp_path)
     stop.request("operator.stop")
     state = await linear().compile().ainvoke(fresh(), gate=gate)
@@ -110,6 +119,7 @@ async def test_stop_comes_after_authority_and_ends_the_run(tmp_path):
 
 
 async def test_authority_is_checked_before_stop(tmp_path):
+    """Authority is checked before stop."""
     from perpetua_core.graph.gate import GateRefused
 
     gate, _, phylax, _, stop = make(tmp_path)
@@ -120,6 +130,7 @@ async def test_authority_is_checked_before_stop(tmp_path):
 
 
 async def test_unhealthy_delivery_refuses(tmp_path):
+    """Unhealthy delivery refuses."""
     from perpetua_core.graph.gate import GateRefused
 
     gate, *_ = make(tmp_path)
@@ -130,6 +141,7 @@ async def test_unhealthy_delivery_refuses(tmp_path):
 
 
 async def test_budget_exhaustion_refuses_without_charging(tmp_path):
+    """Budget exhaustion refuses without charging."""
     from perpetua_core.graph.gate import GateRefused
 
     gate, _, _, ledger, _ = make(tmp_path, max_steps=1)
@@ -140,6 +152,7 @@ async def test_budget_exhaustion_refuses_without_charging(tmp_path):
 
 
 async def test_fanout_batch_is_reserved_all_or_nothing(tmp_path):
+    """Fanout batch is reserved all or nothing."""
     from perpetua_core.graph.engine import END, FanOut, MiniGraph
     from perpetua_core.graph.gate import GateRefused
 
@@ -161,6 +174,7 @@ async def test_fanout_batch_is_reserved_all_or_nothing(tmp_path):
 
 
 async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
+    """Expiry before reducer refuses the fold."""
     from perpetua_core.graph.engine import END, FanOut, MiniGraph
     from perpetua_core.graph.gate import GateRefused
     from perpetua_core.graph.reducers import Reducer
@@ -171,6 +185,7 @@ async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
     graph.add_node("plan", lambda s: {})
 
     def slow(_):
+        """Test helper: slow."""
         clock.advance(31)
         return {"messages": [{"m": "x"}]}
 
@@ -182,6 +197,7 @@ async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
     graph.add_edge("after", END)
 
     def fold(current, values):
+        """Test helper: fold."""
         folded.append("fold")
         return list(current or []) + [v for value in values for v in value]
 
@@ -193,6 +209,7 @@ async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
 
 
 async def test_changed_binding_refuses_even_with_a_valid_decision(tmp_path):
+    """Changed binding refuses even with a valid decision."""
     from perpetua_core.graph.gate import GateRefused
 
     gate, *_ = make(tmp_path)
@@ -203,6 +220,7 @@ async def test_changed_binding_refuses_even_with_a_valid_decision(tmp_path):
 
 
 def test_gate_refuses_construction_from_a_non_allow_decision(tmp_path):
+    """Gate refuses construction from a non allow decision."""
     from dataclasses import replace
 
     from orama.graph.admission import AdmissionRefused
@@ -224,6 +242,7 @@ def test_gate_refuses_construction_from_a_non_allow_decision(tmp_path):
 
 
 def test_gate_refuses_a_lease_wider_than_the_admitted_bound(tmp_path):
+    """Gate refuses a lease wider than the admitted bound."""
     from orama.graph.admission import AdmissionRefused
 
     gate, *_ = make(tmp_path, max_steps=3)
@@ -235,6 +254,7 @@ def test_gate_refuses_a_lease_wider_than_the_admitted_bound(tmp_path):
 
 
 def test_gate_refuses_a_run_with_no_lease(tmp_path):
+    """Gate refuses a run with no lease."""
     from orama.graph.admission import AdmissionRefused
 
     gate, *_ = make(tmp_path)

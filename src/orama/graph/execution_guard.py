@@ -57,6 +57,7 @@ class StepLedger:
     """
 
     def __init__(self, path: Path | str) -> None:
+        """Open the durable ledger (WAL, synchronous FULL) at the given path."""
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -70,14 +71,17 @@ class StepLedger:
         )
 
     def close(self) -> None:
+        """Close the underlying database connection."""
         self._db.close()
 
     def pragmas(self) -> tuple[str, int]:
+        """Return the journal mode and synchronous level in force."""
         mode = self._db.execute("PRAGMA journal_mode").fetchone()[0]
         sync = self._db.execute("PRAGMA synchronous").fetchone()[0]
         return str(mode).lower(), int(sync)
 
     def _tx(self):
+        """Open an immediate write transaction guarded by the single-writer lock."""
         return _Immediate(self._db, self._lock)
 
     def open_lease(self, run_id: str, *, max_steps: int) -> int:
@@ -104,6 +108,7 @@ class StepLedger:
             return epoch
 
     def check(self, run_id: str, epoch: int) -> None:
+        """Raise LeaseFenced unless the epoch is the current lease epoch."""
         row = self._db.execute("SELECT epoch FROM leases WHERE run_id = ?", (run_id,)).fetchone()
         if row is None or row[0] != epoch:
             raise LeaseFenced(run_id)
@@ -130,15 +135,19 @@ class StepLedger:
         return None if row is None else int(row[0])
 
     def used(self, run_id: str) -> int:
+        """Return the steps already charged for the run."""
         row = self._db.execute("SELECT used FROM leases WHERE run_id = ?", (run_id,)).fetchone()
         return 0 if row is None else int(row[0])
 
 
 class _Immediate:
+    """Context manager running a BEGIN IMMEDIATE transaction under a lock."""
     def __init__(self, db: sqlite3.Connection, lock: threading.Lock) -> None:
+        """Keep the connection and the lock for the transaction."""
         self._db, self._lock = db, lock
 
     def __enter__(self) -> sqlite3.Connection:
+        """Enter the context and return the managed resource."""
         self._lock.acquire()
         try:
             self._db.execute("BEGIN IMMEDIATE")
@@ -148,6 +157,7 @@ class _Immediate:
         return self._db
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        """Leave the context, committing on success and rolling back on error."""
         try:
             self._db.execute("ROLLBACK" if exc_type else "COMMIT")
         finally:
@@ -161,6 +171,7 @@ class StopSignal:
     reason: str | None = None
 
     def request(self, reason: str) -> None:
+        """Record a stop request with its reason code."""
         if not reason:
             raise ValueError("a stop needs a reason code")
         if self.reason is None:
@@ -168,18 +179,22 @@ class StopSignal:
 
 
 class DeliveryHealth(Protocol):
-    def healthy(self) -> bool: ...
+    """Reports whether result delivery sinks are healthy."""
+    def healthy(self) -> bool:
+        """Report whether delivery is healthy."""
 
 
 class NoDeliverySinks:
     """T1 has no observation delivery, so nothing can be behind. T2-A replaces this."""
 
     def healthy(self) -> bool:
+        """Report healthy: with no sinks configured there is nothing to fail."""
         return True
 
 
 @dataclass
 class AdmissionGate:
+    """Core DispatchGate enforcing admission, stop, delivery health and budget."""
     decision: AdmissionDecision
     binding: ArtifactBinding
     providers: AdmissionProviders
@@ -191,6 +206,7 @@ class AdmissionGate:
     delivery: DeliveryHealth = field(default_factory=NoDeliverySinks)
 
     def __post_init__(self) -> None:
+        """Fail closed unless Core's gate seam exists and the lease matches admission."""
         if not CORE_GATE_AVAILABLE:
             raise AdmissionRefused("gate.core_seam_unavailable")
         if self.decision.outcome != "allow":
@@ -204,6 +220,7 @@ class AdmissionGate:
     # Core DispatchGate protocol -------------------------------------------------
 
     async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Check authority, stop, delivery and reserve budget before the call."""
         early = self._common()
         if early is not None:
             return early
@@ -217,12 +234,14 @@ class AdmissionGate:
         return GateDecision.allow()
 
     async def before_commit(self, request: CommitRequest) -> GateDecision:
+        """Re-check authority, stop and delivery before the commit publishes."""
         early = self._common()
         return early if early is not None else GateDecision.allow()
 
     # Fixed order: authority and lease, stop, delivery ---------------------------
 
     def _common(self) -> GateDecision | None:
+        """Run the authority, stop and delivery checks shared by every boundary."""
         reason = self._authority()
         if reason is not None:
             return GateDecision.refuse(reason)
@@ -233,6 +252,7 @@ class AdmissionGate:
         return None
 
     def _authority(self) -> str | None:
+        """Return a refusal reason if admission is stale, revoked, expired or fenced."""
         if not self.decision.covers(self.binding):
             return "authority.binding_changed"
         try:

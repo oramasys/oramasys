@@ -33,7 +33,8 @@ class AgateFitFn(Protocol):
     path (it is still a real call, not a fake -- callers pass the actual
     function)."""
 
-    def __call__(self, policy: Any, model: str, observation: Any, evidence: Any) -> Any: ...
+    def __call__(self, policy: Any, model: str, observation: Any, evidence: Any) -> Any:
+        """Assess fit for a model against an observation and its evidence."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,7 @@ class AgateAdapter:
     fit_validity: timedelta = field(default_factory=lambda: timedelta(minutes=5))
 
     def assess(self, context: AdmissionContext) -> OwnerDecision:
+        """Map the real fit verdict and evidence class onto an OwnerDecision."""
         observation = self.observation_provider(context)
         evidence = self.evidence_provider(context, observation)
         decision = self.assess_fit(self.policy, context.model, observation, evidence)
@@ -87,6 +89,7 @@ class AgateAdapter:
         # policy change is a revalidation trigger handled by the admission
         # layer re-calling admit_artifact(), not by a per-boundary staleness
         # check here -- so once admitted, this adapter reports current.
+        """Report whether the fit decision is still unexpired."""
         return True
 
 
@@ -94,9 +97,12 @@ class AgateAdapter:
 
 
 class TelosAuthorizer(Protocol):
-    def authorize(self, request: Any) -> Any: ...
+    """Subset of the Telos authorizer the adapter relies on."""
+    def authorize(self, request: Any) -> Any:
+        """Authorize one endpoint use request."""
 
-    def is_current(self, decision: Any) -> bool: ...
+    def is_current(self, decision: Any) -> bool:
+        """Report whether the decision is still current (unexpired and unrevoked)."""
 
 
 @dataclass
@@ -123,6 +129,7 @@ class TelosAdapter:
     _issued: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def authorize(self, context: AdmissionContext) -> tuple[OwnerDecision, ...]:
+        """Authorize every declared endpoint purpose as owner decisions."""
         decisions: list[OwnerDecision] = []
         for purpose in context.endpoint_purposes:
             identity = self.identity_resolver(context, purpose)
@@ -144,6 +151,7 @@ class TelosAdapter:
         return tuple(decisions)
 
     def is_current(self, decision: OwnerDecision) -> bool:
+        """Delegate freshness to the real Telos authorizer."""
         real_decision = self._issued.get(decision.decision_ref)
         if real_decision is None:
             return False
@@ -154,11 +162,15 @@ class TelosAdapter:
 
 
 class PhylaxAuthorizer(Protocol):
-    def compile(self, request: Any) -> Any: ...
+    """Compile-time and runtime admission authority for graph artifacts."""
+    def compile(self, request: Any) -> Any:
+        """Decide compile-time authority for an artifact."""
 
-    def admit(self, request: Any) -> Any: ...
+    def admit(self, request: Any) -> Any:
+        """Decide runtime admission, issuing an expiring epoch-bound decision."""
 
-    def is_current(self, decision: Any) -> bool: ...
+    def is_current(self, decision: Any) -> bool:
+        """Report whether a decision was issued here, is unexpired and matches the epoch."""
 
 
 @dataclass
@@ -191,6 +203,7 @@ class PhylaxAdapter:
     _issued: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def _artifact_ref(self, binding: ArtifactBinding) -> Any:
+        """Build the Phylax artifact reference for a binding."""
         digest = binding.implementation_digest
         bare_digest = digest.removeprefix("sha256:")
         return self.artifact_ref_type(
@@ -200,6 +213,7 @@ class PhylaxAdapter:
         )
 
     def admit(self, binding: ArtifactBinding, context: AdmissionContext) -> OwnerDecision:
+        """Map the real runtime admission onto an OwnerDecision."""
         artifact = self._artifact_ref(binding)
         compiled = self.authorizer.compile(
             self.compile_request_type(
@@ -242,6 +256,7 @@ class PhylaxAdapter:
         )
 
     def is_current(self, decision: OwnerDecision) -> bool:
+        """Delegate freshness to the real Phylax authorizer."""
         real_decision = self._issued.get(decision.decision_ref)
         if real_decision is None:
             return False

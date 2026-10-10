@@ -26,6 +26,7 @@ P = "sha256:" + "2" * 64
 
 
 def binding(**overrides) -> ArtifactBinding:
+    """Test helper: binding."""
     base = {
         "graph_id": "0" * 64,
         "implementation_digest": D,
@@ -40,6 +41,7 @@ def binding(**overrides) -> ArtifactBinding:
 
 
 def context(**overrides) -> AdmissionContext:
+    """Test helper: context."""
     base = {
         "run_id": "run-1",
         "principal_id": "operator",
@@ -53,6 +55,7 @@ def context(**overrides) -> AdmissionContext:
 
 
 def providers(clock=None, **kw):
+    """Test helper: providers."""
     clock = clock or FakeClock()
     return AdmissionProviders(
         phylax=kw.get("phylax") or FakePhylax(clock),
@@ -65,18 +68,21 @@ def providers(clock=None, **kw):
 
 
 def test_digest_is_domain_tagged_and_kind_separated():
+    """Digest is domain tagged and kind separated."""
     payload = {"a": "1"}
     assert canonical_digest("artifact_binding", payload) != canonical_digest("policy", payload)
     assert canonical_digest("artifact_binding", payload).startswith("sha256:")
 
 
 def test_binding_digest_is_stable_and_order_insensitive_for_provider_contracts():
+    """Binding digest is stable and order insensitive for provider contracts."""
     a = binding(provider_contract_digests=(D, P))
     b = binding(provider_contract_digests=(P, D))
     assert a.digest() == b.digest()
 
 
 def test_binding_rejects_bad_digests_and_duplicates():
+    """Binding rejects bad digests and duplicates."""
     with pytest.raises(AdmissionRefused):
         binding(implementation_digest="md5:abc")
     with pytest.raises(AdmissionRefused):
@@ -86,6 +92,7 @@ def test_binding_rejects_bad_digests_and_duplicates():
 
 
 def test_binding_from_mapping_fails_closed_on_unknown_fields():
+    """Binding from mapping fails closed on unknown fields."""
     raw = {
         "graph_id": "0" * 64,
         "implementation_digest": D,
@@ -118,6 +125,7 @@ def test_artifact_binding_accepts_the_core_graph_id_shape():
 
 
 def test_artifact_binding_rejects_prefixed_or_noncanonical_graph_ids():
+    """Artifact binding rejects prefixed or noncanonical graph ids."""
     with pytest.raises(AdmissionRefused, match="bad_graph_id"):
         binding(graph_id="sha256:" + "a" * 64)
     with pytest.raises(AdmissionRefused, match="bad_graph_id"):
@@ -130,6 +138,7 @@ def test_artifact_binding_rejects_prefixed_or_noncanonical_graph_ids():
 
 
 def test_allowed_admission_binds_digest_epoch_and_earliest_expiry():
+    """Allowed admission binds digest epoch and earliest expiry."""
     provs, clock = providers()
     provs.telos.ttl = 30
     decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
@@ -143,6 +152,7 @@ def test_allowed_admission_binds_digest_epoch_and_earliest_expiry():
 
 
 def test_same_graph_changed_code_invalidates_admission():
+    """Same graph changed code invalidates admission."""
     provs, clock = providers()
     decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
     changed = binding(implementation_digest="sha256:" + "9" * 64)
@@ -152,6 +162,7 @@ def test_same_graph_changed_code_invalidates_admission():
 
 
 def test_stale_policy_summary_refused():
+    """Stale policy summary refused."""
     provs, clock = providers()
     decision = admit_artifact(binding(), context(policy_summary_digest="sha256:" + "8" * 64),
                               provs, clock=clock, max_steps=5)
@@ -161,6 +172,7 @@ def test_stale_policy_summary_refused():
 
 @pytest.mark.parametrize("owner", ["phylax", "agate"])
 def test_nonobserved_source_cannot_admit(owner):
+    """Nonobserved source cannot admit."""
     clock = FakeClock()
     fake = FakePhylax(clock, evidence_class="derived") if owner == "phylax" else FakeAgate(clock, evidence_class="reconstructed")
     provs, _ = providers(clock, **{owner: fake})
@@ -170,6 +182,7 @@ def test_nonobserved_source_cannot_admit(owner):
 
 
 def test_missing_hardware_or_principal_refused():
+    """Missing hardware or principal refused."""
     provs, clock = providers()
     with pytest.raises(AdmissionRefused):
         context(principal_id="")
@@ -183,6 +196,7 @@ def test_missing_hardware_or_principal_refused():
 
 
 def test_absent_enforcement_service_fails_closed():
+    """Absent enforcement service fails closed."""
     clock = FakeClock()
     assert admit_artifact(binding(), context(), None, clock=clock, max_steps=5).outcome == "refuse"
     provs, _ = providers(clock, phylax=FakePhylax(clock, raise_error=True))
@@ -192,6 +206,7 @@ def test_absent_enforcement_service_fails_closed():
 
 
 def test_owner_refusals_carry_their_reason():
+    """Owner refusals carry their reason."""
     clock = FakeClock()
     provs, _ = providers(clock, phylax=FakePhylax(clock, allow=False, reason="digest_mismatch"))
     decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
@@ -200,6 +215,7 @@ def test_owner_refusals_carry_their_reason():
 
 
 def test_impossible_hardware_is_not_overridable():
+    """Impossible hardware is not overridable."""
     clock = FakeClock()
     provs, _ = providers(clock, agate=FakeAgate(clock, feasible=False, reason="model_forbidden_on_profile"))
     decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
@@ -208,6 +224,7 @@ def test_impossible_hardware_is_not_overridable():
 
 
 def test_only_an_explicitly_overridable_refusal_is_pending():
+    """Only an explicitly overridable refusal is pending."""
     clock = FakeClock()
     provs, _ = providers(clock, agate=FakeAgate(clock, feasible=False, overridable=True, reason="fit_borderline"))
     decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
@@ -216,12 +233,14 @@ def test_only_an_explicitly_overridable_refusal_is_pending():
 
 
 def test_telos_denial_refuses():
+    """Telos denial refuses."""
     clock = FakeClock()
     provs, _ = providers(clock, telos=FakeTelos(clock, allow=False))
     assert admit_artifact(binding(), context(), provs, clock=clock, max_steps=5).reason_code == "telos.unknown_purpose"
 
 
 def test_allowed_owner_decision_without_expiry_fails_closed():
+    """Allowed owner decision without expiry fails closed."""
     clock = FakeClock()
     provs, _ = providers(clock, telos=FakeTelos(clock, no_expiry=True))
     decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
@@ -230,6 +249,7 @@ def test_allowed_owner_decision_without_expiry_fails_closed():
 
 
 def test_max_steps_and_clock_are_validated():
+    """Max steps and clock are validated."""
     provs, clock = providers()
     with pytest.raises(AdmissionRefused):
         admit_artifact(binding(), context(), provs, clock=clock, max_steps=0)
@@ -239,12 +259,14 @@ def test_max_steps_and_clock_are_validated():
 
 
 def test_production_has_no_providers_and_therefore_refuses():
+    """Production has no providers and therefore refuses."""
     assert production_providers() is None
     decision = admit_artifact(binding(), context(), production_providers(), clock=FakeClock(), max_steps=1)
     assert decision.outcome == "refuse"
 
 
 def test_pure_graph_requires_phylax_but_not_agate_or_telos():
+    """Pure graph requires phylax but not agate or telos."""
     from orama.graph.admission import AdmissionRequirements
 
     requirements = AdmissionRequirements.for_effects(model_dispatch=False, endpoint_purposes=())
@@ -252,6 +274,7 @@ def test_pure_graph_requires_phylax_but_not_agate_or_telos():
 
 
 def test_model_dispatch_requires_agate_and_network_effect_requires_telos():
+    """Model dispatch requires agate and network effect requires telos."""
     from orama.graph.admission import AdmissionRequirements
 
     requirements = AdmissionRequirements.for_effects(model_dispatch=True, endpoint_purposes=("model_egress",))
@@ -259,6 +282,7 @@ def test_model_dispatch_requires_agate_and_network_effect_requires_telos():
 
 
 def test_pure_graph_admits_with_only_phylax_configured():
+    """Pure graph admits with only phylax configured."""
     from orama.graph.admission import AdmissionRequirements
 
     provs = AdmissionProviders(phylax=FakePhylax(FakeClock()), agate=None, telos=None)
@@ -271,6 +295,7 @@ def test_pure_graph_admits_with_only_phylax_configured():
 
 
 def test_model_dispatch_refuses_when_agate_not_configured_even_if_other_owners_are():
+    """Model dispatch refuses when agate not configured even if other owners are."""
     from orama.graph.admission import AdmissionRequirements
 
     provs = AdmissionProviders(phylax=FakePhylax(FakeClock()), agate=None, telos=FakeTelos(FakeClock()))
@@ -289,10 +314,13 @@ def test_unconfigured_telos_is_never_called_when_not_required():
     from orama.graph.admission import AdmissionRequirements
 
     class ExplodingTelos:
+        """Test helper ExplodingTelos."""
         def authorize(self, context):
+            """Test helper: authorize."""
             raise AssertionError("telos must not be called for a graph with no endpoint purposes")
 
         def is_current(self, decision):
+            """Report whether the decision is still current (unexpired and unrevoked)."""
             raise AssertionError("telos must not be called for a graph with no endpoint purposes")
 
     provs = AdmissionProviders(phylax=FakePhylax(FakeClock()), agate=FakeAgate(FakeClock()), telos=ExplodingTelos())
@@ -305,6 +333,7 @@ def test_unconfigured_telos_is_never_called_when_not_required():
 
 
 def test_shipped_package_never_references_test_fakes():
+    """Shipped package never references test fakes."""
     from pathlib import Path
 
     import orama
@@ -332,6 +361,7 @@ def test_endpoint_purposes_without_telos_requirement_refuse():
 
 
 def test_requirements_without_phylax_refuse():
+    """Requirements without phylax refuse."""
     from orama.graph.admission import AdmissionRequirements
 
     clock = FakeClock()

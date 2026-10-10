@@ -11,18 +11,23 @@ T0 = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 
 
 class FakeClock:
+    """Settable clock for deterministic tests."""
     def __init__(self, now: datetime = T0) -> None:
+        """Initialise the instance and validate its arguments."""
         self.now = now
 
     def __call__(self) -> datetime:
+        """Return the current value."""
         return self.now
 
     def advance(self, seconds: float) -> None:
+        """Test helper: advance."""
         self.now += timedelta(seconds=seconds)
 
 
 @dataclass
 class FakePhylax:
+    """Test helper FakePhylax."""
     clock: FakeClock
     allow: bool = True
     reason: str = "allowed"
@@ -33,6 +38,7 @@ class FakePhylax:
     seen: list[str] = field(default_factory=list)
 
     def admit(self, binding: ArtifactBinding, context: AdmissionContext) -> OwnerDecision:
+        """Test helper: admit."""
         if self.raise_error:
             raise ConnectionError("phylax down")
         self.seen.append(binding.digest())
@@ -47,9 +53,11 @@ class FakePhylax:
         )
 
     def revoke(self) -> None:
+        """Test helper: revoke."""
         self.epoch += 1
 
     def is_current(self, decision: OwnerDecision) -> bool:
+        """Report whether the decision is still current (unexpired and unrevoked)."""
         return (
             decision.allowed
             and decision.authority_epoch == self.epoch
@@ -60,6 +68,7 @@ class FakePhylax:
 
 @dataclass
 class FakeAgate:
+    """Test helper FakeAgate."""
     clock: FakeClock
     feasible: bool = True
     overridable: bool = False
@@ -68,6 +77,7 @@ class FakeAgate:
     evidence_class: str = "observed"
 
     def assess(self, context: AdmissionContext) -> OwnerDecision:
+        """Test helper: assess."""
         return OwnerDecision(
             owner="agate",
             allowed=self.feasible,
@@ -79,17 +89,20 @@ class FakeAgate:
         )
 
     def is_current(self, decision: OwnerDecision) -> bool:
+        """Report whether the decision is still current (unexpired and unrevoked)."""
         return decision.allowed and decision.expires_at is not None and self.clock.now < decision.expires_at
 
 
 @dataclass
 class FakeTelos:
+    """Test helper FakeTelos."""
     clock: FakeClock
     allow: bool = True
     ttl: float = 60
     no_expiry: bool = False
 
     def authorize(self, context: AdmissionContext) -> tuple[OwnerDecision, ...]:
+        """Test helper: authorize."""
         return tuple(
             OwnerDecision(
                 owner="telos",
@@ -102,4 +115,5 @@ class FakeTelos:
         )
 
     def is_current(self, decision: OwnerDecision) -> bool:
+        """Report whether the decision is still current (unexpired and unrevoked)."""
         return decision.allowed and decision.expires_at is not None and self.clock.now < decision.expires_at
