@@ -65,3 +65,30 @@ def test_manifest_rejects_a_cell_without_the_result_gate_fields() -> None:
     del broken["cells"][0]["max_skipped"]
     with pytest.raises(ManifestError):
         check(broken)
+
+
+@pytest.mark.parametrize("name, xml", [
+    ("negative skips inflate passes",
+     '<testsuite tests="0" failures="0" errors="0" skipped="-360"/>'),
+    ("negative failures inflate passes",
+     '<testsuite tests="400" failures="-5" errors="0" skipped="1"/>'),
+    ("negative tests", '<testsuite tests="-1" failures="0" errors="0" skipped="0"/>'),
+    ("non-numeric count", '<testsuite tests="many" failures="0" errors="0" skipped="0"/>'),
+])
+def test_rejects_invalid_counts_before_computing_passes(name: str, xml: str) -> None:
+    with pytest.raises(ManifestError):
+        check_cell_results(xml, cell("production"))
+
+
+def test_nested_suites_are_counted_once() -> None:
+    """A parent that already totals its child must not be added to that child."""
+    parent_only = ('<testsuites><testsuite tests="40" failures="0" errors="0" skipped="0">'
+                   '<testsuite tests="40" failures="0" errors="0" skipped="0"/>'
+                   '</testsuite></testsuites>')
+    with pytest.raises(ManifestError):
+        check_cell_results(parent_only, cell("production"))
+    legitimate = ('<testsuites><testsuite tests="379" failures="0" errors="0" skipped="1">'
+                  '<testsuite tests="200" failures="0" errors="0" skipped="0"/>'
+                  '<testsuite tests="179" failures="0" errors="0" skipped="1"/>'
+                  '</testsuite></testsuites>')
+    check_cell_results(legitimate, cell("production"))

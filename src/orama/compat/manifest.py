@@ -97,8 +97,16 @@ def validate_workflow(manifest: Mapping[str, Any], text: str) -> None:
     actual = sorted((c["python"], c["profile"], c["core_file"], c["require_r3"])
                     for c in workflow_cells(text))
     _need(actual == expected, f"workflow matrix differs from manifest:\n{actual}\n{expected}")
-    entries = re.findall(r"^\s*-\s*python-version:", text, flags=re.MULTILINE)
-    _need(len(entries) == len(actual), "workflow has matrix entries the manifest parser did not read")
+    # Each matrix cell has exactly one of each key, whatever their order; count them all.
+    key_patterns = {
+        "python-version": r'^\s*(?:-\s*)?python-version:\s*"',
+        "profile": r"^\s*(?:-\s*)?profile:",
+        "core-file": r"^\s*(?:-\s*)?core-file:",
+        "require-r3": r"^\s*(?:-\s*)?require-r3:",
+    }
+    counts = {k: len(re.findall(p, text, flags=re.MULTILINE)) for k, p in key_patterns.items()}
+    _need(all(n == len(actual) for n in counts.values()),
+          f"workflow matrix keys {counts} disagree with the {len(actual)} parsed cells")
 
 
 def check_cell_results(junit_xml: str, cell: Mapping[str, Any]) -> None:
@@ -107,10 +115,15 @@ def check_cell_results(junit_xml: str, cell: Mapping[str, Any]) -> None:
         root = ET.fromstring(junit_xml)
     except ET.ParseError as error:
         raise ManifestError("cell result is not valid JUnit XML") from error
-    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    # Count only top-level suites: a parent suite already totals its nested children.
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
     _need(bool(suites), "cell result contains no testsuite")
-    totals = {name: sum(int(suite.get(name, "0")) for suite in suites)
-              for name in ("tests", "failures", "errors", "skipped")}
+    totals = dict.fromkeys(("tests", "failures", "errors", "skipped"), 0)
+    for suite in suites:
+        for name in totals:
+            raw = suite.get(name, "0")
+            _need(raw.isascii() and raw.isdigit(), f"JUnit {name} count is not a non-negative integer")
+            totals[name] += int(raw)
     passed = totals["tests"] - totals["failures"] - totals["errors"] - totals["skipped"]
     label = f"{cell['profile']} on {cell['python']}"
     _need(totals["failures"] == 0 and totals["errors"] == 0, f"{label}: failures or errors reported")

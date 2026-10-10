@@ -92,7 +92,7 @@ jobs:
         run: python scripts/verify_cell_results.py requirements/compatibility-manifest.json cell-results.xml "${{ matrix.profile }}" "${{ matrix.python-version }}"
       - name: Retain cell receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cell-receipt-${{ matrix.profile }}-${{ matrix.python-version }}
           path: cell-results.xml
