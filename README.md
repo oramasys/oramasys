@@ -13,8 +13,9 @@ src/
   orama/        # the package (import orama)
     api/        # FastAPI surface (server.py: app) + authz/ (S-AuthZ)
     auth/       # AuthManager, binding store, optional AuthProviders
-    gateway/    # Gateway Lifecycle orchestration + owner ports
+    gateway/    # Gateway Lifecycle orchestration + owner ports (outbound dialer; not docs search)
     graph/      # orchestration graph + perpetua dispatch bridge
+    knowledge/  # read-only docs search (HTTP + MCP search_docs + A2A), static /knowledge page
     providers/  # application-facing provider invocation contracts
   tests/        # test suite (pytest)
 Makefile        # dev-install / test
@@ -48,14 +49,39 @@ Inbound HTTP on the glass window is capability-declared and bearer-authorized:
 
 | Env | Role |
 |-----|------|
-| `ORAMA_CONTROL_PLANE_TOKEN` | Shared Bearer for non-public routes (`POST /run`). **503** if unset on protected routes. |
+| `ORAMA_CONTROL_PLANE_TOKEN` | Shared Bearer for non-public routes (`POST /run`, knowledge search/MCP/A2A). **503** if unset on protected routes. |
 | `ORAMA_INSECURE_DEV` | Skip auth only when the **actual listen host** is loopback (`ORAMA_LISTEN_HOST` from `bin/serve`, else `UVICORN_HOST`, else `ORAMA_BIND_HOST`). Never skipped when `ORAMA_BIND_LAN` is set or the listen address is non-loopback (`0.0.0.0`, `::`, …). |
 | `ORAMA_BIND_LAN` | Bind all-interfaces; requires a non-weak control-plane token (fail-closed). |
 | `ORAMA_BIND_HOST` | Loopback host override (default `127.0.0.1`). Non-loopback values require LAN policy. |
 | `ORAMA_LISTEN_HOST` | Set by `bin/serve` to the validated Uvicorn host so runtime auth matches the bind. |
 | `ORAMA_LAN_BIND_HOST` | LAN host override when `ORAMA_BIND_LAN` is set. |
 
-`GET /health` stays public. Auth is **Bearer header only** (no cookie / S-Session in this release). CORS is deferred to S-Network.
+`GET /health` stays public. The Knowledge Portal agent card (`GET /.well-known/agent-card.json`, metadata only) is public and advertises that `/api/a2a` requires Bearer. `GET /knowledge` is a **data-free** HTML shell (PUBLIC; needs reviewer sign-off — see below). All documentation **data** routes stay `READ`. Auth is **Bearer header only** (no cookie / S-Session in this release). CORS is deferred to S-Network.
+
+### Knowledge Portal
+
+Read-only Markdown search over the local docs tree, shared by the HTTP API, MCP, and A2A. This is an end-user portal, not developer tooling. It does **not** live under `orama.gateway` (that package is the outbound model dialer under Telos). There is **no outbound network egress**.
+
+| Route | Capability |
+|-------|------------|
+| `GET /api/knowledge/search` | `READ` (Bearer) |
+| `POST /api/mcp` | `READ` — `initialize`, `server/discover`, `notifications/initialized` (202), `tools/list`, `tools/call` `search_docs` |
+| `POST /api/a2a` | `READ` — `message/send` runs a docs search; `tasks/get`/`tasks/cancel` → JSON-RPC -32001; no push notifications |
+| `GET /.well-known/agent-card.json` | `PUBLIC` — metadata only; `securitySchemes.bearer` |
+| `GET /knowledge` | `PUBLIC` — data-free HTML shell. Token stays in page memory. Response CSP hashes inline JS/CSS (no `unsafe-inline`); `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. Isolated so this PUBLIC entry is easy to drop. |
+
+Intentional divergence from orama-system #371: v1 made Class-0 knowledge public-read. v2 does **not**. Loopback `ORAMA_INSECURE_DEV=1` still skips Bearer for every route, which is the local no-token UX without opening a LAN filesystem scan.
+
+MCP requires `Mcp-Protocol-Version: 2026-07-28` (older revisions are rejected). The agent-card `url` is derived from the request `Host` / `base_url` (fine on loopback).
+
+| Env | Role |
+|-----|------|
+| `ORAMA_DOCS_ROOT` | Docs tree to index. Default is `<repo>/docs` from a source checkout (`search.py` parents[3]). **Required for installed wheels** — `docs/` is not packaged. A missing root yields no hits. Scan order when `ORAMA_KNOWLEDGE_MAX_FILES_SCAN` truncates is filesystem `rglob` order (non-deterministic). |
+| `ORAMA_KNOWLEDGE_MAX_FILES_SCAN` | Cap on files visited per search (default 2000). |
+| `ORAMA_KNOWLEDGE_MAX_CONCURRENT_SEARCHES` | Fail-fast busy slot count (default 4). Extra callers get HTTP 503 / JSON-RPC -32000. |
+| `ORAMA_KNOWLEDGE_SEARCH_TIMEOUT_S` | Search deadline, floor 0.5s (default 8). Timeout → 503 / -32000. |
+
+Path-traversal is rejected (`Path.resolve()` + `relative_to` the docs root; API never takes a file path). Optional AuthProviders stay optional and never replace Bearer. `ORAMA_INSECURE_DEV` loopback behaviour is unchanged.
 
 Optional AuthProviders (disabled by default) never replace local secrets:
 

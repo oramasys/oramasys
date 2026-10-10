@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Knowledge Portal</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 42rem; margin: 1.5rem auto; padding: 0 1rem; }
+    form { display: grid; gap: 0.75rem; margin: 1rem 0; }
+    label { display: grid; gap: 0.25rem; }
+    input { padding: 0.4rem 0.5rem; }
+    button { width: max-content; padding: 0.4rem 0.8rem; }
+    code { font-size: 0.85em; }
+    li { margin: 0.75rem 0; }
+    #status { min-height: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Knowledge Portal</h1>
+  <p>Read-only project documentation search. The control-plane token stays in page memory and is sent as a Bearer header on each search. It is not stored.</p>
+  <form id="search-form">
+    <label>Control-plane token
+      <input id="token" type="password" autocomplete="off">
+    </label>
+    <label>Search documentation
+      <input id="query" maxlength="200" placeholder="Search architecture, approvals, routing…">
+    </label>
+    <button type="submit" id="go">Search</button>
+  </form>
+  <p id="status" role="status"></p>
+  <ul id="hits"></ul>
+  <script>
+    const MAX_QUERY = 200;
+    const form = document.getElementById("search-form");
+    const queryEl = document.getElementById("query");
+    const tokenEl = document.getElementById("token");
+    const statusEl = document.getElementById("status");
+    const hitsEl = document.getElementById("hits");
+    let submittedQuery = null;
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const query = queryEl.value;
+      const trimmed = query.trim();
+      if (trimmed.length < 2 || query.length > MAX_QUERY) return;
+      submittedQuery = trimmed;
+      statusEl.textContent = "Searching…";
+      hitsEl.replaceChildren();
+      const headers = {};
+      const token = tokenEl.value;
+      if (token) headers.Authorization = "Bearer " + token;
+      let response;
+      try {
+        response = await fetch("/api/knowledge/search?q=" + encodeURIComponent(trimmed), { headers });
+      } catch {
+        if (submittedQuery !== queryEl.value.trim()) return;
+        statusEl.textContent = "Search failed.";
+        return;
+      }
+      if (submittedQuery !== queryEl.value.trim()) return;
+      if (response.status === 401) {
+        statusEl.textContent = "Enter the control-plane token";
+        return;
+      }
+      if (response.status === 503) {
+        const body = await response.json().catch(() => ({}));
+        statusEl.textContent = typeof body.detail === "string" ? body.detail : "Service unavailable";
+        return;
+      }
+      if (!response.ok) {
+        statusEl.textContent = "Search failed.";
+        return;
+      }
+      const data = await response.json();
+      if (data.query !== submittedQuery) return;
+      const hits = Array.isArray(data.hits) ? data.hits : [];
+      if (hits.length === 0) {
+        statusEl.textContent = "No matching documentation.";
+        return;
+      }
+      statusEl.textContent = "";
+      for (const hit of hits) {
+        const item = document.createElement("li");
+        const title = document.createElement("strong");
+        title.textContent = hit.title || "";
+        const path = document.createElement("code");
+        path.textContent = hit.path || "";
+        const excerpt = document.createElement("p");
+        excerpt.textContent = hit.excerpt || "";
+        item.append(title, document.createTextNode(" "), path, excerpt);
+        hitsEl.append(item);
+      }
+    });
+  </script>
+</body>
+</html>

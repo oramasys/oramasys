@@ -3,9 +3,11 @@ from fastapi import FastAPI
 from orama.api.authz import install_authz
 from orama.api.contracts import RunRequest, RunResponse
 from orama.graph.perpetua_graph import graph
+from orama.knowledge import router as knowledge_router
 
 app = FastAPI(title="oramasys", version="2.0.0-alpha.1")
 install_authz(app)
+app.include_router(knowledge_router)
 
 
 @app.post("/run", response_model=RunResponse)
