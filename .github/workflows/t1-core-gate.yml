@@ -1,7 +1,7 @@
 name: T1 Core gate candidate
 
 # Runs the T1 admission gate against the candidate Core revision that carries the
-# neutral DispatchGate seam (oramasys/perpetua-core#10). The production pin stays on
+# neutral DispatchGate seam (oramasys/perpetua-core#10, merged). The production pin stays on
 # the qualified Core until that revision is merged and qualified; this job proves the
 # gate in lockstep meanwhile. ORAMA_REQUIRE_CORE_GATE makes a missing seam a failure,
 # never a silent skip.
@@ -24,10 +24,10 @@ jobs:
     env:
       ORAMA_REQUIRE_CORE_GATE: "1"
       ORAMA_REQUIRE_OWNER_CANDIDATES: "1"
-      CORE_GATE_CANDIDATE: 05ea3d33a61b7c7fe8b6ace1de0bedc037741e91
-      PHYLAX_CANDIDATE: 15fcd0cdae86fae09bf8b62ee41b6032f37ac39e
-      AGATE_CANDIDATE: fe90908b2ec3a1bb734bca2a3a429aadd9ec8c3b
-      TELOS_CANDIDATE: 600dd7b19bba788f61addd796f6dafcfc259a215
+      CORE_GATE_CANDIDATE: f7a443e4baf628b880345a68fecde3d76b0e15fd
+      PHYLAX_CANDIDATE: 22dc030d1c31cd2b684b74fc8cb1851f783e2f2e
+      AGATE_CANDIDATE: 172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc
+      TELOS_CANDIDATE: 931b6347142e8e66b31136e3ac8159d86eb5b2f7
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
