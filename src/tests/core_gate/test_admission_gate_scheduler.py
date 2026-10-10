@@ -72,6 +72,16 @@ async def test_allowed_run_completes_and_charges_each_node(tmp_path):
     assert ledger.used("run-1") == 2
 
 
+async def test_allowed_node_commits_prepare_and_settle_the_same_durable_hold(tmp_path):
+    """The gate binds Core's publish callback to the exact pre-dispatch hold."""
+    gate, _, _, ledger, _ = make(tmp_path)
+
+    await linear().compile().ainvoke(fresh(), gate=gate)
+
+    assert ledger.hold_state("run-1", "node::a::0") == "settled"
+    assert ledger.hold_state("run-1", "node::b::1") == "settled"
+
+
 async def test_expiry_between_dispatch_and_commit_refuses_the_commit(tmp_path):
     """Expiry between dispatch and commit refuses the commit."""
     from perpetua_core.graph.gate import GateRefused

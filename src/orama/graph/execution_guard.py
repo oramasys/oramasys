@@ -22,11 +22,13 @@ structural limit; the ledger enforces the admitted bound without double charging
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from orama.graph.admission import (
     AdmissionDecision,
@@ -49,6 +51,64 @@ class LeaseFenced(RuntimeError):
     """This holder's lease epoch is no longer current (a newer holder took it)."""
 
 
+UnknownCause = Literal[
+    "crash_before_intent",
+    "crash_before_publish",
+    "crash_before_settle",
+    "critical_delivery_failure",
+    "stop_timeout",
+]
+StopState = Literal["none", "requested", "acknowledged"]
+SettlementState = Literal["unsettled", "settled", "irrelevant"]
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptHold:
+    """The immutable durable budget hold for one scheduler attempt."""
+
+    run_id: str
+    attempt_id: str
+    hold_id: str
+    fence_epoch: int
+    units: int
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownDisposition:
+    """The version-one, conservative terminal record shared by REV3 streams."""
+
+    attempt_id: str
+    hold_id: str
+    fence_epoch: int
+    cause: UnknownCause
+    stop_state: StopState
+    settlement_state: SettlementState
+    schema_version: Literal[1] = 1
+
+    def __post_init__(self) -> None:
+        """Reject unversioned terminal vocabulary before it reaches SQLite."""
+        if (
+            not isinstance(self.attempt_id, str)
+            or not self.attempt_id
+            or not isinstance(self.hold_id, str)
+            or not self.hold_id
+            or isinstance(self.fence_epoch, bool)
+            or not isinstance(self.fence_epoch, int)
+            or self.fence_epoch < 1
+            or self.cause not in {
+                "crash_before_intent",
+                "crash_before_publish",
+                "crash_before_settle",
+                "critical_delivery_failure",
+                "stop_timeout",
+            }
+            or self.stop_state not in {"none", "requested", "acknowledged"}
+            or self.settlement_state not in {"unsettled", "settled", "irrelevant"}
+            or self.schema_version != 1
+        ):
+            raise ValueError("unknown disposition has invalid version-one fields")
+
+
 class StepLedger:
     """Single-writer SQLite step ledger with lease fencing (T1 foundation; T2-B extends).
 
@@ -68,6 +128,32 @@ class StepLedger:
             " epoch INTEGER NOT NULL CHECK (epoch >= 1),"
             " max_steps INTEGER NOT NULL CHECK (max_steps >= 1),"
             " used INTEGER NOT NULL CHECK (used >= 0 AND used <= max_steps))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS attempt_holds ("
+            " run_id TEXT NOT NULL, attempt_id TEXT NOT NULL,"
+            " hold_id TEXT NOT NULL UNIQUE, epoch INTEGER NOT NULL,"
+            " units INTEGER NOT NULL CHECK (units >= 1),"
+            " state TEXT NOT NULL CHECK (state IN ('held', 'unknown', 'settled', 'released')) ,"
+            " PRIMARY KEY (run_id, attempt_id))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS commit_intents ("
+            " run_id TEXT NOT NULL, attempt_id TEXT NOT NULL, hold_id TEXT NOT NULL,"
+            " epoch INTEGER NOT NULL, result_digest TEXT NOT NULL,"
+            " PRIMARY KEY (run_id, attempt_id))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS batch_reservations ("
+            " run_id TEXT NOT NULL, batch_id TEXT NOT NULL, payload_digest TEXT NOT NULL,"
+            " PRIMARY KEY (run_id, batch_id))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS unknown_dispositions ("
+            " run_id TEXT NOT NULL, attempt_id TEXT NOT NULL, hold_id TEXT NOT NULL,"
+            " epoch INTEGER NOT NULL, cause TEXT NOT NULL, stop_state TEXT NOT NULL,"
+            " settlement_state TEXT NOT NULL, schema_version INTEGER NOT NULL,"
+            " PRIMARY KEY (run_id, attempt_id))"
         )
 
     def close(self) -> None:
@@ -138,6 +224,230 @@ class StepLedger:
         """Return the steps already charged for the run."""
         row = self._db.execute("SELECT used FROM leases WHERE run_id = ?", (run_id,)).fetchone()
         return 0 if row is None else int(row[0])
+
+    def reserve_attempt(
+        self, run_id: str, epoch: int, attempt_id: str, *, units: int
+    ) -> AttemptHold:
+        """Reserve one idempotent attempt hold inside the lease transaction."""
+        self._validate_attempt_inputs(run_id, epoch, attempt_id, units)
+        with self._tx() as db:
+            existing = db.execute(
+                "SELECT hold_id, epoch, units FROM attempt_holds WHERE run_id = ? AND attempt_id = ?",
+                (run_id, attempt_id),
+            ).fetchone()
+            if existing is not None:
+                if int(existing[1]) != epoch or int(existing[2]) != units:
+                    raise ValueError("attempt reservation conflicts with its existing hold")
+                return AttemptHold(run_id, attempt_id, str(existing[0]), epoch, units)
+            row = self._lease_row(db, run_id, epoch)
+            if int(row[2]) + units > int(row[1]):
+                raise ValueError("budget exhausted")
+            hold_id = self._hold_id(run_id, attempt_id)
+            db.execute(
+                "INSERT INTO attempt_holds (run_id, attempt_id, hold_id, epoch, units, state) "
+                "VALUES (?, ?, ?, ?, ?, 'held')",
+                (run_id, attempt_id, hold_id, epoch, units),
+            )
+            db.execute("UPDATE leases SET used = used + ? WHERE run_id = ?", (units, run_id))
+            return AttemptHold(run_id, attempt_id, hold_id, epoch, units)
+
+    def reserve_batch(
+        self,
+        run_id: str,
+        epoch: int,
+        batch_id: str,
+        attempts: tuple[tuple[str, int], ...],
+    ) -> tuple[AttemptHold, ...]:
+        """Reserve all fan-out attempts or none, with payload-stable replay."""
+        if not isinstance(batch_id, str) or not batch_id:
+            raise ValueError("batch_id must be a non-empty string")
+        if not attempts:
+            raise ValueError("a batch needs at least one attempt")
+        if len({attempt_id for attempt_id, _ in attempts}) != len(attempts):
+            raise ValueError("batch attempt ids must be unique")
+        for attempt_id, units in attempts:
+            self._validate_attempt_inputs(run_id, epoch, attempt_id, units)
+        payload = hashlib.sha256(
+            json.dumps(sorted(attempts), separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        with self._tx() as db:
+            existing = db.execute(
+                "SELECT payload_digest FROM batch_reservations WHERE run_id = ? AND batch_id = ?",
+                (run_id, batch_id),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != payload:
+                    raise ValueError("batch_id payload conflicts with existing reservation")
+                return tuple(self._hold_for(db, run_id, attempt_id) for attempt_id, _ in attempts)
+            row = self._lease_row(db, run_id, epoch)
+            total = sum(units for _, units in attempts)
+            if int(row[2]) + total > int(row[1]):
+                raise ValueError("budget exhausted")
+            db.execute(
+                "INSERT INTO batch_reservations (run_id, batch_id, payload_digest) VALUES (?, ?, ?)",
+                (run_id, batch_id, payload),
+            )
+            holds: list[AttemptHold] = []
+            for attempt_id, units in attempts:
+                hold_id = self._hold_id(run_id, attempt_id)
+                db.execute(
+                    "INSERT INTO attempt_holds (run_id, attempt_id, hold_id, epoch, units, state) "
+                    "VALUES (?, ?, ?, ?, ?, 'held')",
+                    (run_id, attempt_id, hold_id, epoch, units),
+                )
+                holds.append(AttemptHold(run_id, attempt_id, hold_id, epoch, units))
+            db.execute("UPDATE leases SET used = used + ? WHERE run_id = ?", (total, run_id))
+            return tuple(holds)
+
+    def prepare_commit(
+        self, run_id: str, attempt_id: str, hold_id: str, epoch: int, result_digest: str
+    ) -> bool:
+        """Durably record an exact commit intent before publication.
+
+        True means this call inserted the intent. False is an identical retry.
+        """
+        if not isinstance(result_digest, str) or not result_digest:
+            raise ValueError("result digest must be a non-empty string")
+        with self._tx() as db:
+            hold = self._hold_for(db, run_id, attempt_id)
+            if hold.hold_id != hold_id or hold.fence_epoch != epoch or self._hold_state(db, run_id, attempt_id) != "held":
+                raise ValueError("commit intent does not match a current held attempt")
+            existing = db.execute(
+                "SELECT hold_id, epoch, result_digest FROM commit_intents WHERE run_id = ? AND attempt_id = ?",
+                (run_id, attempt_id),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != (hold_id, epoch, result_digest):
+                    raise ValueError("commit intent digest conflicts with existing intent")
+                return False
+            db.execute(
+                "INSERT INTO commit_intents (run_id, attempt_id, hold_id, epoch, result_digest) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (run_id, attempt_id, hold_id, epoch, result_digest),
+            )
+            return True
+
+    def settle_commit(self, run_id: str, attempt_id: str, result_digest: str) -> bool:
+        """Settle a prepared commit once; an identical retry is a no-op."""
+        with self._tx() as db:
+            intent = db.execute(
+                "SELECT result_digest FROM commit_intents WHERE run_id = ? AND attempt_id = ?",
+                (run_id, attempt_id),
+            ).fetchone()
+            if intent is None or str(intent[0]) != result_digest:
+                raise ValueError("settlement lacks a matching commit intent")
+            state = self._hold_state(db, run_id, attempt_id)
+            if state == "settled":
+                return False
+            if state != "held":
+                raise ValueError("only a held attempt may settle")
+            db.execute(
+                "UPDATE attempt_holds SET state = 'settled' WHERE run_id = ? AND attempt_id = ?",
+                (run_id, attempt_id),
+            )
+            return True
+
+    def mark_unknown(self, run_id: str, disposition: UnknownDisposition) -> None:
+        """Persist an uncertain attempt without releasing its reserved units."""
+        with self._tx() as db:
+            hold = self._hold_for(db, run_id, disposition.attempt_id)
+            if hold.hold_id != disposition.hold_id or hold.fence_epoch != disposition.fence_epoch:
+                raise ValueError("unknown disposition does not match its hold")
+            existing = db.execute(
+                "SELECT hold_id, epoch, cause, stop_state, settlement_state, schema_version FROM unknown_dispositions "
+                "WHERE run_id = ? AND attempt_id = ?",
+                (run_id, disposition.attempt_id),
+            ).fetchone()
+            expected = (
+                disposition.hold_id,
+                disposition.fence_epoch,
+                disposition.cause,
+                disposition.stop_state,
+                disposition.settlement_state,
+                disposition.schema_version,
+            )
+            if existing is not None:
+                if tuple(existing) != expected:
+                    raise ValueError("unknown disposition conflicts with existing record")
+                return
+            db.execute(
+                "INSERT INTO unknown_dispositions (run_id, attempt_id, hold_id, epoch, cause, stop_state, settlement_state, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (run_id, disposition.attempt_id, *expected),
+            )
+            db.execute(
+                "UPDATE attempt_holds SET state = 'unknown' WHERE run_id = ? AND attempt_id = ?",
+                (run_id, disposition.attempt_id),
+            )
+
+    def hold_state(self, run_id: str, attempt_id: str) -> str | None:
+        """Return an attempt's durable state, if it exists."""
+        row = self._db.execute(
+            "SELECT state FROM attempt_holds WHERE run_id = ? AND attempt_id = ?",
+            (run_id, attempt_id),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def hold(self, run_id: str, attempt_id: str) -> AttemptHold:
+        """Return one durable hold for an external lifecycle transition."""
+        return self._hold_for(self._db, run_id, attempt_id)
+
+    def release_attempt(self, run_id: str, attempt_id: str, epoch: int) -> None:
+        """Reject direct unknown release until a verified adjustment-grant path exists."""
+        with self._tx() as db:
+            hold = self._hold_for(db, run_id, attempt_id)
+            if hold.fence_epoch != epoch:
+                raise LeaseFenced(run_id)
+            if self._hold_state(db, run_id, attempt_id) == "unknown":
+                raise ValueError("unknown holds require an authenticated adjustment grant")
+            raise ValueError("direct release is not an approved accounting transition")
+
+    @staticmethod
+    def _hold_id(run_id: str, attempt_id: str) -> str:
+        """Build a deterministic opaque hold identity without a random retry path."""
+        payload = f"{run_id}\0{attempt_id}".encode("utf-8")
+        return f"hold:{hashlib.sha256(payload).hexdigest()}"
+
+    @staticmethod
+    def _validate_attempt_inputs(run_id: str, epoch: int, attempt_id: str, units: int) -> None:
+        """Validate the common deterministic hold identity and charge fields."""
+        if not isinstance(run_id, str) or not run_id or not isinstance(attempt_id, str) or not attempt_id:
+            raise ValueError("run_id and attempt_id must be non-empty strings")
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+            raise ValueError("epoch must be a positive integer")
+        if isinstance(units, bool) or not isinstance(units, int) or units < 1:
+            raise ValueError("units must be a positive integer")
+
+    @staticmethod
+    def _lease_row(db: sqlite3.Connection, run_id: str, epoch: int) -> tuple[int, int, int]:
+        """Return the current lease row or fence a stale/unknown holder."""
+        row = db.execute(
+            "SELECT epoch, max_steps, used FROM leases WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None or int(row[0]) != epoch:
+            raise LeaseFenced(run_id)
+        return int(row[0]), int(row[1]), int(row[2])
+
+    @staticmethod
+    def _hold_for(db: sqlite3.Connection, run_id: str, attempt_id: str) -> AttemptHold:
+        """Read one immutable hold or refuse an unprepared lifecycle transition."""
+        row = db.execute(
+            "SELECT hold_id, epoch, units FROM attempt_holds WHERE run_id = ? AND attempt_id = ?",
+            (run_id, attempt_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("attempt has no durable hold")
+        return AttemptHold(run_id, attempt_id, str(row[0]), int(row[1]), int(row[2]))
+
+    @staticmethod
+    def _hold_state(db: sqlite3.Connection, run_id: str, attempt_id: str) -> str:
+        """Read the current durable hold state after existence is established."""
+        row = db.execute(
+            "SELECT state FROM attempt_holds WHERE run_id = ? AND attempt_id = ?",
+            (run_id, attempt_id),
+        ).fetchone()
+        assert row is not None
+        return str(row[0])
 
 
 class _Immediate:
@@ -224,7 +534,21 @@ class AdmissionGate:
         early = self._common()
         if early is not None:
             return early
-        if request.boundary in ("node", "fanout"):
+        if request.boundary == "node":
+            try:
+                self.ledger.reserve_attempt(
+                    self.run_id,
+                    self.lease_epoch,
+                    self._attempt_id(request.boundary, request.nodes, request.steps, request.source),
+                    units=len(request.nodes),
+                )
+            except LeaseFenced:
+                return GateDecision.refuse("authority.lease_fenced")
+            except ValueError as error:
+                if str(error) == "budget exhausted":
+                    return GateDecision.refuse("budget.steps_exhausted")
+                return GateDecision.refuse("ledger.attempt_invalid")
+        elif request.boundary == "fanout":
             try:
                 fits = self.ledger.reserve(self.run_id, self.lease_epoch, len(request.nodes))
             except LeaseFenced:
@@ -234,9 +558,38 @@ class AdmissionGate:
         return GateDecision.allow()
 
     async def before_commit(self, request: CommitRequest) -> GateDecision:
-        """Re-check authority, stop and delivery before the commit publishes."""
+        """Prepare a durable node intent before Core synchronously publishes it."""
         early = self._common()
-        return early if early is not None else GateDecision.allow()
+        if early is not None:
+            return early
+        if request.boundary != "node":
+            return GateDecision.allow()
+        if not isinstance(request.result_digest, str) or not request.result_digest:
+            return GateDecision.refuse("ledger.commit_digest_missing")
+        attempt_id = self._attempt_id(request.boundary, request.nodes, request.steps, request.source)
+        try:
+            hold = self.ledger.hold(self.run_id, attempt_id)
+            self.ledger.prepare_commit(
+                self.run_id,
+                attempt_id,
+                hold.hold_id,
+                self.lease_epoch,
+                request.result_digest,
+            )
+        except LeaseFenced:
+            return GateDecision.refuse("authority.lease_fenced")
+        except ValueError:
+            return GateDecision.refuse("ledger.commit_unprepared")
+        return GateDecision.allow()
+
+    async def after_commit(self, request: CommitRequest) -> None:
+        """Settle the matching node hold after Core has published its delta."""
+        if request.boundary != "node":
+            return
+        if not isinstance(request.result_digest, str) or not request.result_digest:
+            raise AdmissionRefused("ledger.commit_digest_missing")
+        attempt_id = self._attempt_id(request.boundary, request.nodes, request.steps, request.source)
+        self.ledger.settle_commit(self.run_id, attempt_id, request.result_digest)
 
     # Fixed order: authority and lease, stop, delivery ---------------------------
 
@@ -276,3 +629,13 @@ class AdmissionGate:
         except LeaseFenced:
             return "authority.lease_fenced"
         return None
+
+    @staticmethod
+    def _attempt_id(
+        boundary: str, nodes: tuple[str, ...], steps: int, source: str | None
+    ) -> str:
+        """Derive a deterministic per-run attempt key from the neutral Core request."""
+        parts = [boundary, *nodes, str(steps)]
+        if source is not None:
+            parts.append(source)
+        return "::".join(parts)
