@@ -106,3 +106,62 @@ def test_ledger_reports_the_lease_limit(tmp_path):
     assert ledger.limit("run-1") is None
     ledger.open_lease("run-1", max_steps=4)
     assert ledger.limit("run-1") == 4
+
+
+@pytest.mark.asyncio
+async def test_admission_gate_refuses_when_bounded_observer_unhealthy(tmp_path):
+    """AdmissionGate fails closed when BoundedObserver marks delivery unhealthy."""
+    from orama.graph.admission import (
+        AdmissionContext,
+        AdmissionProviders,
+        admit_artifact,
+    )
+    from orama.graph.bounded_observer import BoundedObserver
+    from orama.graph.execution_guard import AdmissionGate, StepLedger, StopSignal
+    from perpetua_core.graph.engine import GraphEvent, GraphObservation
+    from perpetua_core.graph.gate import DispatchRequest
+    from perpetua_core.state import PerpetuaState
+    from tests.test_admission_decision import binding, context, providers
+
+    p, clock = providers()
+    b = binding()
+    ctx = context(run_id="run-1")
+    decision = admit_artifact(b, ctx, p, clock=clock, max_steps=10)
+
+    ledger = StepLedger(tmp_path / "l.sqlite3")
+    epoch = ledger.open_lease("run-1", max_steps=10)
+
+    observer = BoundedObserver(run_id="run-1")
+
+    def broken_sink(event):
+        raise RuntimeError("critical sink failure")
+
+    observer.register_sink("failing", broken_sink, critical=True)
+
+    obs = GraphObservation(
+        event=GraphEvent(kind="node.end", node="work", steps=1),
+        state=PerpetuaState(session_id="run-1"),
+        delta={"ok": False},
+    )
+    with pytest.raises(RuntimeError):
+        await observer.on_observation(obs)
+
+    assert not observer.healthy()
+
+    gate = AdmissionGate(
+        decision=decision,
+        binding=b,
+        providers=p,
+        ledger=ledger,
+        run_id="run-1",
+        lease_epoch=epoch,
+        stop=StopSignal(),
+        clock=clock,
+        delivery=observer,
+    )
+
+    req = DispatchRequest(boundary="node", nodes=("work",), steps=0, source=None)
+    dec = await gate.before_dispatch(req)
+    assert dec.verdict == "refuse"
+    assert dec.reason == "delivery.unhealthy"
+
