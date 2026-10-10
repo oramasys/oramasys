@@ -87,4 +87,13 @@ jobs:
           else
             unset ORAMA_REQUIRE_CORE_R3
           fi
-          python -m pytest -q src/tests tests/oracles
+          python -m pytest -q src/tests tests/oracles --junitxml=cell-results.xml
+      - name: Enforce the manifest result gate
+        run: python scripts/verify_cell_results.py requirements/compatibility-manifest.json cell-results.xml "${{ matrix.profile }}" "${{ matrix.python-version }}"
+      - name: Retain cell receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cell-receipt-${{ matrix.profile }}-${{ matrix.python-version }}
+          path: cell-results.xml
+          if-no-files-found: warn

@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import itertools
 import re
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from typing import Any
 
-SCHEMA = 1
+SCHEMA = 2
 PROFILES = ("production", "policy-r3", "core-r3")
 PYTHONS = ("3.11", "3.12")
 PRODUCER_REPOSITORY = "diazMelgarejo/orama-system"
-CELL_KEYS = frozenset({"profile", "python", "core_file", "core_sha", "require_r3"})
+CELL_KEYS = frozenset({"profile", "python", "core_file", "core_sha", "require_r3",
+                       "min_passed", "max_skipped"})
 TOP_KEYS = frozenset({"schema", "producer_registry", "cells"})
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -60,6 +62,9 @@ def validate_manifest(
         _need(key not in seen, f"duplicate cell {key}")
         seen.add(key)
         _need(isinstance(cell["require_r3"], bool), "require_r3 must be a boolean")
+        for field in ("min_passed", "max_skipped"):
+            _need(type(cell[field]) is int and cell[field] >= 0, f"{key}: {field} must be an integer")
+        _need(cell["min_passed"] > 0, f"{key}: min_passed must be positive")
         sha = cell["core_sha"]
         _need(isinstance(sha, str) and FULL_SHA.fullmatch(sha) is not None,
               f"{key}: core_sha must be a full commit SHA")
@@ -92,5 +97,24 @@ def validate_workflow(manifest: Mapping[str, Any], text: str) -> None:
     actual = sorted((c["python"], c["profile"], c["core_file"], c["require_r3"])
                     for c in workflow_cells(text))
     _need(actual == expected, f"workflow matrix differs from manifest:\n{actual}\n{expected}")
-    _need(len(re.findall(r"python-version:", text)) == len(actual) + text.count("matrix.python-version"),
-          "workflow has matrix entries the manifest parser did not read")
+    entries = re.findall(r"^\s*-\s*python-version:", text, flags=re.MULTILINE)
+    _need(len(entries) == len(actual), "workflow has matrix entries the manifest parser did not read")
+
+
+def check_cell_results(junit_xml: str, cell: Mapping[str, Any]) -> None:
+    """Reject a cell whose JUnit report shows failures, too few passes, or extra skips."""
+    try:
+        root = ET.fromstring(junit_xml)
+    except ET.ParseError as error:
+        raise ManifestError("cell result is not valid JUnit XML") from error
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    _need(bool(suites), "cell result contains no testsuite")
+    totals = {name: sum(int(suite.get(name, "0")) for suite in suites)
+              for name in ("tests", "failures", "errors", "skipped")}
+    passed = totals["tests"] - totals["failures"] - totals["errors"] - totals["skipped"]
+    label = f"{cell['profile']} on {cell['python']}"
+    _need(totals["failures"] == 0 and totals["errors"] == 0, f"{label}: failures or errors reported")
+    _need(passed >= cell["min_passed"],
+          f"{label}: {passed} passed is below the floor of {cell['min_passed']}")
+    _need(totals["skipped"] <= cell["max_skipped"],
+          f"{label}: {totals['skipped']} skipped exceeds the allowance of {cell['max_skipped']}")

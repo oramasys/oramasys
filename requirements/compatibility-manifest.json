@@ -1,15 +1,15 @@
 {
-  "schema": 1,
+  "schema": 2,
   "producer_registry": {
     "repository": "diazMelgarejo/orama-system",
     "ref": "28672bf366e5a4a6917f2cb9236eaf696e70c97b"
   },
   "cells": [
-    {"profile": "production", "python": "3.11", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "4d217f6b9e94e36554a9427198b8c2c4b7febc47", "require_r3": true},
-    {"profile": "production", "python": "3.12", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "4d217f6b9e94e36554a9427198b8c2c4b7febc47", "require_r3": true},
-    {"profile": "policy-r3", "python": "3.11", "core_file": "requirements/compatibility-core-policy-r3.txt", "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a", "require_r3": false},
-    {"profile": "policy-r3", "python": "3.12", "core_file": "requirements/compatibility-core-policy-r3.txt", "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a", "require_r3": false},
-    {"profile": "core-r3", "python": "3.11", "core_file": "requirements/compatibility-core-candidate.txt", "core_sha": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68", "require_r3": true},
-    {"profile": "core-r3", "python": "3.12", "core_file": "requirements/compatibility-core-candidate.txt", "core_sha": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68", "require_r3": true}
+    {"profile": "production", "python": "3.11", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "4d217f6b9e94e36554a9427198b8c2c4b7febc47", "require_r3": true, "min_passed": 360, "max_skipped": 1},
+    {"profile": "production", "python": "3.12", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "4d217f6b9e94e36554a9427198b8c2c4b7febc47", "require_r3": true, "min_passed": 360, "max_skipped": 1},
+    {"profile": "policy-r3", "python": "3.11", "core_file": "requirements/compatibility-core-policy-r3.txt", "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a", "require_r3": false, "min_passed": 345, "max_skipped": 5},
+    {"profile": "policy-r3", "python": "3.12", "core_file": "requirements/compatibility-core-policy-r3.txt", "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a", "require_r3": false, "min_passed": 345, "max_skipped": 5},
+    {"profile": "core-r3", "python": "3.11", "core_file": "requirements/compatibility-core-candidate.txt", "core_sha": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68", "require_r3": true, "min_passed": 360, "max_skipped": 1},
+    {"profile": "core-r3", "python": "3.12", "core_file": "requirements/compatibility-core-candidate.txt", "core_sha": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68", "require_r3": true, "min_passed": 360, "max_skipped": 1}
   ]
 }
