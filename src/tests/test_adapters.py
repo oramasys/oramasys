@@ -23,9 +23,17 @@ from orama.graph.admission import (
 )
 from orama.graph.adapters import AgateAdapter, PhylaxAdapter, TelosAdapter
 
-agate = pytest.importorskip("agate", reason="real Agate candidate not installed")
-phylax = pytest.importorskip("phylax", reason="real Phylax candidate not installed")
+# Check the exact submodule each fix landed in, not just the top-level
+# package name: a dev machine can have an *older* checkout of agate/phylax
+# already on sys.path for unrelated local-development convenience, in which
+# case `importorskip("agate")` alone would wrongly "succeed" against that
+# stale code and then hard-fail the whole file's collection on the first
+# genuinely new symbol. Guarding on the exact new submodule turns a stale
+# install into a clean skip instead of a collection error.
+pytest.importorskip("agate.evidence", reason="real Agate candidate (with FitEvidence) not installed")
+pytest.importorskip("phylax.contracts", reason="real Phylax candidate not installed")
 telos = pytest.importorskip("telos", reason="real Telos candidate not installed")
+pytest.importorskip("telos.authorizer", reason="real Telos candidate not installed")
 
 from agate import HardwareObservation, load_policy, load_profile_store  # noqa: E402
 from agate.evidence import FitEvidence  # noqa: E402
