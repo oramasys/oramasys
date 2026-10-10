@@ -21,6 +21,17 @@ from tests.test_ownership_registry import CORE_PINS
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "verify_production_install.py"
 SHA = CORE_PINS["production"]
+
+
+def _has_r3() -> bool:
+    from perpetua_core.graph import spec
+    return hasattr(spec, "ReducerSpec")
+
+
+if os.environ.get("ORAMA_REQUIRE_CORE_R3"):
+    assert _has_r3(), "the production verifier needs a Core with reducers and joins"
+needs_r3_core = pytest.mark.skipif(
+    not _has_r3(), reason="historical Core predates the R3 symbols the verifier requires")
 CORE_URL = "https://github.com/oramasys/perpetua-core.git"
 
 
@@ -77,6 +88,7 @@ def run(module, tmp_path: Path, *, core_direct=None, orama_direct="absent",
         import_module=import_module or __import__("importlib").import_module)
 
 
+@needs_r3_core
 def test_accepts_a_pinned_non_editable_install(tmp_path: Path) -> None:
     run(load_script(), tmp_path)
 
@@ -127,6 +139,7 @@ def test_rejects_a_malformed_expected_sha(tmp_path: Path) -> None:
             run(module, tmp_path, expected=bad)
 
 
+@needs_r3_core
 def test_rejects_a_missing_public_symbol(tmp_path: Path) -> None:
     module = load_script()
     real = __import__("importlib").import_module
@@ -141,6 +154,7 @@ def test_rejects_a_missing_public_symbol(tmp_path: Path) -> None:
         run(module, tmp_path, import_module=without_join_spec)
 
 
+@needs_r3_core
 def test_rejects_a_graph_that_cannot_execute(tmp_path: Path) -> None:
     module = load_script()
     real = __import__("importlib").import_module
