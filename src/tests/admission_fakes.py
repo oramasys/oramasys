@@ -110,6 +110,7 @@ class FakeTelos:
                 reason_code="allowed" if self.allow else "unknown_purpose",
                 decision_ref=f"telos-{purpose}",
                 expires_at=None if self.no_expiry else self.clock.now + timedelta(seconds=self.ttl),
+                purpose=purpose,
             )
             for purpose in context.endpoint_purposes
         )

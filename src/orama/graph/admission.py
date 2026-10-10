@@ -255,6 +255,7 @@ class OwnerDecision:
     authority_epoch: int | None = None
     evidence_class: EvidenceClass = "observed"
     overridable: bool = False
+    purpose: str | None = None  # Telos only: the declared endpoint purpose this covers
 
 
 class PhylaxAdmission(Protocol):
@@ -440,6 +441,10 @@ def admit_artifact(
                 return result("refuse", "admission.decision_without_expiry")
             if decision.expires_at <= now:
                 return result("refuse", "admission.expired")
+        if owner == "telos" and sorted((d.purpose or "") for d in decisions) != sorted(context.endpoint_purposes):
+            # Every declared purpose needs exactly one Telos decision bound to it: an empty,
+            # partial, duplicated or mislabelled result must never reach allow.
+            return result("refuse", "admission.telos_incomplete")
     if not any(d.owner == "phylax" and d.authority_epoch is not None for d in collected):
         return result("refuse", "admission.authority_epoch_missing")
     return result("allow", "admission.allowed")

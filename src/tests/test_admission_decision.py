@@ -372,3 +372,83 @@ def test_requirements_without_phylax_refuse():
     )
     assert decision.outcome == "refuse"
     assert decision.reason_code == "admission.requirements_mismatch"
+
+
+def _telos_returning(clock, build):
+    """Test helper: a Telos provider whose decisions are built by ``build(context)``."""
+
+    class Telos:
+        """Test helper Telos returning whatever ``build`` produces."""
+
+        def authorize(self, ctx):
+            """Return the crafted decisions."""
+            return build(ctx)
+
+        def is_current(self, decision):
+            """Report every decision as current; admission-time completeness is under test."""
+            return True
+
+    return Telos()
+
+
+def _telos_decision(clock, purpose, ref=None):
+    """Test helper: one allowed, unexpired Telos decision bound to ``purpose``."""
+    from datetime import timedelta
+
+    from orama.graph.admission import OwnerDecision
+
+    return OwnerDecision(
+        owner="telos", allowed=True, reason_code="allowed", decision_ref=ref or f"telos-{purpose}",
+        expires_at=clock.now + timedelta(seconds=60), purpose=purpose,
+    )
+
+
+def test_required_telos_returning_no_decision_refuses():
+    """An empty Telos result for declared purposes must not allow."""
+    clock = FakeClock()
+    provs, _ = providers(clock, telos=_telos_returning(clock, lambda ctx: ()))
+    decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
+    assert decision.outcome == "refuse"
+    assert decision.reason_code == "admission.telos_incomplete"
+
+
+def test_telos_decisions_must_cover_every_declared_purpose():
+    """A partial Telos result (one of two purposes) must not allow."""
+    clock = FakeClock()
+    provs, _ = providers(
+        clock, telos=_telos_returning(clock, lambda ctx: (_telos_decision(clock, "model_egress"),))
+    )
+    decision = admit_artifact(
+        binding(), context(endpoint_purposes=("model_egress", "telemetry")), provs,
+        clock=clock, max_steps=5,
+    )
+    assert decision.outcome == "refuse"
+    assert decision.reason_code == "admission.telos_incomplete"
+
+
+def test_telos_decision_for_another_purpose_refuses():
+    """A decision bound to a purpose the context never declared cannot stand in."""
+    clock = FakeClock()
+    provs, _ = providers(
+        clock, telos=_telos_returning(clock, lambda ctx: (_telos_decision(clock, "telemetry"),))
+    )
+    decision = admit_artifact(binding(), context(), provs, clock=clock, max_steps=5)
+    assert decision.outcome == "refuse"
+    assert decision.reason_code == "admission.telos_incomplete"
+
+
+def test_duplicate_telos_decision_cannot_cover_two_purposes():
+    """The same purpose twice does not satisfy two declared purposes."""
+    clock = FakeClock()
+    provs, _ = providers(
+        clock,
+        telos=_telos_returning(
+            clock, lambda ctx: (_telos_decision(clock, "model_egress"), _telos_decision(clock, "model_egress", "x"))
+        ),
+    )
+    decision = admit_artifact(
+        binding(), context(endpoint_purposes=("model_egress", "telemetry")), provs,
+        clock=clock, max_steps=5,
+    )
+    assert decision.outcome == "refuse"
+    assert decision.reason_code == "admission.telos_incomplete"

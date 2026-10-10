@@ -146,6 +146,7 @@ class TelosAdapter:
                     authority_epoch=real_decision.authority_epoch,
                     evidence_class="observed",
                     overridable=False,
+                    purpose=purpose,
                 )
             )
         return tuple(decisions)
