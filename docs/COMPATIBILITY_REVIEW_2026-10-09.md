@@ -58,6 +58,23 @@ Budget/effect policy files are lintable intent; they are not an admission or
 dedupe engine. See the [active decisions](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/EXECUTION-REVISION-4.md)
 and [oracle reproduction](../tests/oracles/README.md).
 
+## 2026-10-10 P0 single-pin invariant
+
+`src/tests/test_compatibility_pins.py` makes each dependency edge name one immutable
+revision. Both workflows must check out the same full-SHA Orama registry revision; each
+oracle lane file must equal its registry profile's Core pin; and the package dependency,
+production lane and clean-install check must agree on the production Core pin. A branch
+name, a second pin table or a partial update fails before qualification evidence is
+recorded.
+
+The producer checkout stays at Orama `8287e40`, the registry-bearing #394 candidate.
+Later #394 commits change documentation only, so the registry bytes this repository
+qualifies against are unchanged; repin only to #394's actual merge SHA. The successor
+evidence receipt in Orama
+(`docs/v2/references/r4-safety-compatibility-platform-2026-10-10/P0-SUCCESSOR-EVIDENCE-RECEIPT-2026-10-10.md`)
+records the heads, pins and digests. P0 remains unqualified until the six-cell manifest
+and the clean, non-editable install verifier exist and pass.
+
 ## Budget stop and portable gap errors (follow-up)
 
 - **Budget exhaustion now stops the run.** `as_node` returned an error delta
