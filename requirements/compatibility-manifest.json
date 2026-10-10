@@ -2,7 +2,7 @@
   "schema": 1,
   "producer_registry": {
     "repository": "diazMelgarejo/orama-system",
-    "ref": "8287e40ee99186e8e3937aab8f892f517147d4e7"
+    "ref": "28672bf366e5a4a6917f2cb9236eaf696e70c97b"
   },
   "cells": [
     {"profile": "production", "python": "3.11", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "4d217f6b9e94e36554a9427198b8c2c4b7febc47", "require_r3": true},
