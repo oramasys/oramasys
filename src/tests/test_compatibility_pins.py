@@ -99,6 +99,17 @@ def test_ci_repeats_only_the_production_core_and_the_producer_revision() -> None
     """Every full SHA in ci.yml is either the production Core pin or the producer ref."""
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     allowed = {CORE_PINS["production"], *producer_refs()["ci.yml"]}
-    assert set(FULL_SHA.findall(ci)) == allowed
+    # Action pins are checked by test_every_workflow_action_is_pinned_to_a_full_commit.
+    without_actions = "\n".join(ln for ln in ci.splitlines() if "uses:" not in ln)
+    assert set(FULL_SHA.findall(without_actions)) == allowed
     assert CORE_PINS["production"] in re.findall(
         r"verify_production_install\.py\"\s+([0-9a-f]{40})", ci)
+
+
+def test_every_workflow_action_is_pinned_to_a_full_commit() -> None:
+    """Third-party actions must name a full commit SHA, never a movable tag."""
+    for wf in sorted(WORKFLOWS.glob("*.yml")):
+        for line in wf.read_text(encoding="utf-8").splitlines():
+            m = re.search(r"uses:\s*(\S+)", line)
+            if m and not m.group(1).startswith("./"):
+                assert re.search(r"@[0-9a-f]{40}$", m.group(1)), f"{wf.name}: {line.strip()}"
