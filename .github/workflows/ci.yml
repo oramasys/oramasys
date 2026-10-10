@@ -21,17 +21,17 @@ jobs:
       ORAMA_REQUIRE_CORE_R3: "1"
       ORAMA_REQUIRE_CLEAN_INSTALL: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
       - name: Check out immutable canonical registry profiles
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: diazMelgarejo/orama-system
           ref: 28672bf366e5a4a6917f2cb9236eaf696e70c97b
           path: docs-candidate
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Clean production install
