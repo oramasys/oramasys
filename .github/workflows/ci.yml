@@ -19,6 +19,7 @@ jobs:
       ORAMA_DOCS_V2_REGISTRY: docs-candidate/docs/v2/references/loop-graph-compatibility-2026-10-09/ownership-registry.json
       ORAMA_REGISTRY_PROFILE: production
       ORAMA_REQUIRE_CORE_R3: "1"
+      ORAMA_REQUIRE_CLEAN_INSTALL: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,6 +39,9 @@ jobs:
           python -m pip install --no-cache-dir '.[dev]'
           python -m pip check
           python -m pip freeze | grep 'perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@4d217f6b9e94e36554a9427198b8c2c4b7febc47'
+      - name: Verify clean non-editable production install from outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: python -I "$GITHUB_WORKSPACE/scripts/verify_production_install.py" 4d217f6b9e94e36554a9427198b8c2c4b7febc47
       - name: Enforce Telos network authority
         run: python scripts/check_telos_network_authority.py src/orama
       - name: Test with coverage

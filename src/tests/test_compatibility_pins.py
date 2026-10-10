@@ -93,3 +93,12 @@ def test_reproduction_recipe_pairs_each_lane_sha_with_its_profile() -> None:
         assert shas[0] == CORE_PINS[profiles[0]], f"SHA does not match {profiles[0]}"
         seen[profiles[0]] = shas[0]
     assert set(seen) == set(LANE_FILES), f"recipe must cover every lane, got {sorted(seen)}"
+
+
+def test_ci_repeats_only_the_production_core_and_the_producer_revision() -> None:
+    """Every full SHA in ci.yml is either the production Core pin or the producer ref."""
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    allowed = {CORE_PINS["production"], *producer_refs()["ci.yml"]}
+    assert set(FULL_SHA.findall(ci)) == allowed
+    assert CORE_PINS["production"] in re.findall(
+        r"verify_production_install\.py\"\s+([0-9a-f]{40})", ci)
