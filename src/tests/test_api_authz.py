@@ -14,7 +14,7 @@ from orama.api.authz import (
     manifest_keys,
     resolve_bind_host,
 )
-from orama.api.server import app
+from orama.api.server import app, create_app
 
 _RUN_PAYLOAD = {
     "session_id": "test-session",
@@ -22,6 +22,14 @@ _RUN_PAYLOAD = {
     "task_type": "reasoning",
     "target_tier": "shared",
 }
+
+
+class _DirectRunner:
+    """Test-only runner used where this file verifies authorization, not admission."""
+
+    async def invoke(self, graph: object, state: object) -> object:
+        """Run the supplied graph explicitly for an authorization-only test."""
+        return await graph.ainvoke(state)
 
 
 @pytest.fixture
@@ -32,7 +40,7 @@ def strong_token() -> str:
 async def test_health_endpoint_public_without_auth(monkeypatch):
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=create_app(runner=_DirectRunner())), base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
@@ -66,7 +74,7 @@ async def test_run_rejects_wrong_bearer(monkeypatch, strong_token):
     assert resp.status_code == 401
 
 
-async def test_run_with_valid_bearer_ok(monkeypatch, strong_token):
+async def test_run_with_valid_bearer_refuses_without_admission_runner(monkeypatch, strong_token) -> None:
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -75,11 +83,8 @@ async def test_run_with_valid_bearer_ok(monkeypatch, strong_token):
             json=_RUN_PAYLOAD,
             headers={"Authorization": f"Bearer {strong_token}"},
         )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["session_id"] == "test-session"
-    assert body["status"] == "done"
-    assert "nodes_visited" in body
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "admission.enforcement_unavailable"
 
 
 async def test_run_insecure_dev_loopback_skips_auth(monkeypatch):
@@ -94,7 +99,7 @@ async def test_run_insecure_dev_loopback_skips_auth(monkeypatch):
     # The symbolic "http://test" host used elsewhere in this file is neither
     # loopback nor representative of a real loopback-bound dev server, so it
     # would no longer exercise the "genuinely loopback" case this test names.
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+    async with AsyncClient(transport=ASGITransport(app=create_app(runner=_DirectRunner())), base_url="http://127.0.0.1") as client:
         resp = await client.post("/run", json=_RUN_PAYLOAD)
     assert resp.status_code == 200
 
