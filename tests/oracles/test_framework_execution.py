@@ -33,6 +33,19 @@ class Input(BaseModel):
     value: int
 
 
+class DirectRunner:
+    """Oracle-only runner: the framework-compatibility cells exercise real Core directly.
+
+    Production wiring supplies an admission-aware runner; these offline cells only prove
+    the upstream frameworks can call the import-free tool, so they bypass admission on
+    purpose and never ship (this directory is not part of the wheel).
+    """
+
+    async def invoke(self, graph, state):
+        """Run the graph on Core's own scheduler with no gate."""
+        return await graph.ainvoke(state)
+
+
 def tool(calls=None):
     """Expose one real Core graph as a framework-free callable."""
     def double(state):
@@ -42,6 +55,7 @@ def tool(calls=None):
         return {"scratchpad": {"answer": state.scratchpad["value"] * 2}}
     graph = MiniGraph().add_node("double", double).add_edge(START, "double").add_edge("double", END)
     return graph_tool("double_graph", graph, input_model=Input, output_key="answer",
+                      runner=DirectRunner(),
                       state_from=lambda payload: PerpetuaState(
                           session_id="oracle", scratchpad={"value": payload.value}))
 
