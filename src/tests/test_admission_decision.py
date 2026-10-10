@@ -314,3 +314,31 @@ def test_shipped_package_never_references_test_fakes():
         text = path.read_text(encoding="utf-8")
         assert "admission_fakes" not in text, path
         assert "from tests" not in text and "import tests" not in text, path
+
+
+def test_endpoint_purposes_without_telos_requirement_refuse():
+    """Requirements that skip Telos while the context declares endpoint purposes would
+    let endpoint use go ahead with no Telos decision to re-check; refuse instead."""
+    from orama.graph.admission import AdmissionRequirements
+
+    clock = FakeClock()
+    provs = AdmissionProviders(phylax=FakePhylax(clock), agate=FakeAgate(clock), telos=FakeTelos(clock))
+    decision = admit_artifact(
+        binding(), context(endpoint_purposes=("model_egress",)), provs, clock=clock, max_steps=1,
+        requirements=AdmissionRequirements(phylax=True, agate=True, telos=False),
+    )
+    assert decision.outcome == "refuse"
+    assert decision.reason_code == "admission.requirements_mismatch"
+
+
+def test_requirements_without_phylax_refuse():
+    from orama.graph.admission import AdmissionRequirements
+
+    clock = FakeClock()
+    provs = AdmissionProviders(phylax=FakePhylax(clock), agate=None, telos=None)
+    decision = admit_artifact(
+        binding(), context(endpoint_purposes=()), provs, clock=clock, max_steps=1,
+        requirements=AdmissionRequirements(phylax=False, agate=False, telos=False),
+    )
+    assert decision.outcome == "refuse"
+    assert decision.reason_code == "admission.requirements_mismatch"

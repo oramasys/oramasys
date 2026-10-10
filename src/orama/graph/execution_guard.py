@@ -124,6 +124,11 @@ class StepLedger:
             db.execute("UPDATE leases SET used = used + ? WHERE run_id = ?", (steps, run_id))
             return True
 
+    def limit(self, run_id: str) -> int | None:
+        """The stored step limit for ``run_id``'s lease, or None if there is no lease."""
+        row = self._db.execute("SELECT max_steps FROM leases WHERE run_id = ?", (run_id,)).fetchone()
+        return None if row is None else int(row[0])
+
     def used(self, run_id: str) -> int:
         row = self._db.execute("SELECT used FROM leases WHERE run_id = ?", (run_id,)).fetchone()
         return 0 if row is None else int(row[0])
@@ -190,6 +195,11 @@ class AdmissionGate:
             raise AdmissionRefused("gate.core_seam_unavailable")
         if self.decision.outcome != "allow":
             raise AdmissionRefused("gate.decision_not_allowed")
+        # The ledger must enforce no more than admission granted. A missing lease, or one
+        # opened (or taken over) with a wider limit, is refused at construction.
+        limit = self.ledger.limit(self.run_id)
+        if limit is None or limit > self.decision.max_steps:
+            raise AdmissionRefused("gate.ledger_bound_exceeds_admission")
 
     # Core DispatchGate protocol -------------------------------------------------
 

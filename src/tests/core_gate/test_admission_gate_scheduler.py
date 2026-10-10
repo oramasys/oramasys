@@ -221,3 +221,24 @@ def test_gate_refuses_construction_from_a_non_allow_decision(tmp_path):
         )
 
 
+
+
+def test_gate_refuses_a_lease_wider_than_the_admitted_bound(tmp_path):
+    from orama.graph.admission import AdmissionRefused
+
+    gate, *_ = make(tmp_path, max_steps=3)
+    wider = StepLedger(tmp_path / "wider.sqlite3")
+    epoch = wider.open_lease("run-1", max_steps=50)
+    with pytest.raises(AdmissionRefused, match="ledger_bound_exceeds_admission"):
+        AdmissionGate(decision=gate.decision, binding=gate.binding, providers=gate.providers,
+                      ledger=wider, run_id="run-1", lease_epoch=epoch, stop=StopSignal(), clock=gate.clock)
+
+
+def test_gate_refuses_a_run_with_no_lease(tmp_path):
+    from orama.graph.admission import AdmissionRefused
+
+    gate, *_ = make(tmp_path)
+    with pytest.raises(AdmissionRefused, match="ledger_bound_exceeds_admission"):
+        AdmissionGate(decision=gate.decision, binding=gate.binding, providers=gate.providers,
+                      ledger=StepLedger(tmp_path / "empty.sqlite3"), run_id="run-1", lease_epoch=1,
+                      stop=StopSignal(), clock=gate.clock)

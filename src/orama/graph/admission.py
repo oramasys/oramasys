@@ -377,6 +377,11 @@ def admit_artifact(
         return result("refuse", "admission.agate_unavailable")
     if requirements.telos and providers.telos is None:
         return result("refuse", "admission.telos_unavailable")
+    # Requirements must agree with the context: Phylax is always required, and declared
+    # endpoint purposes need Telos, or endpoint use would proceed with no Telos
+    # decision for the gate to re-check (fail closed, never open).
+    if not requirements.phylax or (context.endpoint_purposes and not requirements.telos):
+        return result("refuse", "admission.requirements_mismatch")
 
     calls: list[tuple[Owner, Callable[[], Any]]] = [
         ("phylax", lambda: (providers.phylax.admit(binding, context),)),  # type: ignore[union-attr]

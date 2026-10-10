@@ -92,3 +92,10 @@ def test_gate_construction_fails_closed_without_core_seam(monkeypatch, tmp_path)
             stop=StopSignal(),
             clock=FakeClock(),
         )
+
+
+def test_ledger_reports_the_lease_limit(tmp_path):
+    ledger = StepLedger(tmp_path / "l.sqlite3")
+    assert ledger.limit("run-1") is None
+    ledger.open_lease("run-1", max_steps=4)
+    assert ledger.limit("run-1") == 4
