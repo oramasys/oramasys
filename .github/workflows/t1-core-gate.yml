@@ -23,7 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ORAMA_REQUIRE_CORE_GATE: "1"
-      CORE_GATE_CANDIDATE: 32a956b7ed9cf5ab5e1bd6687732cd084e5fc344
+      ORAMA_REQUIRE_OWNER_CANDIDATES: "1"
+      CORE_GATE_CANDIDATE: 11cfb9810de45c0f2181b02811db3c982d212a91
+      PHYLAX_CANDIDATE: 3424b75c9760be48e63a0b279162631bc460dd02
+      AGATE_CANDIDATE: 0662845ce49675e340321cad5353017fb573bcbe
+      TELOS_CANDIDATE: e8bd7fab82b225b83e240b04cfdb3072d0777adc
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -35,10 +39,13 @@ jobs:
         run: |
           python -m pip install --no-cache-dir '.[dev]'
           python -m pip install --no-cache-dir --no-deps --force-reinstall \
-            "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@${CORE_GATE_CANDIDATE}"
+            "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@${CORE_GATE_CANDIDATE}" \
+            "oramasys-phylax @ git+https://github.com/oramasys/phylax.git@${PHYLAX_CANDIDATE}" \
+            "oramasys-agate @ git+https://github.com/oramasys/agate.git@${AGATE_CANDIDATE}" \
+            "oramasys-telos @ git+https://github.com/oramasys/telos.git@${TELOS_CANDIDATE}"
           python -m pip check
       - name: T1 admission and gate tests against the candidate Core
         run: |
           python -m pytest -q src/tests/test_artifact_admission.py \
             src/tests/test_admission_decision.py src/tests/test_execution_guard.py \
-            src/tests/core_gate
+            src/tests/core_gate src/tests/owner_candidates
