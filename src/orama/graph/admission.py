@@ -31,6 +31,10 @@ from typing import Any, Literal, Protocol, TypeAlias
 _KEY = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 # Domain-tagged digest: only sha256, lowercase hex, exact length.
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+# Core's GraphSpec.graph_id: bare, lowercase 64-hex -- no domain prefix. A
+# separate pattern from _DIGEST on purpose: graph_id is Core's own identity,
+# minted and owned by Core, never recomputed or re-prefixed here.
+_GRAPH_ID = re.compile(r"[0-9a-f]{64}")
 
 
 class AdmissionRefused(Exception):
@@ -134,6 +138,12 @@ def _digest(value: object, name: str) -> str:
     return value
 
 
+def _graph_id(value: object) -> str:
+    if not isinstance(value, str) or _GRAPH_ID.fullmatch(value) is None:
+        raise AdmissionRefused("artifact_binding.bad_graph_id")
+    return value
+
+
 def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise AdmissionRefused(f"{name}.required")
@@ -170,7 +180,8 @@ class ArtifactBinding:
     )
 
     def __post_init__(self) -> None:
-        for name in ("graph_id", "implementation_digest", "policy_digest", "registry_profile_digest"):
+        _graph_id(self.graph_id)
+        for name in ("implementation_digest", "policy_digest", "registry_profile_digest"):
             _digest(getattr(self, name), name)
         _text(self.state_schema_version, "state_schema_version")
         _text(self.execution_semantics_version, "execution_semantics_version")

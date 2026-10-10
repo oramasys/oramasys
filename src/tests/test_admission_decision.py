@@ -27,7 +27,7 @@ P = "sha256:" + "2" * 64
 
 def binding(**overrides) -> ArtifactBinding:
     base = {
-        "graph_id": "sha256:" + "0" * 64,
+        "graph_id": "0" * 64,
         "implementation_digest": D,
         "state_schema_version": "1",
         "policy_digest": P,
@@ -87,7 +87,7 @@ def test_binding_rejects_bad_digests_and_duplicates():
 
 def test_binding_from_mapping_fails_closed_on_unknown_fields():
     raw = {
-        "graph_id": "sha256:" + "0" * 64,
+        "graph_id": "0" * 64,
         "implementation_digest": D,
         "state_schema_version": "1",
         "policy_digest": P,
@@ -100,6 +100,30 @@ def test_binding_from_mapping_fails_closed_on_unknown_fields():
         ArtifactBinding.from_mapping({**raw, "authority": "root"})
     with pytest.raises(AdmissionRefused):
         ArtifactBinding.from_mapping({k: v for k, v in raw.items() if k != "policy_digest"})
+
+
+def test_artifact_binding_accepts_the_core_graph_id_shape():
+    """Core's real GraphSpec.graph_id is bare, lowercase 64-hex -- no domain prefix.
+
+    Reproduces a defect found while implementing the 2026-10-11 admission
+    contract integration plan: ArtifactBinding previously routed graph_id
+    through the same validator as the domain-tagged digests (which requires
+    a literal "sha256:" prefix), so a real Core graph_id would be rejected
+    by admission outright.
+    """
+    spec_graph_id = "a" * 64
+    built = binding(graph_id=spec_graph_id)
+    assert built.graph_id == spec_graph_id
+    assert built.digest().startswith("sha256:")
+
+
+def test_artifact_binding_rejects_prefixed_or_noncanonical_graph_ids():
+    with pytest.raises(AdmissionRefused, match="bad_graph_id"):
+        binding(graph_id="sha256:" + "a" * 64)
+    with pytest.raises(AdmissionRefused, match="bad_graph_id"):
+        binding(graph_id="A" * 64)
+    with pytest.raises(AdmissionRefused, match="bad_graph_id"):
+        binding(graph_id="a" * 63)
 
 
 # --- admission outcomes ------------------------------------------------------
