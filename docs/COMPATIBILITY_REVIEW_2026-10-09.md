@@ -41,9 +41,17 @@ the framework-free application suite passes 261. The ten oracle cells never
 use importorskip and prohibit socket connections. A built-wheel smoke confirms
 the separate default policy JSON is packaged and loadable.
 The test-only lock/workflow uses an immutable Core candidate overlay.
-Core #8 is merged. The production dependency pin and the test-only candidate
-now both name the merged Core commit `04759a5` (tree-identical to the reviewed
-`b9b4477`), so the overlay no longer differs from the production install.
+Core #8 is merged. At the time of this 2026-10-09 review, the production
+dependency pin and the test-only candidate both named the merged Core commit
+`04759a5` (tree-identical to the reviewed `b9b4477`).
+
+## 2026-10-10 P0 promotion note
+
+This dated review remains historical evidence. The promoted production baseline
+is now the reviewed R3 Core commit `4d217f6`; the `04759a5` policy-R3 profile
+and `34e4a8d` core-R3 profile remain immutable candidate evidence in separate
+CI lanes. Production tests select the explicit production registry profile and
+may not infer a candidate from installed Core capabilities.
 
 Production foreign effects and automatic deferred approvals stay refused.
 Budget/effect policy files are lintable intent; they are not an admission or

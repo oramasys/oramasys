@@ -7,8 +7,10 @@ Normal stack dependencies and extras contain no LC/LG/Pydantic AI dependency.
 The requirements snapshot pins LC 1.0.7, LG 1.0.3 and pydantic-ai-slim 1.0.18
 plus their transitive environment. It was exercised on Linux/Python 3.12.14;
 CI also checks 3.11. It is not a hash-verified universal lock for all platforms.
-Only the test workflow uses the immutable Core candidate file; the production
-Core pin in pyproject.toml stays unchanged until the coordinated Core merge.
+The workflow selects an explicit immutable Core revision for every lane:
+production uses the promoted R3 commit, while the policy-R3 and core-R3 lanes
+retain their original historical qualification revisions.  Candidate evidence
+is never used as the production-install proof.
 
 ## Reproduce
 

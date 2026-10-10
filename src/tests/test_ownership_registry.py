@@ -24,13 +24,39 @@ from perpetua_core.graph import spec as core_spec
 
 FIXTURES = Path(__file__).parent / "fixtures"
 HAS_R3 = hasattr(core_spec, "ReducerSpec")
-PROFILE = "core-r3" if HAS_R3 else "policy-r3"
-SNAPSHOT = FIXTURES / f"graph-ownership-registry-{PROFILE}.json"
-PINNED_DIGESTS = {
-    "baseline": "c1bf6b519f703184745e61142f259ae8eb73d163210bb1395437f8a82c2b402f",
-    "policy-r3": "7aeed7456db148383698f6df97a38632dbf72f23d411f9c773ed6cb10ab777fb",
-    "core-r3": "498e9383667252b841845d4dc061853adfe3e3864d976a3e2f7c8a59eea3adab",
+PROFILE = os.environ.get("ORAMA_REGISTRY_PROFILE", "production")
+SNAPSHOTS = {
+    "production": FIXTURES / "graph-ownership-registry.json",
+    "policy-r3": FIXTURES / "graph-ownership-registry-policy-r3.json",
+    "core-r3": FIXTURES / "graph-ownership-registry-core-r3.json",
 }
+CORE_PINS = {
+    "production": "4d217f6b9e94e36554a9427198b8c2c4b7febc47",
+    "policy-r3": "04759a50c748444ff97136ea95c1e1289eac3a1a",
+    "core-r3": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68",
+}
+CORE_SCHEMAS = {
+    "production": "2",
+    "policy-r3": "1",
+    "core-r3": "2",
+}
+
+
+def snapshot_for_profile(profile: str) -> Path:
+    """Select only a named reviewed profile; no heuristic fallback is permitted."""
+    try:
+        return SNAPSHOTS[profile]
+    except KeyError as exc:
+        raise ValueError(f"unknown registry profile: {profile}") from exc
+
+
+SNAPSHOT = snapshot_for_profile(PROFILE)
+PINNED_DIGESTS = {
+    "baseline": "fbde64f2c3b2bec62f703137f5fddb480d502440b9e1b229c15292816b52f7e2",
+    "policy-r3": "4972754f7ceb0ad3e908f6583533fec3c59a807732ac86c3ee967df33e29e36f",
+    "core-r3": "e270493a7c924871e50fcf384c792a6922a375976127e26214f69b7c89ba9437",
+}
+PRE_R3_ARCHIVE_DIGEST = "c1bf6b519f703184745e61142f259ae8eb73d163210bb1395437f8a82c2b402f"
 
 
 def index_records(registry: dict[str, Any]) -> dict[str, Any]:
@@ -64,15 +90,31 @@ def test_snapshot_digest_is_pinned() -> None:
         assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == digest
 
 
+def test_pre_r3_archive_preserves_the_original_baseline_bytes() -> None:
+    """The archived baseline is evidence, not JSON eligible for reformatting."""
+    archive = FIXTURES / "graph-ownership-registry-pre-r3.json"
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == PRE_R3_ARCHIVE_DIGEST
+
+
+def test_unknown_profile_is_refused() -> None:
+    """A typo must never select a candidate or silently fall back to production."""
+    with pytest.raises(ValueError, match="unknown registry profile: typo"):
+        snapshot_for_profile("typo")
+
+
 def test_orama_checkout_is_byte_identical() -> None:
     """Compare canonical bytes; CI supplies its immutable Orama checkout."""
     root = os.environ.get("ORAMA_DOCS_V2_REGISTRY")
     if not root:
         pytest.skip("ORAMA_DOCS_V2_REGISTRY not set")
-    baseline = Path(root)
-    assert baseline.read_bytes() == (FIXTURES / "graph-ownership-registry.json").read_bytes()
-    canonical = baseline.with_name(f"ownership-registry-{PROFILE}.json")
-    assert canonical.read_bytes() == SNAPSHOT.read_bytes()
+    canonical = Path(root)
+    if PROFILE == "production":
+        assert canonical.read_bytes() == SNAPSHOT.read_bytes()
+    else:
+        assert canonical.with_name(f"ownership-registry-{PROFILE}.json").read_bytes() == SNAPSHOT.read_bytes()
+    assert canonical.with_name("ownership-registry-pre-r3.json").read_bytes() == (
+        FIXTURES / "graph-ownership-registry-pre-r3.json"
+    ).read_bytes()
 
 
 def test_each_field_has_exactly_one_entry() -> None:
@@ -134,12 +176,14 @@ def test_wrong_record_computes_mutation_is_rejected(record: str, monkeypatch: py
         test_computes_fields_live_only_in_the_core_spec()
 
 
-def test_profile_is_explicitly_candidate_and_matches_installed_core() -> None:
-    """Candidate conformance cannot be confused with promotion of the baseline."""
+def test_profile_is_explicit_and_matches_its_immutable_core_pin() -> None:
+    """Production and historical candidate lanes cannot be confused."""
     qualification = REGISTRY["qualification_profile"]
-    assert qualification["status"] == "candidate"
-    assert qualification["core_schema"] == ("2" if HAS_R3 else "1")
-    assert qualification["production_core_pin"] == "04759a50c748444ff97136ea95c1e1289eac3a1a"
+    expected_status = "production" if PROFILE == "production" else "candidate"
+    assert qualification["status"] == expected_status
+    assert qualification["core_pin"] == CORE_PINS[PROFILE]
+    assert qualification["core_schema"] == CORE_SCHEMAS[PROFILE]
+    assert HAS_R3 is (CORE_SCHEMAS[PROFILE] == "2")
 
 
 @pytest.mark.parametrize("record", sorted(RECORDS))
