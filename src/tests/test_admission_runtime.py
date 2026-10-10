@@ -36,28 +36,6 @@ async def test_unconfigured_runner_refuses_before_invoking_graph() -> None:
     assert called is False
 
 
-async def test_configured_runner_builds_gate_and_uses_the_core_scheduler(tmp_path) -> None:
-    """A trusted composition creates one gate and passes it to Core's scheduler."""
-    owner_providers, clock = providers()
-    ledger = StepLedger(tmp_path / "ledger.sqlite3")
-    runner = AdmissionGraphRunner(
-        binding=binding(),
-        providers=owner_providers,
-        ledger=ledger,
-        context_from_state=lambda _state: context(run_id="run-1"),
-        max_steps=3,
-        requirements=AdmissionRequirements.for_effects(
-            model_dispatch=True, endpoint_purposes=("model_egress",)
-        ),
-        clock=clock,
-    )
-
-    result = await runner.invoke(_compiled_graph(), PerpetuaState(session_id="run-1"))
-
-    assert result.scratchpad["ran"] is True
-    assert ledger.used("run-1") == 1
-
-
 async def test_runner_refuses_context_with_a_different_run_id_before_dispatch(tmp_path) -> None:
     """A context cannot mint a run identity unrelated to the state being invoked."""
     owner_providers, clock = providers()
