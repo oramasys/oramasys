@@ -14,12 +14,48 @@ is never used as the production-install proof.
 
 ## Reproduce
 
-In a fresh environment, install requirements/compatibility-oracles-py312.txt,
-then install the exact candidate Core checkout and this checkout with --no-deps
---no-build-isolation. Run pip check, then pytest -q src/tests tests/oracles.
+In a fresh environment, install requirements/compatibility-oracles-py312.txt. Then
+check out one lane's exact Core revision, install it and this checkout with --no-deps
+--no-build-isolation, and run pip check and pytest with that lane's registry profile.
+The profile defaults to production when unset, so every command below sets it
+explicitly. The Core revision and profile must be a matching pair; a mismatched pair
+reports a result for a lane that was not installed. The CI guard test checks that each
+command here agrees with the lane files and the registry profiles.
+
+Set ORAMA_DOCS_V2_REGISTRY to the ownership-registry.json of an Orama checkout at the
+revision pinned in the workflows, otherwise the byte-parity check is skipped.
+
+Production lane (Core 4d217f6b9e94e36554a9427198b8c2c4b7febc47):
+
+```bash
+git -C core-candidate checkout 4d217f6b9e94e36554a9427198b8c2c4b7febc47
+python -m pip install --no-deps --no-build-isolation -e ./core-candidate -e .
+python -m pip check
+ORAMA_REGISTRY_PROFILE=production pytest -q src/tests tests/oracles
+```
+
+Policy-R3 lane (Core 04759a50c748444ff97136ea95c1e1289eac3a1a):
+
+```bash
+git -C core-candidate checkout 04759a50c748444ff97136ea95c1e1289eac3a1a
+python -m pip install --no-deps --no-build-isolation -e ./core-candidate -e .
+python -m pip check
+ORAMA_REGISTRY_PROFILE=policy-r3 pytest -q src/tests tests/oracles
+```
+
+Core-R3 lane (Core 34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68):
+
+```bash
+git -C core-candidate checkout 34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68
+python -m pip install --no-deps --no-build-isolation -e ./core-candidate -e .
+python -m pip check
+ORAMA_REGISTRY_PROFILE=core-r3 pytest -q src/tests tests/oracles
+```
+
 Do not ask pip to resolve a candidate source alongside Oramasys's production
-Core direct reference: install production dependencies first or use this full
-oracle snapshot, then overlay the candidate explicitly.
+Core direct reference: install the full oracle snapshot first, then overlay the lane's
+Core explicitly as above. Editable overlays are for oracle reproduction only; they are
+never the production-install proof.
 
 Socket connection attempts fail each oracle. Pydantic AI model requests are
 disabled, with exact TestModel/FunctionModel fixtures. The guard is test scope,

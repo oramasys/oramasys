@@ -71,3 +71,25 @@ def test_production_pin_agrees_everywhere_it_is_repeated() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert f"{CORE_URL}{expected}" in ci
     assert len(set(re.findall(re.escape(CORE_URL) + r"([0-9a-f]{40})", ci))) == 1
+
+
+README = ROOT / "tests" / "oracles" / "README.md"
+FENCE = re.compile(r"```[a-z]*\n(.*?)```", re.DOTALL)
+
+
+def test_reproduction_recipe_pairs_each_lane_sha_with_its_profile() -> None:
+    """Every reproduction command names one lane Core SHA and its matching profile.
+
+    A recipe that leaves ORAMA_REGISTRY_PROFILE unset silently selects production,
+    so a candidate checkout could report a production-profile result.
+    """
+    blocks = [b for b in FENCE.findall(README.read_text(encoding="utf-8")) if "pytest" in b]
+    seen: dict[str, str] = {}
+    for block in blocks:
+        profiles = re.findall(r"ORAMA_REGISTRY_PROFILE=(\S+)", block)
+        shas = FULL_SHA.findall(block)
+        assert len(profiles) == 1, f"command must set exactly one profile:\n{block}"
+        assert len(set(shas)) == 1, f"command must name exactly one Core SHA:\n{block}"
+        assert shas[0] == CORE_PINS[profiles[0]], f"SHA does not match {profiles[0]}"
+        seen[profiles[0]] = shas[0]
+    assert set(seen) == set(LANE_FILES), f"recipe must cover every lane, got {sorted(seen)}"
