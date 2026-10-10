@@ -105,3 +105,20 @@ def test_resolution_never_calls_import_module(monkeypatch):
     monkeypatch.setattr(importlib, "import_module", boom)
     reg = CallableRegistry.freeze({CallableRef.parse("known"): CallableBinding(_node, DIGEST_A)})
     assert reg.resolve(CallableRef.parse("known")) is _node
+
+
+def test_direct_construction_is_validated_too():
+    with pytest.raises(AdmissionRefused):
+        CallableRef("os:system")
+    with pytest.raises(AdmissionRefused):
+        CallableRef(None)  # type: ignore[arg-type]
+
+
+def test_directly_constructed_registry_is_also_frozen():
+    source = {CallableRef.parse("known"): CallableBinding(_node, DIGEST_A)}
+    reg = CallableRegistry(source)
+    source[CallableRef.parse("late")] = CallableBinding(_node, DIGEST_A)
+    with pytest.raises(AdmissionRefused):
+        reg.resolve(CallableRef.parse("late"))
+    with pytest.raises(AdmissionRefused):
+        CallableRegistry({"known": CallableBinding(_node, DIGEST_A)})  # type: ignore[dict-item]

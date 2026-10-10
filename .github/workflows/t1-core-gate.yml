@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ORAMA_REQUIRE_CORE_GATE: "1"
-      CORE_GATE_CANDIDATE: 73c54cd867825d7e9e1e9fbb54fb1adc98e35218
+      CORE_GATE_CANDIDATE: 32a956b7ed9cf5ab5e1bd6687732cd084e5fc344
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:

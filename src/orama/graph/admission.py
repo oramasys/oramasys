@@ -43,15 +43,17 @@ class AdmissionRefused(Exception):
 
 @dataclass(frozen=True, slots=True)
 class CallableRef:
-    """Opaque validated registry key. Construct only through :meth:`parse`."""
+    """Opaque validated registry key. Every construction path validates the key."""
 
     key: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, str) or _KEY.fullmatch(self.key) is None:
+            raise AdmissionRefused("callable_ref.malformed")
+
     @classmethod
     def parse(cls, raw: object) -> CallableRef:
-        if not isinstance(raw, str) or _KEY.fullmatch(raw) is None:
-            raise AdmissionRefused("callable_ref.malformed")
-        return cls(raw)
+        return cls(raw)  # type: ignore[arg-type]
 
     def __str__(self) -> str:
         return self.key
@@ -73,18 +75,21 @@ class CallableBinding:
 
 @dataclass(frozen=True, slots=True)
 class CallableRegistry:
-    """Read-only key-to-binding map, frozen for one invocation."""
+    """Read-only key-to-binding map, frozen for one invocation on every construction path."""
 
     bindings: Mapping[CallableRef, CallableBinding]
 
-    @classmethod
-    def freeze(cls, source: Mapping[CallableRef, CallableBinding]) -> CallableRegistry:
+    def __post_init__(self) -> None:
         copied: dict[CallableRef, CallableBinding] = {}
-        for ref, binding in source.items():
+        for ref, binding in self.bindings.items():
             if not isinstance(ref, CallableRef) or not isinstance(binding, CallableBinding):
                 raise AdmissionRefused("callable_registry.bad_entry")
             copied[ref] = binding
-        return cls(MappingProxyType(copied))
+        object.__setattr__(self, "bindings", MappingProxyType(copied))
+
+    @classmethod
+    def freeze(cls, source: Mapping[CallableRef, CallableBinding]) -> CallableRegistry:
+        return cls(source)
 
     def resolve(self, ref: object, *, expected_digest: str | None = None) -> Callable[..., Any]:
         if not isinstance(ref, CallableRef):
