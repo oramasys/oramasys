@@ -91,6 +91,7 @@ class _SinkRegistration:
     max_queue_size: int
     queue: asyncio.Queue[OrderedEvent] | None = None
     worker_task: asyncio.Task[None] | None = None
+    retired: bool = False
 
 
 def _estimate_payload_bytes(observation: GraphObservation) -> int:
@@ -194,6 +195,8 @@ class BoundedObserver(DeliveryHealth):
             raise ValueError("observer must have valid run_id identity before registering sinks")
         if getattr(callback, "is_blocking", False):
             raise BlockingSinkRequiresIsolationError(f"sink {sink_id} is blocking and requires process isolation")
+        if critical and getattr(callback, "supports_critical_ack", True) is False:
+            raise ValueError("critical sinks require persistence-boundary acknowledgment, not enqueue acceptance")
 
         if sink_id in self._sinks:
             self.unregister_sink(sink_id)
@@ -209,16 +212,17 @@ class BoundedObserver(DeliveryHealth):
         if not critical:
             reg.queue = asyncio.Queue(maxsize=queue_limit)
             reg.worker_task = asyncio.create_task(self._run_queue_worker(reg))
-            self._pending_callbacks.add(reg.worker_task)
+            self._track_callback(reg.worker_task)
 
         self._sinks[sink_id] = reg
 
     def unregister_sink(self, sink_id: str) -> None:
         """Unregister a sink and cancel its background worker. Idempotent."""
         reg = self._sinks.pop(sink_id, None)
+        if reg is not None:
+            reg.retired = True
         if reg and reg.worker_task and not reg.worker_task.done():
             reg.worker_task.cancel()
-            self._pending_callbacks.discard(reg.worker_task)
         if reg and hasattr(reg.callback, "close") and callable(reg.callback.close):
             try:
                 reg.callback.close()
@@ -235,6 +239,17 @@ class BoundedObserver(DeliveryHealth):
                 reg.queue.task_done()
 
     # Core observation dispatch -------------------------------------------------
+
+    def _track_callback(self, task: asyncio.Task[Any]) -> None:
+        """Own a callback until it finishes, including suppressed cancellation."""
+        self._pending_callbacks.add(task)
+        task.add_done_callback(self._callback_finished)
+
+    def _callback_finished(self, task: asyncio.Task[Any]) -> None:
+        """Release completed ownership and retrieve late exceptions."""
+        self._pending_callbacks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     async def on_observation(self, observation: GraphObservation) -> None:
         """Dispatch observation to critical and non-critical sinks.
@@ -303,16 +318,17 @@ class BoundedObserver(DeliveryHealth):
             res = reg.callback(event)
             if inspect.isawaitable(res):
                 task = asyncio.create_task(res)
-                self._pending_callbacks.add(task)
+                self._track_callback(task)
                 try:
-                    done, pending = await asyncio.wait([task], timeout=self.config.critical_ack_timeout)
+                    _, pending = await asyncio.wait([task], timeout=self.config.critical_ack_timeout)
                     if task in pending:
                         task.cancel()
                         raise asyncio.TimeoutError
-                    # If done, retrieve exception or result
                     task.result()
-                finally:
-                    self._pending_callbacks.discard(task)
+                except asyncio.CancelledError:
+                    task.cancel()
+                    self._trip_circuit("critical_delivery_failure", "delivery.critical_cancelled")
+                    raise
         except asyncio.TimeoutError:
             self._trip_circuit("critical_delivery_failure", "delivery.critical_timeout")
             raise TimeoutError(
@@ -346,7 +362,7 @@ class BoundedObserver(DeliveryHealth):
     async def _run_queue_worker(self, reg: _SinkRegistration) -> None:
         """Background worker consuming from a non-critical sink queue."""
         assert reg.queue is not None
-        while True:
+        while not reg.retired:
             try:
                 event = await reg.queue.get()
             except asyncio.CancelledError:
@@ -374,7 +390,7 @@ class BoundedObserver(DeliveryHealth):
 
     async def shutdown(self, grace_period: float | None = None) -> None:
         """Perform cooperative stop, waiting up to grace_period for drains. Idempotent."""
-        if self._is_shutdown:
+        if self._is_shutdown and not self._pending_callbacks:
             return
 
         self._is_shutdown = True
@@ -395,15 +411,18 @@ class BoundedObserver(DeliveryHealth):
 
         # Cancel remaining workers
         for reg in list(self._sinks.values()):
+            reg.retired = True
             if reg.worker_task and not reg.worker_task.done():
                 reg.worker_task.cancel()
-                self._pending_callbacks.discard(reg.worker_task)
 
         # Cancel any other pending callbacks
         for task in list(self._pending_callbacks):
             if not task.done():
                 task.cancel()
-        self._pending_callbacks.clear()
+        if self._pending_callbacks:
+            _, pending = await asyncio.wait(tuple(self._pending_callbacks), timeout=grace)
+            if pending:
+                self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
         # Close any sinks with an explicit close() lifecycle
         for reg in self._sinks.values():

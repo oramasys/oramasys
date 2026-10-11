@@ -6,7 +6,6 @@ I/O must run in isolated processes with bounded IPC queues.
 from __future__ import annotations
 
 import multiprocessing as mp
-import threading
 from typing import Any, Callable
 
 
@@ -41,6 +40,9 @@ class ProcessIsolatedSink:
     or uncaught signals in synchronous third-party telemetry sinks.
     """
 
+    # This wrapper acknowledges enqueue only, not worker execution or persistence.
+    supports_critical_ack = False
+
     def __init__(
         self,
         target: Callable[[Any], None],
@@ -52,18 +54,24 @@ class ProcessIsolatedSink:
         self.fail_closed = fail_closed
         self.is_blocking = False  # Wrapped into isolated non-blocking boundary
         self._ctx = mp.get_context("spawn")
-        self._queue: mp.Queue = self._ctx.Queue(maxsize=queue_size)
-        self._error_queue: mp.Queue = self._ctx.Queue(maxsize=16)
-        self._process = self._ctx.Process(
-            target=_worker_loop,
-            args=(target, self._queue, self._error_queue),
-            daemon=True,
-        )
+        self._queue: mp.Queue | None = None
+        self._error_queue: mp.Queue | None = None
+        self._process = None
         self._started = False
+        self._closed = False
 
     def start(self) -> None:
         """Start the background worker process."""
+        if self._closed:
+            raise RuntimeError("ProcessIsolatedSink is closed")
         if not self._started:
+            self._queue = self._ctx.Queue(maxsize=self.queue_size)
+            self._error_queue = self._ctx.Queue(maxsize=16)
+            self._process = self._ctx.Process(
+                target=_worker_loop,
+                args=(self.target, self._queue, self._error_queue),
+                daemon=True,
+            )
             self._process.start()
             self._started = True
 
@@ -71,6 +79,9 @@ class ProcessIsolatedSink:
         """Forward event across isolated boundary into bounded IPC queue."""
         if not self._started:
             self.start()
+        if self._closed:
+            raise RuntimeError("ProcessIsolatedSink is closed")
+        assert self._process is not None and self._queue is not None and self._error_queue is not None
         if not self._process.is_alive():
             raise RuntimeError("ProcessIsolatedSink worker process is not alive")
 
@@ -89,7 +100,8 @@ class ProcessIsolatedSink:
 
     def close(self, timeout: float = 0.5) -> None:
         """Shut down the background worker process."""
-        if self._started and self._process.is_alive():
+        self._closed = True
+        if self._started and self._process is not None and self._process.is_alive():
             try:
                 self._queue.put_nowait(None)
             except Exception:
@@ -98,8 +110,9 @@ class ProcessIsolatedSink:
             if self._process.is_alive():
                 self._process.terminate()
                 self._process.join(timeout=0.1)
-        try:
-            self._queue.close()
-            self._error_queue.close()
-        except Exception:
-            pass
+        for queue in (self._queue, self._error_queue):
+            if queue is not None:
+                try:
+                    queue.close()
+                except Exception:
+                    pass

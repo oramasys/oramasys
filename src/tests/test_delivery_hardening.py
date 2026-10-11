@@ -264,4 +264,3 @@ async def test_process_isolated_sink_close_lifecycle_on_unregister():
     assert sink._process.is_alive()
     observer.unregister_sink("isolated")
     assert not sink._process.is_alive()
-
