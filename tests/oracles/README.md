@@ -25,10 +25,10 @@ command here agrees with the lane files and the registry profiles.
 Set ORAMA_DOCS_V2_REGISTRY to the ownership-registry.json of an Orama checkout at the
 revision pinned in the workflows, otherwise the byte-parity check is skipped.
 
-Production lane (Core 4d217f6b9e94e36554a9427198b8c2c4b7febc47):
+Production lane (Core 609ff0ed99cf8eca6c9ef608e764b7a25b6b9973):
 
 ```bash
-git -C core-candidate checkout 4d217f6b9e94e36554a9427198b8c2c4b7febc47
+git -C core-candidate checkout 609ff0ed99cf8eca6c9ef608e764b7a25b6b9973
 python -m pip install --no-deps --no-build-isolation -e ./core-candidate -e .
 python -m pip check
 ORAMA_REGISTRY_PROFILE=production pytest -q src/tests tests/oracles

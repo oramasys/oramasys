@@ -448,7 +448,7 @@
     "status": "production",
     "name": "core-r3-production",
     "core_schema": "2",
-    "core_pin": "4d217f6b9e94e36554a9427198b8c2c4b7febc47",
+    "core_pin": "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973",
     "note": "Reviewed merged R3 producer and consumer baseline. Candidate profiles remain historical qualification evidence."
   }
 }
