@@ -10,9 +10,11 @@ Required acceptance tests per HANDOFF-PLAN-T2-TO-M1-2026-10-11.md §6 Task 5:
 - test_terminal_receipt_taxonomy
 - test_conflicting_terminal_retries_rejected
 """
+
 from __future__ import annotations
 
 import json
+import os
 import select
 import subprocess
 import sys
@@ -27,6 +29,7 @@ from orama.graph.run_control import (
     TerminalReceipt,
     TerminalOutcome,
 )
+from orama.graph.execution_guard import DurableStopRequested, LeaseFenced, StepLedger
 
 
 _TERMINAL_WRITER = r"""
@@ -90,7 +93,9 @@ def _receipt_payload(receipt: TerminalReceipt) -> str:
     )
 
 
-def _read_child_message(process: subprocess.Popen[str], timeout: float = 10) -> dict[str, Any]:
+def _read_child_message(
+    process: subprocess.Popen[str], timeout: float = 10
+) -> dict[str, Any]:
     """Read one JSON line without permitting an unbounded child wait."""
     assert process.stdout is not None
     readable, _, _ = select.select([process.stdout], [], [], timeout)
@@ -114,17 +119,37 @@ def _race_terminal_receipts(
     """Race isolated installed-package writers through a bounded JSON handshake."""
     initializer = RunControl(store_path=store_path)
     initializer.close()
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    isolated_probe = subprocess.run(
+        [sys.executable, "-I", "-c", "import orama.graph.run_control"],
+        cwd=store_path.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    isolation_flag = ["-I"] if isolated_probe.returncode == 0 else []
     processes: list[subprocess.Popen[str]] = []
     try:
         for receipt in receipts:
             processes.append(
                 subprocess.Popen(
-                    [sys.executable, "-I", "-c", _TERMINAL_WRITER, str(store_path), _receipt_payload(receipt)],
+                    [
+                        sys.executable,
+                        *isolation_flag,
+                        "-c",
+                        _TERMINAL_WRITER,
+                        str(store_path),
+                        _receipt_payload(receipt),
+                    ],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     bufsize=1,
+                    cwd=store_path.parent,
+                    env=env,
                 )
             )
         for process in processes:
@@ -182,7 +207,7 @@ def test_terminal_receipt_taxonomy() -> None:
             reason="test.outcome",
         )
         assert receipt.outcome == outcome
-        assert receipt.schema_version == 1
+        assert receipt.schema_version == 2
 
     with pytest.raises(ValueError, match="outcome"):
         TerminalReceipt(
@@ -205,9 +230,11 @@ def test_terminal_receipt_rejects_invalid_epoch(epoch: object) -> None:
         )
 
 
-@pytest.mark.parametrize("schema_version", [True, False, 1.0, 0, 2])
-def test_terminal_receipt_rejects_invalid_schema_version(schema_version: object) -> None:
-    """Schema version is the strict integer value one."""
+@pytest.mark.parametrize("schema_version", [True, False, 1.0, 0, 3])
+def test_terminal_receipt_rejects_invalid_schema_version(
+    schema_version: object,
+) -> None:
+    """Schema version is the strict integer value two."""
     with pytest.raises(ValueError, match="schema_version"):
         TerminalReceipt(
             run_id="run-1",
@@ -218,13 +245,49 @@ def test_terminal_receipt_rejects_invalid_schema_version(schema_version: object)
         )
 
 
+def test_terminal_receipt_preserves_legacy_schema_one_rows(tmp_path: Path) -> None:
+    """Schema-v1 records remain readable without inventing v2 evidence."""
+    import sqlite3
+
+    store_path = tmp_path / "legacy.sqlite3"
+    db = sqlite3.connect(store_path)
+    db.execute(
+        "CREATE TABLE terminal_receipts ("
+        "run_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, outcome TEXT NOT NULL, "
+        "reason TEXT NOT NULL, unresolved_attempts TEXT NOT NULL, schema_version INTEGER NOT NULL)"
+    )
+    db.execute(
+        "INSERT INTO terminal_receipts VALUES (?, ?, ?, ?, ?, ?)",
+        ("old-run", 1, "completed", "legacy.success", "[]", 1),
+    )
+    db.commit()
+    db.close()
+    os.chmod(store_path, 0o600)
+
+    control = RunControl(store_path=store_path)
+    receipt = control.terminal_receipt("old-run")
+    assert receipt == TerminalReceipt(
+        run_id="old-run",
+        epoch=1,
+        outcome="completed",
+        reason="legacy.success",
+        schema_version=1,
+    )
+    control.close()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("run_id", ""), ("run_id", "   "), ("reason", ""), ("reason", "\t")],
 )
 def test_terminal_receipt_rejects_blank_strings(field: str, value: str) -> None:
     """Identity and reason strings must contain non-whitespace content."""
-    values = {"run_id": "run-1", "epoch": 1, "outcome": "completed", "reason": "success"}
+    values = {
+        "run_id": "run-1",
+        "epoch": 1,
+        "outcome": "completed",
+        "reason": "success",
+    }
     values[field] = value
     with pytest.raises(ValueError, match=field):
         TerminalReceipt(**values)  # type: ignore[arg-type]
@@ -302,7 +365,33 @@ def test_conflicting_terminal_retries_rejected(tmp_path: Path) -> None:
     assert control.record_terminal_receipt(other) == other
 
 
-def test_identical_terminal_receipts_are_idempotent_across_processes(tmp_path: Path) -> None:
+def test_runtime_terminal_retry_is_idempotent_but_rejects_conflicts(
+    tmp_path: Path,
+) -> None:
+    """The runtime path returns its first receipt and rejects a contradictory retry."""
+    store_path = tmp_path / "shared.sqlite3"
+    control = RunControl(store_path=store_path)
+    ledger = StepLedger(store_path)
+    control.register_run(run_id="runtime-retry", owner_principal="owner")
+    epoch = ledger.open_lease("runtime-retry", max_steps=1)
+
+    first = control.record_runtime_terminal(
+        run_id="runtime-retry", epoch=epoch, outcome="completed", reason="run.done"
+    )
+    assert control.record_runtime_terminal(
+        run_id="runtime-retry", epoch=epoch, outcome="completed", reason="run.done"
+    ) == first
+    with pytest.raises(ValueError, match="conflicting runtime terminal retry"):
+        control.record_runtime_terminal(
+            run_id="runtime-retry", epoch=epoch, outcome="cancelled", reason="operator.stop"
+        )
+    ledger.close()
+    control.close()
+
+
+def test_identical_terminal_receipts_are_idempotent_across_processes(
+    tmp_path: Path,
+) -> None:
     """Concurrent identical writers all observe the same canonical receipt."""
     store_path = tmp_path / "stop.sqlite3"
     receipt = TerminalReceipt(
@@ -315,9 +404,10 @@ def test_identical_terminal_receipts_are_idempotent_across_processes(tmp_path: P
 
     results = _race_terminal_receipts(store_path, (receipt, receipt, receipt, receipt))
 
-    assert results == [
-        ("ok", 3, "unknown", "settlement_unresolved", ("attempt-1",), 1)
-    ] * 4
+    assert (
+        results
+        == [("ok", 3, "unknown", "settlement_unresolved", ("attempt-1",), 2)] * 4
+    )
     reopened = RunControl(store_path=store_path)
     assert reopened.record_terminal_receipt(receipt) == receipt
     reopened.close()
@@ -348,7 +438,11 @@ def test_conflicting_terminal_receipts_have_one_canonical_winner_across_processe
     failures = [result for result in results if result[0] == "error"]
     assert len(successes) == 1
     assert failures == [
-        ("error", "ValueError", "conflicting terminal receipt for run run-conflict-race")
+        (
+            "error",
+            "ValueError",
+            "conflicting terminal receipt for run run-conflict-race",
+        )
     ]
 
     winner = completed if successes[0][2] == "completed" else unknown
@@ -361,49 +455,140 @@ def test_conflicting_terminal_receipts_have_one_canonical_winner_across_processe
 
 
 def test_uncooperative_task_remains_unknown(tmp_path: Path) -> None:
-    """An uncooperative or cancelled task without proof of termination is classified as unknown."""
-    control = RunControl(store_path=tmp_path / "stop.sqlite3")
+    """An unresolved started attempt is never represented as clean cancellation."""
+    store_path = tmp_path / "shared.sqlite3"
+    control = RunControl(store_path=store_path)
+    ledger = StepLedger(store_path)
     control.register_run(run_id="run-uncoop", owner_principal="owner")
+    epoch = ledger.open_lease("run-uncoop", max_steps=2)
+    ledger.reserve_attempt(
+        "run-uncoop", epoch, "attempt-1", units=1, requires_start_marker=True
+    )
+    ledger.mark_started("run-uncoop", "attempt-1", epoch)
 
-    receipt = control.classify_termination(
+    receipt = control.record_runtime_terminal(
         run_id="run-uncoop",
-        epoch=1,
-        confirmed_cancelled=False,
-        requested_stop_reason="operator.cancel",
+        epoch=epoch,
+        outcome="interrupted",
+        reason="operator.cancel",
     )
     assert receipt.outcome == "unknown"
     assert receipt.reason == "operator.cancel"
-
-
-def test_stop_before_dispatch(tmp_path: Path) -> None:
-    """If stop was requested before dispatch, gate decision blocks execution with refused or cancelled."""
-    control = RunControl(store_path=tmp_path / "stop.sqlite3")
-    control.register_run(run_id="run-predispatch", owner_principal="owner")
-    control.request_stop(StopRequest(run_id="run-predispatch", principal="owner", reason="operator_cancel"))
-
-    assert control.is_stopped("run-predispatch") is True
-    receipt = control.classify_termination(
-        run_id="run-predispatch",
-        epoch=1,
-        confirmed_cancelled=True,
-        requested_stop_reason="operator_cancel",
+    assert receipt.unresolved_attempts == ("attempt-1",)
+    assert receipt.charge_summary == (
+        ("steps", 1),
+        ("elapsed_ms", 0),
+        ("cost_microunits", 0),
+        ("effect_attempts", 0),
     )
-    assert receipt.outcome == "cancelled"
+    assert control.record_runtime_terminal(
+        run_id="run-uncoop", epoch=epoch, outcome="completed", reason="operator.cancel"
+    ) == receipt
+    ledger.close()
+    control.close()
 
 
-def test_stop_between_result_and_commit(tmp_path: Path) -> None:
-    """Stop received between callable result and commit fences settlement and records unknown."""
-    control = RunControl(store_path=tmp_path / "stop.sqlite3")
-    control.register_run(run_id="run-commit-race", owner_principal="owner")
-    control.request_stop(StopRequest(run_id="run-commit-race", principal="owner", reason="stop.race"))
+def test_terminal_receipt_fences_late_ledger_mutations(tmp_path: Path) -> None:
+    """A terminal receipt closes the run against stale gates and lease takeovers."""
+    store_path = tmp_path / "shared.sqlite3"
+    control = RunControl(store_path=store_path)
+    ledger = StepLedger(store_path)
+    run_id = "run-terminal-fence"
+    control.register_run(run_id=run_id, owner_principal="owner")
+    epoch = ledger.open_lease(run_id, max_steps=2)
+    ledger.reserve_attempt(run_id, epoch, "attempt-1", units=1)
 
-    # When execution finished but commit is unsettled when stop arrived:
-    receipt = control.classify_termination(
-        run_id="run-commit-race",
-        epoch=1,
-        confirmed_cancelled=False,
-        requested_stop_reason="stop.race",
-        unsettled_attempts=["att-1"],
+    control.record_runtime_terminal(
+        run_id=run_id,
+        epoch=epoch,
+        outcome="completed",
+        reason="run.completed",
+    )
+
+    with pytest.raises(LeaseFenced):
+        ledger.open_lease(run_id, max_steps=2)
+    with pytest.raises(LeaseFenced):
+        ledger.reserve_attempt(run_id, epoch, "attempt-2", units=1)
+    with pytest.raises(LeaseFenced):
+        ledger.prepare_commit(run_id, "attempt-1", "hold", epoch, "digest")
+    with pytest.raises(LeaseFenced):
+        ledger.check(run_id, epoch)
+
+    assert ledger.used(run_id) == 1
+    assert ledger.hold_state(run_id, "attempt-2") is None
+    ledger.close()
+    control.close()
+
+
+def test_stop_before_dispatch_preserves_unsettled_fanout_charges(
+    tmp_path: Path,
+) -> None:
+    """A durable stop fences commit while preserving every reserved fan-out hold."""
+    store_path = tmp_path / "shared.sqlite3"
+    control = RunControl(store_path=store_path)
+    ledger = StepLedger(store_path)
+    run_id = "run-predispatch"
+    control.register_run(run_id=run_id, owner_principal="owner")
+    epoch = ledger.open_lease(run_id, max_steps=3)
+    ledger.reserve_batch(
+        run_id,
+        epoch,
+        "batch-1",
+        (("batch-1:a", 1), ("batch-1:b", 1)),
+        requires_start_marker=True,
+    )
+    control.request_stop(
+        StopRequest(run_id=run_id, principal="owner", reason="operator_cancel")
+    )
+
+    with pytest.raises(DurableStopRequested, match="operator_cancel"):
+        ledger.mark_started(run_id, "batch-1:a", epoch)
+    with pytest.raises(DurableStopRequested, match="operator_cancel"):
+        ledger.prepare_batch_commit(
+            run_id, "batch-1", ("batch-1:a", "batch-1:b"), epoch, "digest"
+        )
+
+    assert ledger.batch_hold_states(run_id, "batch-1") == {
+        "batch-1:a": "held",
+        "batch-1:b": "held",
+    }
+    receipt = control.record_runtime_terminal(
+        run_id=run_id, epoch=epoch, outcome="cancelled", reason="operator_cancel"
     )
     assert receipt.outcome == "unknown"
-    assert "att-1" in receipt.unresolved_attempts
+    assert receipt.unresolved_attempts == ("batch-1:a", "batch-1:b")
+    assert ledger.used(run_id) == 2
+    ledger.close()
+    control.close()
+
+
+def test_stop_wins_commit_race_and_runtime_receipt_is_conservative(
+    tmp_path: Path,
+) -> None:
+    """A stop that commits first prevents a later intent and retains its hold."""
+    store_path = tmp_path / "shared.sqlite3"
+    control = RunControl(store_path=store_path)
+    ledger = StepLedger(store_path)
+    run_id = "run-commit-race"
+    control.register_run(run_id=run_id, owner_principal="owner")
+    epoch = ledger.open_lease(run_id, max_steps=2)
+    hold = ledger.reserve_attempt(
+        run_id, epoch, "attempt-1", units=1, requires_start_marker=True
+    )
+    ledger.mark_started(run_id, "attempt-1", epoch)
+    ledger.record_outcome(run_id, "attempt-1", epoch, "result-digest")
+    control.request_stop(
+        StopRequest(run_id=run_id, principal="owner", reason="stop.race")
+    )
+
+    with pytest.raises(DurableStopRequested, match="stop.race"):
+        ledger.prepare_commit(run_id, "attempt-1", hold.hold_id, epoch, "result-digest")
+
+    receipt = control.record_runtime_terminal(
+        run_id=run_id, epoch=epoch, outcome="cancelled", reason="stop.race"
+    )
+    assert receipt.outcome == "unknown"
+    assert receipt.unresolved_attempts == ("attempt-1",)
+    assert ledger.hold_state(run_id, "attempt-1") == "held"
+    ledger.close()
+    control.close()

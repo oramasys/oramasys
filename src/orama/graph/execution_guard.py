@@ -56,6 +56,15 @@ class LeaseFenced(RuntimeError):
     """This holder's lease epoch is no longer current (a newer holder took it)."""
 
 
+class DurableStopRequested(RuntimeError):
+    """A persisted stop won the transaction order before a commit intent."""
+
+    def __init__(self, reason: str) -> None:
+        """Expose the stable reason for conversion into a Core stop decision."""
+        super().__init__(reason)
+        self.reason = reason
+
+
 UnknownCause = Literal[
     "crash_before_intent",
     "crash_before_publish",
@@ -153,6 +162,7 @@ class StepLedger:
         from orama.graph.private_store import prepare_private_store
 
         path = prepare_private_store(path)
+        self._store_path = str(path.resolve())
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -163,6 +173,10 @@ class StepLedger:
             " epoch INTEGER NOT NULL CHECK (epoch >= 1),"
             " max_steps INTEGER NOT NULL CHECK (max_steps >= 1),"
             " used INTEGER NOT NULL CHECK (used >= 0 AND used <= max_steps))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS stop_requests ("
+            " run_id TEXT PRIMARY KEY, principal TEXT NOT NULL, reason TEXT NOT NULL)"
         )
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS attempt_holds ("
@@ -270,6 +284,12 @@ class StepLedger:
         """Close the underlying database connection."""
         self._db.close()
 
+    @property
+    def database_path(self) -> str:
+        """Return SQLite's canonical file path for shared-authority checks."""
+        row = self._db.execute("PRAGMA database_list").fetchone()
+        return "" if row is None else str(row[2])
+
     def pragmas(self) -> tuple[str, int]:
         """Return the journal mode and synchronous level in force."""
         mode = self._db.execute("PRAGMA journal_mode").fetchone()[0]
@@ -294,6 +314,7 @@ class StepLedger:
         ):
             raise ValueError("max_steps must be a positive integer")
         with self._tx() as db:
+            self._assert_run_not_terminal(db, run_id)
             row = db.execute("SELECT epoch, used FROM leases WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 db.execute(
@@ -317,6 +338,7 @@ class StepLedger:
 
     def check(self, run_id: str, epoch: int) -> None:
         """Raise LeaseFenced unless the epoch is the current lease epoch."""
+        self._assert_run_not_terminal(self._db, run_id)
         row = self._db.execute("SELECT epoch FROM leases WHERE run_id = ?", (run_id,)).fetchone()
         if row is None or row[0] != epoch:
             raise LeaseFenced(run_id)
@@ -649,6 +671,11 @@ class StepLedger:
                 return False
             if hold.fence_epoch != epoch or self._hold_state(db, run_id, attempt_id) != "held":
                 raise ValueError("start does not match a current held attempt")
+            stop = db.execute(
+                "SELECT reason FROM stop_requests WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if stop is not None:
+                raise DurableStopRequested(str(stop[0]))
             if not self._has_reservation_evidence(db, run_id, attempt_id):
                 raise ValueError("start requires schema-v2 reservation evidence")
             payload_json, payload_digest = self._canonical_payload({"attempt_id": attempt_id})
@@ -1186,6 +1213,11 @@ class StepLedger:
                 if tuple(existing) != (hold_id, epoch, result_digest):
                     raise ValueError("commit intent digest conflicts with existing intent")
                 return False
+            stop = db.execute(
+                "SELECT reason FROM stop_requests WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if stop is not None:
+                raise DurableStopRequested(str(stop[0]))
             db.execute(
                 "INSERT INTO commit_intents (run_id, attempt_id, hold_id, epoch, result_digest) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -1252,6 +1284,11 @@ class StepLedger:
                     if tuple(existing) != expected:
                         raise ValueError("batch commit digest conflicts with existing intent")
                     continue
+                stop = db.execute(
+                    "SELECT reason FROM stop_requests WHERE run_id = ?", (run_id,)
+                ).fetchone()
+                if stop is not None:
+                    raise DurableStopRequested(str(stop[0]))
                 db.execute(
                     "INSERT INTO commit_intents (run_id, attempt_id, hold_id, epoch, result_digest) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -1583,8 +1620,20 @@ class StepLedger:
             raise ValueError("units must be a positive integer")
 
     @staticmethod
+    def _assert_run_not_terminal(db: sqlite3.Connection, run_id: str) -> None:
+        """Fence ledger operations after lifecycle evidence closes the run."""
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'terminal_receipts'"
+        ).fetchone()
+        if table is not None and db.execute(
+            "SELECT 1 FROM terminal_receipts WHERE run_id = ?", (run_id,)
+        ).fetchone() is not None:
+            raise LeaseFenced(run_id)
+
+    @staticmethod
     def _lease_row(db: sqlite3.Connection, run_id: str, epoch: int) -> tuple[int, int, int]:
         """Return the current lease row or fence a stale/unknown holder."""
+        StepLedger._assert_run_not_terminal(db, run_id)
         row = db.execute(
             "SELECT epoch, max_steps, used FROM leases WHERE run_id = ?", (run_id,)
         ).fetchone()
@@ -1841,6 +1890,8 @@ class AdmissionGate:
                     self.lease_epoch,
                     request.result_digest,
                 )
+            except DurableStopRequested as error:
+                return GateDecision.stop(error.reason)
             except LeaseFenced:
                 return GateDecision.refuse("authority.lease_fenced")
             except ValueError:
@@ -1860,6 +1911,8 @@ class AdmissionGate:
                 self.lease_epoch,
                 request.result_digest,
             )
+        except DurableStopRequested as error:
+            return GateDecision.stop(error.reason)
         except LeaseFenced:
             return GateDecision.refuse("authority.lease_fenced")
         except ValueError:

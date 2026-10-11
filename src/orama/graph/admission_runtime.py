@@ -7,12 +7,15 @@ callers provide every authority-bearing input explicitly.  An unconfigured
 deployment receives ``UnconfiguredGraphRunner``, which refuses before Core can
 dispatch a node.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
+
+from perpetua_core.graph.gate import GateRefused
 
 from orama.graph.admission import (
     AdmissionContext,
@@ -23,7 +26,14 @@ from orama.graph.admission import (
     Clock,
     admit_artifact,
 )
-from orama.graph.execution_guard import AdmissionGate, DeliveryHealth, NoDeliverySinks, StepLedger, StopSignal
+from orama.graph.execution_guard import (
+    AdmissionGate,
+    DeliveryHealth,
+    DurableStopRequested,
+    NoDeliverySinks,
+    StepLedger,
+)
+from orama.graph.run_control import RunControl, TerminalOutcome
 
 
 class GraphRunner(Protocol):
@@ -71,11 +81,11 @@ class AdmissionGraphRunner:
     binding: ArtifactBinding
     providers: AdmissionProviders
     ledger: StepLedger
+    run_control: RunControl
     context_from_state: Callable[[object], AdmissionContext]
     max_steps: int
     requirements: AdmissionRequirements
     clock: Clock
-    stop_factory: Callable[[], StopSignal] = StopSignal
     delivery_factory: Callable[[], DeliveryHealth] = NoDeliverySinks
 
     def for_authenticated_principal(self, principal_id: str) -> GraphRunner:
@@ -115,8 +125,11 @@ class AdmissionGraphRunner:
             requirements=self.requirements,
         )
         if decision.outcome != "allow":
-            raise AdmissionRefused(f"admission.{decision.outcome}:{decision.reason_code}")
+            raise AdmissionRefused(
+                f"admission.{decision.outcome}:{decision.reason_code}"
+            )
 
+        self._register_store_and_owner(run_id, principal_id)
         epoch = self.ledger.open_lease(run_id, max_steps=decision.max_steps)
         gate = AdmissionGate(
             decision=decision,
@@ -125,11 +138,100 @@ class AdmissionGraphRunner:
             ledger=self.ledger,
             run_id=run_id,
             lease_epoch=epoch,
-            stop=self.stop_factory(),
+            stop=self.run_control.durable_signal(run_id=run_id, principal=principal_id),
             clock=self.clock,
             delivery=self.delivery_factory(),
         )
-        return await graph.ainvoke(state, gate=gate)
+        try:
+            result = await graph.ainvoke(state, gate=gate)
+        except DurableStopRequested as error:
+            self._record_terminal_after_boundary_failure(
+                run_id=run_id,
+                epoch=epoch,
+                outcome="cancelled",
+                reason=error.reason,
+                cause=error,
+            )
+            raise AdmissionRefused("admission.stop_requested") from error
+        except GateRefused as error:
+            stopped = error.decision.verdict == "stop"
+            outcome = "cancelled" if stopped else "refused"
+            self._record_terminal_after_boundary_failure(
+                run_id=run_id,
+                epoch=epoch,
+                outcome=outcome,
+                reason=error.decision.reason,
+                cause=error,
+            )
+            code = (
+                "admission.stop_requested" if stopped else "admission.boundary_refused"
+            )
+            raise AdmissionRefused(code) from error
+        except BaseException as error:
+            outcome = (
+                "interrupted" if type(error).__name__ == "CancelledError" else "unknown"
+            )
+            reason = (
+                "run.interrupted" if outcome == "interrupted" else "run.execution_error"
+            )
+            try:
+                self.run_control.record_runtime_terminal(
+                    run_id=run_id, epoch=epoch, outcome=outcome, reason=reason
+                )
+            except BaseException as receipt_error:
+                raise BaseExceptionGroup(
+                    "graph execution and terminal evidence both failed",
+                    [error, receipt_error],
+                )
+            raise
+        status = getattr(result, "status", None)
+        stop_reason = self.run_control.stop_for(run_id)
+        outcome = {
+            "done": "completed",
+            "interrupted": "interrupted",
+            "stopped": "cancelled",
+        }.get(status, "unknown")
+        reason = (
+            stop_reason.reason
+            if outcome == "cancelled" and stop_reason is not None
+            else f"run.{outcome}"
+        )
+        self.run_control.record_runtime_terminal(
+            run_id=run_id, epoch=epoch, outcome=outcome, reason=reason
+        )
+        return result
+
+    def _record_terminal_after_boundary_failure(
+        self,
+        *,
+        run_id: str,
+        epoch: int,
+        outcome: TerminalOutcome,
+        reason: str,
+        cause: BaseException,
+    ) -> None:
+        """Persist a boundary stop/refusal without masking receipt-write failure."""
+        try:
+            self.run_control.record_runtime_terminal(
+                run_id=run_id,
+                epoch=epoch,
+                outcome=outcome,
+                reason=reason,
+            )
+        except BaseException as receipt_error:
+            raise BaseExceptionGroup(
+                "graph boundary and terminal evidence both failed",
+                [cause, receipt_error],
+            )
+
+    def _register_store_and_owner(self, run_id: str, principal_id: str) -> None:
+        """Require one SQLite authority and persist ownership before lease use."""
+        if (
+            not self.ledger.database_path
+            or self.ledger.database_path != self.run_control.database_path
+        ):
+            raise AdmissionRefused("admission.run_control_store_mismatch")
+        self.run_control.register_run(run_id=run_id, owner_principal=principal_id)
 
 
 @dataclass(frozen=True, slots=True)

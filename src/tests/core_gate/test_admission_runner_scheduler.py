@@ -2,12 +2,16 @@
 
 Needs the Core revision with the DispatchGate seam; collected only there (see conftest).
 """
+
 from __future__ import annotations
+
+from pathlib import Path
 
 from perpetua_core import END, START, MiniGraph, PerpetuaState
 from orama.graph.admission import AdmissionRequirements
 from orama.graph.admission_runtime import AdmissionGraphRunner
 from orama.graph.execution_guard import StepLedger
+from orama.graph.run_control import RunControl
 from tests.test_admission_decision import binding, context, providers
 
 
@@ -19,14 +23,19 @@ def _compiled_graph() -> object:
     return graph.compile()
 
 
-async def test_configured_runner_builds_gate_and_uses_the_core_scheduler(tmp_path) -> None:
+async def test_configured_runner_builds_gate_and_uses_the_core_scheduler(
+    tmp_path: Path,
+) -> None:
     """A trusted composition creates one gate and passes it to Core's scheduler."""
     owner_providers, clock = providers()
-    ledger = StepLedger(tmp_path / "ledger.sqlite3")
+    store_path = tmp_path / "shared.sqlite3"
+    ledger = StepLedger(store_path)
+    run_control = RunControl(store_path=store_path)
     runner = AdmissionGraphRunner(
         binding=binding(),
         providers=owner_providers,
         ledger=ledger,
+        run_control=run_control,
         context_from_state=lambda _state: context(run_id="client-run"),
         max_steps=3,
         requirements=AdmissionRequirements.for_effects(
@@ -41,3 +50,5 @@ async def test_configured_runner_builds_gate_and_uses_the_core_scheduler(tmp_pat
 
     assert result.scratchpad["ran"] is True
     assert ledger.used("client-run") == 0
+    ledger.close()
+    run_control.close()
