@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +26,50 @@ class StopRequest:
             value = getattr(self, field)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field} must be a non-empty string")
+
+
+from typing import Literal
+
+TerminalOutcome = Literal[
+    "completed",
+    "interrupted",
+    "cancelled",
+    "refused",
+    "budget",
+    "unknown",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalReceipt:
+    """Canonical terminal evidence binding outcome and run context."""
+
+    run_id: str
+    epoch: int
+    outcome: TerminalOutcome
+    reason: str
+    unresolved_attempts: tuple[str, ...] = ()
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate taxonomy and invariants."""
+        if not self.run_id or not isinstance(self.run_id, str):
+            raise ValueError("run_id must be a non-empty string")
+        if self.epoch < 1:
+            raise ValueError("epoch must be >= 1")
+        if self.outcome not in {
+            "completed",
+            "interrupted",
+            "cancelled",
+            "refused",
+            "budget",
+            "unknown",
+        }:
+            raise ValueError(f"invalid outcome: {self.outcome}")
+        if not self.reason or not isinstance(self.reason, str):
+            raise ValueError("reason must be a non-empty string")
+        if self.schema_version != 1:
+            raise ValueError("schema_version must be 1")
 
 
 class StopNotAuthorized(PermissionError):
@@ -59,6 +103,11 @@ class RunControl:
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS stop_requests ("
             " run_id TEXT PRIMARY KEY, principal TEXT NOT NULL, reason TEXT NOT NULL)"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS terminal_receipts ("
+            " run_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, outcome TEXT NOT NULL, "
+            " reason TEXT NOT NULL, unresolved_attempts TEXT NOT NULL, schema_version INTEGER NOT NULL)"
         )
 
     def close(self) -> None:
@@ -114,3 +163,68 @@ class RunControl:
         if row is None:
             return None
         return StopRequest(run_id=run_id, principal=str(row[0]), reason=str(row[1]))
+
+    def is_stopped(self, run_id: str) -> bool:
+        """Report whether an authorized stop request is durably registered."""
+        return self.stop_for(run_id) is not None
+
+    def record_terminal_receipt(self, receipt: TerminalReceipt) -> TerminalReceipt:
+        """Durably record canonical terminal evidence. Rejects conflicting retries."""
+        import json
+        with self._lock:
+            existing = self._db.execute(
+                "SELECT epoch, outcome, reason, unresolved_attempts, schema_version "
+                "FROM terminal_receipts WHERE run_id = ?",
+                (receipt.run_id,),
+            ).fetchone()
+            if existing is not None:
+                unresolved = tuple(json.loads(existing[3]))
+                stored = TerminalReceipt(
+                    run_id=receipt.run_id,
+                    epoch=int(existing[0]),
+                    outcome=existing[1],  # type: ignore
+                    reason=str(existing[2]),
+                    unresolved_attempts=unresolved,
+                    schema_version=int(existing[4]),
+                )
+                if stored != receipt:
+                    raise ValueError(f"conflicting terminal receipt for run {receipt.run_id}")
+                return stored
+
+            unresolved_json = json.dumps(list(receipt.unresolved_attempts))
+            self._db.execute(
+                "INSERT INTO terminal_receipts (run_id, epoch, outcome, reason, unresolved_attempts, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    receipt.run_id,
+                    receipt.epoch,
+                    receipt.outcome,
+                    receipt.reason,
+                    unresolved_json,
+                    receipt.schema_version,
+                ),
+            )
+            return receipt
+
+    def classify_termination(
+        self,
+        run_id: str,
+        epoch: int,
+        confirmed_cancelled: bool,
+        requested_stop_reason: str,
+        unsettled_attempts: Sequence[str] = (),
+    ) -> TerminalReceipt:
+        """Classify terminal outcome honestly based on verifiable evidence."""
+        if unsettled_attempts or not confirmed_cancelled:
+            outcome: TerminalOutcome = "unknown"
+        else:
+            outcome = "cancelled"
+        
+        receipt = TerminalReceipt(
+            run_id=run_id,
+            epoch=epoch,
+            outcome=outcome,
+            reason=requested_stop_reason,
+            unresolved_attempts=tuple(unsettled_attempts),
+        )
+        return self.record_terminal_receipt(receipt)
