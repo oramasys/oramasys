@@ -27,7 +27,7 @@ async def test_configured_runner_builds_gate_and_uses_the_core_scheduler(tmp_pat
         binding=binding(),
         providers=owner_providers,
         ledger=ledger,
-        context_from_state=lambda _state: context(run_id="run-1"),
+        context_from_state=lambda _state: context(run_id="client-run"),
         max_steps=3,
         requirements=AdmissionRequirements.for_effects(
             model_dispatch=True, endpoint_purposes=("model_egress",)
@@ -35,7 +35,9 @@ async def test_configured_runner_builds_gate_and_uses_the_core_scheduler(tmp_pat
         clock=clock,
     )
 
-    result = await runner.invoke(_compiled_graph(), PerpetuaState(session_id="run-1"))
+    result = await runner.for_authenticated_principal("control-plane").invoke(
+        _compiled_graph(), PerpetuaState(session_id="run-1")
+    )
 
     assert result.scratchpad["ran"] is True
-    assert ledger.used("run-1") == 1
+    assert ledger.used("client-run") == 0

@@ -9,9 +9,10 @@ dispatch a node.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
+from uuid import uuid4
 
 from orama.graph.admission import (
     AdmissionContext,
@@ -33,6 +34,14 @@ class GraphRunner(Protocol):
 
 
 @runtime_checkable
+class AuthenticatedGraphRunnerFactory(Protocol):
+    """Bind a graph runner to verified transport authority for one request."""
+
+    def for_authenticated_principal(self, principal_id: str) -> GraphRunner:
+        """Return a runner that owns run identity and principal for one request."""
+
+
+@runtime_checkable
 class _GateCapableGraph(Protocol):
     """The narrow Core surface required by the admission runner."""
 
@@ -49,24 +58,14 @@ class UnconfiguredGraphRunner:
         raise AdmissionRefused("admission.enforcement_unavailable")
 
 
-def _state_run_id(state: object) -> str:
-    """Extract the already-established run identity without accepting a new one."""
-    metadata = getattr(state, "metadata", None)
-    run_id = metadata.get("run_id") if isinstance(metadata, Mapping) else None
-    if run_id is None:
-        run_id = getattr(state, "session_id", None)
-    if not isinstance(run_id, str) or not run_id.strip():
-        raise AdmissionRefused("admission.run_id_missing")
-    return run_id
-
-
 @dataclass(slots=True)
 class AdmissionGraphRunner:
     """Build and apply exactly one admission gate for each Core invocation.
 
-    ``context_from_state`` is a trusted application boundary.  It must derive
-    the authenticated principal and declared effects from already-authenticated
-    request/lifecycle state; request payloads do not construct it directly.
+    ``context_from_state`` may derive requested model/effect attributes, but a
+    transport-bound runner always replaces its principal and run identity.
+    Calling this factory directly refuses rather than accepting authority from
+    request state.
     """
 
     binding: ArtifactBinding
@@ -79,15 +78,33 @@ class AdmissionGraphRunner:
     stop_factory: Callable[[], StopSignal] = StopSignal
     delivery_factory: Callable[[], DeliveryHealth] = NoDeliverySinks
 
+    def for_authenticated_principal(self, principal_id: str) -> GraphRunner:
+        """Bind one verified control-plane capability to future invocations."""
+        if not isinstance(principal_id, str) or not principal_id.strip():
+            raise AdmissionRefused("admission.authenticated_principal_missing")
+        return _BoundAdmissionGraphRunner(self, principal_id)
+
     async def invoke(self, graph: object, state: object) -> object:
-        """Admit, fence, and pass one gate to Core's existing scheduler."""
+        """Refuse unbound invocation so request state cannot self-authorize."""
+        raise AdmissionRefused("admission.authenticated_context_required")
+
+    async def _invoke_bound(
+        self,
+        graph: object,
+        state: object,
+        *,
+        principal_id: str,
+        run_id: str,
+    ) -> object:
+        """Admit, fence, and pass one transport-bound gate to Core."""
         if not isinstance(graph, _GateCapableGraph):
             raise AdmissionRefused("admission.graph_gate_unsupported")
 
-        run_id = _state_run_id(state)
-        context = self.context_from_state(state)
-        if context.run_id != run_id:
-            raise AdmissionRefused("admission.run_id_mismatch")
+        context = replace(
+            self.context_from_state(state),
+            run_id=run_id,
+            principal_id=principal_id,
+        )
 
         decision = admit_artifact(
             self.binding,
@@ -113,3 +130,20 @@ class AdmissionGraphRunner:
             delivery=self.delivery_factory(),
         )
         return await graph.ainvoke(state, gate=gate)
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundAdmissionGraphRunner:
+    """One request-scoped admission runner with server-owned authority."""
+
+    factory: AdmissionGraphRunner
+    principal_id: str
+
+    async def invoke(self, graph: object, state: object) -> object:
+        """Mint a fresh opaque run identity before Core receives the gate."""
+        return await self.factory._invoke_bound(
+            graph,
+            state,
+            principal_id=self.principal_id,
+            run_id=str(uuid4()),
+        )

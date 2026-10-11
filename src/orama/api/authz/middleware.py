@@ -14,6 +14,21 @@ from orama.api.authz.tokens import (
 )
 
 
+AUTHENTICATED_CONTROL_PLANE_PRINCIPAL = "local-operator"
+_AUTHENTICATED_PRINCIPAL_STATE_KEY = "orama_authenticated_principal"
+
+
+def authenticated_control_plane_principal(request: Request) -> str | None:
+    """Return the capability principal established by this middleware, if any.
+
+    The bearer itself is deliberately not exposed to application handlers.  A
+    request only receives this principal after the configured control-plane
+    capability has been verified.
+    """
+    principal = getattr(request.state, _AUTHENTICATED_PRINCIPAL_STATE_KEY, None)
+    return principal if isinstance(principal, str) and principal else None
+
+
 class AuthzMiddleware(BaseHTTPMiddleware):
     """Protect non-public routes with Authorization: Bearer.
 
@@ -47,6 +62,11 @@ class AuthzMiddleware(BaseHTTPMiddleware):
                 status_code=401,
             )
 
+        setattr(
+            request.state,
+            _AUTHENTICATED_PRINCIPAL_STATE_KEY,
+            AUTHENTICATED_CONTROL_PLANE_PRINCIPAL,
+        )
         return await call_next(request)
 
 
