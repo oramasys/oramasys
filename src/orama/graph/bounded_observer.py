@@ -70,6 +70,7 @@ class SinkCallback(Protocol):
 
 @dataclass
 class _SinkRegistration:
+    """Test helper _SinkRegistration."""
     sink_id: str
     callback: Any
     critical: bool

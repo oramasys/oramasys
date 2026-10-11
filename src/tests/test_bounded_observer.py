@@ -27,6 +27,7 @@ from orama.graph.execution_guard import StopSignal
 
 
 def make_obs(run_id: str, kind: str = "node.end", node: str = "work", data: dict[str, Any] | None = None) -> GraphObservation:
+    """Test helper: make obs."""
     s = PerpetuaState(session_id=run_id, scratchpad=data or {"count": 1})
     ev = GraphEvent(kind=kind, node=node, steps=1)
     return GraphObservation(event=ev, state=s, delta=data or {"count": 1})
@@ -43,6 +44,7 @@ async def test_slow_telemetry_does_not_delay_node_dispatch():
     slow_done = asyncio.Event()
 
     async def slow_sink(event: OrderedEvent) -> None:
+        """Test helper: slow sink."""
         await asyncio.sleep(0.5)
         slow_done.set()
 
@@ -69,6 +71,7 @@ async def test_ordered_event_identity_preserved_end_to_end():
     received: list[tuple[str, int]] = []
 
     def sink(event: OrderedEvent) -> None:
+        """Test helper: sink."""
         received.append((event.run_id, event.sequence))
 
     observer.register_sink("order_sink", sink, critical=False)
@@ -95,10 +98,12 @@ async def test_mutation_isolation_between_sinks():
     seen_by_sink2: list[dict[str, Any]] = []
 
     def mutating_sink(event: OrderedEvent) -> None:
+        """Test helper: mutating sink."""
         event.observation.state.scratchpad["count"] = 99999
         event.observation.delta["corrupted"] = True
 
     def pristine_sink(event: OrderedEvent) -> None:
+        """Test helper: pristine sink."""
         seen_by_sink2.append({
             "scratchpad": dict(event.observation.state.scratchpad),
             "delta": dict(event.observation.delta),
@@ -131,10 +136,12 @@ async def test_overflow_drops_newest_telemetry_with_gap_record_never_critical():
     queue_unblock = asyncio.Event()
 
     async def slow_sink(event: OrderedEvent) -> None:
+        """Test helper: slow sink."""
         await queue_unblock.wait()
         received_non_critical.append(event.sequence)
 
     async def critical_sink(event: OrderedEvent) -> None:
+        """Test helper: critical sink."""
         received_critical.append(event.sequence)
 
     observer.register_sink("slow_telemetry", slow_sink, critical=False, max_queue_size=3)
@@ -175,6 +182,7 @@ async def test_critical_callback_exceptions_surface_and_map_to_unknown():
     )
 
     def failing_critical_sink(event: OrderedEvent) -> None:
+        """Test helper: failing critical sink."""
         raise RuntimeError("database connection lost")
 
     observer.register_sink("db_sink", failing_critical_sink, critical=True)
@@ -216,6 +224,7 @@ async def test_critical_sink_timeout_maps_to_unknown_and_unhealthy():
     )
 
     async def hanging_critical_sink(event: OrderedEvent) -> None:
+        """Test helper: hanging critical sink."""
         await asyncio.sleep(1.0)
 
     observer.register_sink("hang_sink", hanging_critical_sink, critical=True)
@@ -244,7 +253,9 @@ async def test_late_acknowledgment_never_reopens_dispatch_authority():
     ack_completed = asyncio.Event()
 
     async def delayed_critical_sink(event: OrderedEvent) -> None:
+        """Test helper: delayed critical sink."""
         async def late_worker() -> None:
+            """Test helper: late worker."""
             await asyncio.sleep(0.1)
             ack_completed.set()
         asyncio.create_task(late_worker())
@@ -285,6 +296,7 @@ async def test_repeated_shutdown_and_lifecycle_idempotent():
     observer = BoundedObserver(run_id="run-b2-idempotent")
 
     def dummy(event: OrderedEvent) -> None:
+        """Test helper: dummy."""
         pass
 
     observer.register_sink("sink_a", dummy)
@@ -320,6 +332,7 @@ async def test_stop_grace_period_honored():
     worker_finished = False
 
     async def worker(event: OrderedEvent) -> None:
+        """Test helper: worker."""
         nonlocal worker_finished
         await asyncio.sleep(0.05)
         worker_finished = True
@@ -342,6 +355,7 @@ async def test_timeout_reported_honestly_as_stop_timeout():
     )
 
     async def stalled_worker(event: OrderedEvent) -> None:
+        """Test helper: stalled worker."""
         await asyncio.sleep(1.0)
 
     observer.register_sink("stalled", stalled_worker, critical=False)
@@ -393,6 +407,7 @@ async def test_circuit_trip_produces_a_validated_disposition_not_a_bypass() -> N
     )
 
     def broken_sink(event):
+        """Test helper: broken sink."""
         raise RuntimeError("critical sink failure")
 
     observer.register_sink("failing", broken_sink, critical=True)

@@ -24,7 +24,8 @@ jobs:
     env:
       ORAMA_REQUIRE_CORE_GATE: "1"
       ORAMA_REQUIRE_OWNER_CANDIDATES: "1"
-      CORE_GATE_CANDIDATE: f7a443e4baf628b880345a68fecde3d76b0e15fd
+      # Core #11 head (adds CommitRequest.result_digest and batch_id for the T2 accounting seam)
+      CORE_GATE_CANDIDATE: f0f46a1f22f9f396577cd103332f1a876263f21d
       PHYLAX_CANDIDATE: 22dc030d1c31cd2b684b74fc8cb1851f783e2f2e
       AGATE_CANDIDATE: 172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc
       TELOS_CANDIDATE: 931b6347142e8e66b31136e3ac8159d86eb5b2f7
