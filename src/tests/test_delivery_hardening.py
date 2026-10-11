@@ -221,3 +221,47 @@ async def test_critical_failure_prevents_next_dispatch(tmp_path):
 
     assert not observer.healthy()
     assert stop.reason is not None
+
+
+def dummy_target(event):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_process_isolated_sink_dead_worker_detected():
+    """ProcessIsolatedSink detects when worker process is terminated and raises RuntimeError."""
+    sink = ProcessIsolatedSink(dummy_target, queue_size=10)
+    sink.start()
+    assert sink._process.is_alive()
+    # Terminate process to simulate unexpected crash
+    sink._process.terminate()
+    sink._process.join(timeout=0.5)
+    assert not sink._process.is_alive()
+    with pytest.raises(RuntimeError, match="not alive"):
+        sink("event")
+    sink.close()
+
+
+@pytest.mark.asyncio
+async def test_process_isolated_sink_close_lifecycle_on_shutdown():
+    """Observer shutdown automatically closes registered sinks implementing close()."""
+    sink = ProcessIsolatedSink(dummy_target, queue_size=10)
+    sink.start()
+    observer = BoundedObserver(run_id="run-sink-close", attempt_id="att-1", hold_id="h-1", fence_epoch=1)
+    observer.register_sink("isolated", sink, critical=False)
+    assert sink._process.is_alive()
+    await observer.shutdown(grace_period=0.1)
+    assert not sink._process.is_alive()
+
+
+@pytest.mark.asyncio
+async def test_process_isolated_sink_close_lifecycle_on_unregister():
+    """Observer unregister_sink automatically closes sink implementing close()."""
+    sink = ProcessIsolatedSink(dummy_target, queue_size=10)
+    sink.start()
+    observer = BoundedObserver(run_id="run-sink-unreg", attempt_id="att-1", hold_id="h-1", fence_epoch=1)
+    observer.register_sink("isolated", sink, critical=False)
+    assert sink._process.is_alive()
+    observer.unregister_sink("isolated")
+    assert not sink._process.is_alive()
+

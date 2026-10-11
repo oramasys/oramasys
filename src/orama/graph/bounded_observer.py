@@ -219,6 +219,11 @@ class BoundedObserver(DeliveryHealth):
         if reg and reg.worker_task and not reg.worker_task.done():
             reg.worker_task.cancel()
             self._pending_callbacks.discard(reg.worker_task)
+        if reg and hasattr(reg.callback, "close") and callable(reg.callback.close):
+            try:
+                reg.callback.close()
+            except Exception:
+                pass
         if reg and reg.queue is not None:
             # Release the allowance of events abandoned in the replaced queue.
             while True:
@@ -399,6 +404,14 @@ class BoundedObserver(DeliveryHealth):
             if not task.done():
                 task.cancel()
         self._pending_callbacks.clear()
+
+        # Close any sinks with an explicit close() lifecycle
+        for reg in self._sinks.values():
+            if hasattr(reg.callback, "close") and callable(reg.callback.close):
+                try:
+                    reg.callback.close()
+                except Exception:
+                    pass
 
     async def __aenter__(self) -> BoundedObserver:
         """Enter async context."""
