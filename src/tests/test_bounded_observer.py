@@ -432,3 +432,50 @@ async def test_circuit_trip_produces_a_validated_disposition_not_a_bypass() -> N
             stop_state=disposition.stop_state,
             settlement_state=disposition.settlement_state,
         )
+
+
+# ==============================================================================
+# Review fixes: aggregate byte bound, worker accounting, unidentified observer
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_aggregate_byte_limit_drops_newest_with_gap_record():
+    """Queued non-critical payload bytes never exceed the aggregate limit; overflow leaves a gap."""
+    observer = BoundedObserver(run_id="run-bytes", config=BoundedObserverConfig(aggregate_byte_limit=1))
+    observer.register_sink("telemetry", lambda event: None, critical=False)
+    await observer.on_observation(make_obs("run-bytes"))
+    assert len(observer.gaps) == 1
+    assert observer.gaps[0].dropped_count == 1
+    assert observer.healthy()
+
+
+@pytest.mark.asyncio
+async def test_failing_noncritical_callback_does_not_stall_shutdown():
+    """A raising telemetry callback still acknowledges its queue item, so shutdown drains cleanly."""
+    observer = BoundedObserver(run_id="run-taskdone")
+
+    def boom(event: OrderedEvent) -> None:
+        """Raise from a non-critical sink."""
+        raise RuntimeError("telemetry down")
+
+    observer.register_sink("telemetry", boom, critical=False)
+    await observer.on_observation(make_obs("run-taskdone"))
+    await observer.shutdown(grace_period=0.5)
+    assert observer.unknown_dispositions == []
+
+
+@pytest.mark.asyncio
+async def test_unidentified_observer_still_requests_stop_and_surfaces_sink_error():
+    """Default (invalid) identity must not mask the sink error or lose the stop request."""
+    stop = StopSignal()
+    observer = BoundedObserver(run_id="run-noid", stop_signal=stop)
+
+    def boom(event: OrderedEvent) -> None:
+        """Fail the critical sink."""
+        raise RuntimeError("critical sink failure")
+
+    observer.register_sink("critical", boom, critical=True)
+    with pytest.raises(RuntimeError, match="critical sink failure"):
+        await observer.on_observation(make_obs("run-noid"))
+    assert stop.reason == "delivery.critical_failure"
+    assert not observer.healthy()

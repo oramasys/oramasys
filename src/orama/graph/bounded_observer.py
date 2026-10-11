@@ -137,6 +137,7 @@ class BoundedObserver(DeliveryHealth):
         self._gaps: list[GapRecord] = []
         self._unknown_dispositions: list[UnknownDisposition] = []
         self._pending_callbacks: set[asyncio.Task[Any]] = set()
+        self._queued_bytes = 0  # aggregate detached payload bytes held in non-critical queues
 
     # DeliveryHealth protocol ----------------------------------------------------
 
@@ -228,7 +229,10 @@ class BoundedObserver(DeliveryHealth):
                     size_bytes=size_bytes,
                 )
                 try:
+                    if self._queued_bytes + size_bytes > self.config.aggregate_byte_limit:
+                        raise asyncio.QueueFull
                     reg.queue.put_nowait(event)
+                    self._queued_bytes += size_bytes
                 except asyncio.QueueFull:
                     # Drop newest and record bounded gap
                     self._gaps.append(
@@ -276,8 +280,12 @@ class BoundedObserver(DeliveryHealth):
         """Trip circuit breaker, request stop, and record UnknownDisposition."""
         self._is_healthy = False
         self._circuit_closed = True
-        self._unknown_dispositions.append(
-            UnknownDisposition(
+        # Request the stop first: an invalid observer identity must never swallow it
+        # or replace the original sink failure with a ValueError.
+        if self.stop_signal:
+            self.stop_signal.request(stop_reason)
+        try:
+            disposition = UnknownDisposition(
                 attempt_id=self.attempt_id,
                 hold_id=self.hold_id,
                 fence_epoch=self.fence_epoch,
@@ -285,9 +293,9 @@ class BoundedObserver(DeliveryHealth):
                 stop_state="requested" if self.stop_signal else "none",
                 settlement_state="unsettled",
             )
-        )
-        if self.stop_signal:
-            self.stop_signal.request(stop_reason)
+        except ValueError:
+            return  # unidentified observer: circuit stays tripped, nothing to settle against
+        self._unknown_dispositions.append(disposition)
 
     async def _run_queue_worker(self, reg: _SinkRegistration) -> None:
         """Background worker consuming from a non-critical sink queue."""
@@ -295,15 +303,19 @@ class BoundedObserver(DeliveryHealth):
         while True:
             try:
                 event = await reg.queue.get()
+            except asyncio.CancelledError:
+                break
+            self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
+            try:
                 res = reg.callback(event)
                 if inspect.isawaitable(res):
                     await res
-                reg.queue.task_done()
             except asyncio.CancelledError:
+                reg.queue.task_done()
                 break
-            except Exception:
-                # Non-critical exceptions do not trip critical circuit
+            except Exception:  # noqa: BLE001 - non-critical sinks never trip the circuit
                 pass
+            reg.queue.task_done()
 
     # Cooperative stop & shutdown ------------------------------------------------
 

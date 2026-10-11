@@ -39,6 +39,7 @@ async def test_admission_gate_refuses_when_bounded_observer_unhealthy(tmp_path):
     )
 
     def broken_sink(event):
+        """Fail the critical sink acknowledgment."""
         raise RuntimeError("critical sink failure")
 
     observer.register_sink("failing", broken_sink, critical=True)
@@ -128,6 +129,7 @@ async def test_critical_delivery_failure_during_an_inflight_batch_reservation(tm
     assert dec.verdict == "allow"
 
     def broken_sink(event):
+        """Fail the critical sink acknowledgment mid-batch."""
         raise RuntimeError("critical sink failure mid-batch")
 
     observer.register_sink("failing", broken_sink, critical=True)
