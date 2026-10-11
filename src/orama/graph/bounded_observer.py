@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Literal, Protocol
 
 from perpetua_core.graph.engine import GraphObservation
 from orama.graph.execution_guard import DeliveryHealth, StopSignal, UnknownDisposition
+from orama.graph.sink_isolation import BlockingSinkRequiresIsolationError
 
 # Re-exported for existing importers of this module (seam reconciliation,
 # 2026-10-11): UnknownDisposition is execution_guard's real, versioned,
@@ -60,6 +61,19 @@ class BoundedObserverConfig:
     stop_grace_period: float = 1.0               # 1000 ms per REV3 §4
     max_critical_payload_bytes: int = 8 * 1024 * 1024  # 8 MiB
 
+    def __post_init__(self) -> None:
+        """Validate non-negative and positive limits."""
+        if self.default_max_queue_size <= 0:
+            raise ValueError(f"default_max_queue_size limit must be positive, got {self.default_max_queue_size}")
+        if self.aggregate_byte_limit <= 0:
+            raise ValueError(f"aggregate_byte_limit limit must be positive, got {self.aggregate_byte_limit}")
+        if self.critical_ack_timeout <= 0:
+            raise ValueError(f"critical_ack_timeout limit must be positive, got {self.critical_ack_timeout}")
+        if self.stop_grace_period <= 0:
+            raise ValueError(f"stop_grace_period limit must be positive, got {self.stop_grace_period}")
+        if self.max_critical_payload_bytes <= 0:
+            raise ValueError(f"max_critical_payload_bytes limit must be positive, got {self.max_critical_payload_bytes}")
+
 
 class SinkCallback(Protocol):
     """Callback protocol for an observation sink."""
@@ -80,16 +94,16 @@ class _SinkRegistration:
 
 
 def _estimate_payload_bytes(observation: GraphObservation) -> int:
-    """Estimate detached payload size in bytes."""
+    """Estimate detached payload size in UTF-8 encoded bytes."""
     total = 128
     if observation.delta:
         try:
-            total += len(json.dumps(observation.delta, default=str))
+            total += len(json.dumps(observation.delta, default=str, ensure_ascii=False).encode("utf-8"))
         except Exception:
             total += 512
     if observation.state:
         try:
-            total += len(json.dumps(observation.state.model_dump(), default=str))
+            total += len(json.dumps(observation.state.model_dump(), default=str, ensure_ascii=False).encode("utf-8"))
         except Exception:
             total += 1024
     return total
@@ -138,12 +152,18 @@ class BoundedObserver(DeliveryHealth):
         self._unknown_dispositions: list[UnknownDisposition] = []
         self._pending_callbacks: set[asyncio.Task[Any]] = set()
         self._queued_bytes = 0  # aggregate detached payload bytes held in non-critical queues
+        self._inflight_bytes = 0  # bytes currently executing inside active callback tasks
 
     # DeliveryHealth protocol ----------------------------------------------------
 
     def healthy(self) -> bool:
         """Report whether delivery is healthy and circuit remains un-tripped."""
         return self._is_healthy and not self._circuit_closed
+
+    @property
+    def inflight_bytes(self) -> int:
+        """Aggregate bytes held in-flight across active callbacks."""
+        return self._inflight_bytes
 
     @property
     def is_shutdown(self) -> bool:
@@ -170,6 +190,11 @@ class BoundedObserver(DeliveryHealth):
         max_queue_size: int | None = None,
     ) -> None:
         """Register or update an observation sink. Idempotent."""
+        if not self.run_id or not isinstance(self.run_id, str):
+            raise ValueError("observer must have valid run_id identity before registering sinks")
+        if getattr(callback, "is_blocking", False):
+            raise BlockingSinkRequiresIsolationError(f"sink {sink_id} is blocking and requires process isolation")
+
         if sink_id in self._sinks:
             self.unregister_sink(sink_id)
 
@@ -244,6 +269,8 @@ class BoundedObserver(DeliveryHealth):
                     self._queued_bytes += size_bytes
                 except asyncio.QueueFull:
                     # Drop newest and record bounded gap
+                    if len(self._gaps) >= 50:
+                        self._gaps.pop(0)
                     self._gaps.append(
                         GapRecord(
                             sink_id=reg.sink_id,
@@ -273,7 +300,12 @@ class BoundedObserver(DeliveryHealth):
                 task = asyncio.create_task(res)
                 self._pending_callbacks.add(task)
                 try:
-                    await asyncio.wait_for(task, timeout=self.config.critical_ack_timeout)
+                    done, pending = await asyncio.wait([task], timeout=self.config.critical_ack_timeout)
+                    if task in pending:
+                        task.cancel()
+                        raise asyncio.TimeoutError
+                    # If done, retrieve exception or result
+                    task.result()
                 finally:
                     self._pending_callbacks.discard(task)
         except asyncio.TimeoutError:
@@ -317,6 +349,7 @@ class BoundedObserver(DeliveryHealth):
             # The event's bytes stay counted while its callback runs (it is still held
             # in memory) and are released in ``finally`` on completion or cancellation.
             cancelled = False
+            self._inflight_bytes += event.size_bytes
             try:
                 res = reg.callback(event)
                 if inspect.isawaitable(res):
@@ -326,6 +359,7 @@ class BoundedObserver(DeliveryHealth):
             except Exception:  # noqa: BLE001 - non-critical sinks never trip the circuit
                 pass
             finally:
+                self._inflight_bytes = max(0, self._inflight_bytes - event.size_bytes)
                 self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
                 reg.queue.task_done()
             if cancelled:
