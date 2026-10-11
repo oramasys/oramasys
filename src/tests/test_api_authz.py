@@ -14,7 +14,7 @@ from orama.api.authz import (
     manifest_keys,
     resolve_bind_host,
 )
-from orama.api.server import app
+from orama.api.server import app, create_app
 
 _RUN_PAYLOAD = {
     "session_id": "test-session",
@@ -24,21 +24,32 @@ _RUN_PAYLOAD = {
 }
 
 
+class _DirectRunner:
+    """Test-only runner used where this file verifies authorization, not admission."""
+
+    async def invoke(self, graph: object, state: object) -> object:
+        """Run the supplied graph explicitly for an authorization-only test."""
+        return await graph.ainvoke(state)
+
+
 @pytest.fixture
 def strong_token() -> str:
+    """Test helper: strong token."""
     return "test-control-plane-token-32b"
 
 
 async def test_health_endpoint_public_without_auth(monkeypatch):
+    """Health endpoint public without auth."""
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=create_app(runner=_DirectRunner())), base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
 
 
 async def test_run_without_token_configured_returns_503(monkeypatch):
+    """Run without token configured returns 503."""
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -47,6 +58,7 @@ async def test_run_without_token_configured_returns_503(monkeypatch):
 
 
 async def test_run_requires_bearer(monkeypatch, strong_token):
+    """Run requires bearer."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -55,6 +67,7 @@ async def test_run_requires_bearer(monkeypatch, strong_token):
 
 
 async def test_run_rejects_wrong_bearer(monkeypatch, strong_token):
+    """Run rejects wrong bearer."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -66,7 +79,8 @@ async def test_run_rejects_wrong_bearer(monkeypatch, strong_token):
     assert resp.status_code == 401
 
 
-async def test_run_with_valid_bearer_ok(monkeypatch, strong_token):
+async def test_run_with_valid_bearer_refuses_without_admission_runner(monkeypatch, strong_token) -> None:
+    """Run with valid bearer refuses without admission runner."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -75,14 +89,12 @@ async def test_run_with_valid_bearer_ok(monkeypatch, strong_token):
             json=_RUN_PAYLOAD,
             headers={"Authorization": f"Bearer {strong_token}"},
         )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["session_id"] == "test-session"
-    assert body["status"] == "done"
-    assert "nodes_visited" in body
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "admission.enforcement_unavailable"
 
 
 async def test_run_insecure_dev_loopback_skips_auth(monkeypatch):
+    """Run insecure dev loopback skips auth."""
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
@@ -94,12 +106,13 @@ async def test_run_insecure_dev_loopback_skips_auth(monkeypatch):
     # The symbolic "http://test" host used elsewhere in this file is neither
     # loopback nor representative of a real loopback-bound dev server, so it
     # would no longer exercise the "genuinely loopback" case this test names.
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+    async with AsyncClient(transport=ASGITransport(app=create_app(runner=_DirectRunner())), base_url="http://127.0.0.1") as client:
         resp = await client.post("/run", json=_RUN_PAYLOAD)
     assert resp.status_code == 200
 
 
 async def test_insecure_dev_ignored_when_lan_bound(monkeypatch, strong_token):
+    """Insecure dev ignored when lan bound."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.setenv("ORAMA_BIND_LAN", "1")
@@ -109,6 +122,7 @@ async def test_insecure_dev_ignored_when_lan_bound(monkeypatch, strong_token):
 
 
 def test_lan_bind_rejects_weak_token(monkeypatch):
+    """Lan bind rejects weak token."""
     monkeypatch.setenv("ORAMA_BIND_LAN", "1")
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "changeme")
     with pytest.raises(LanBindError):
@@ -116,6 +130,7 @@ def test_lan_bind_rejects_weak_token(monkeypatch):
 
 
 def test_lan_bind_rejects_missing_token(monkeypatch):
+    """Lan bind rejects missing token."""
     monkeypatch.setenv("ORAMA_BIND_LAN", "1")
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     with pytest.raises(LanBindError):
@@ -123,6 +138,7 @@ def test_lan_bind_rejects_missing_token(monkeypatch):
 
 
 def test_lan_bind_ok_with_strong_token(monkeypatch, strong_token):
+    """Lan bind ok with strong token."""
     monkeypatch.setenv("ORAMA_BIND_LAN", "1")
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     host = resolve_bind_host()
@@ -130,12 +146,14 @@ def test_lan_bind_ok_with_strong_token(monkeypatch, strong_token):
 
 
 def test_default_bind_is_loopback(monkeypatch):
+    """Default bind is loopback."""
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
     monkeypatch.delenv("ORAMA_BIND_HOST", raising=False)
     assert resolve_bind_host() == "127.0.0.1"
 
 
 def test_manifest_covers_app_routes():
+    """Manifest covers app routes."""
     from fastapi.routing import APIRoute
 
     declared = manifest_keys()
@@ -153,6 +171,7 @@ def test_manifest_covers_app_routes():
 
 
 def test_non_loopback_bind_host_requires_lan_policy(monkeypatch):
+    """Non loopback bind host requires lan policy."""
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
     monkeypatch.setenv("ORAMA_BIND_HOST", ".".join(["0"] * 4))
     with pytest.raises(LanBindError):
@@ -160,11 +179,13 @@ def test_non_loopback_bind_host_requires_lan_policy(monkeypatch):
 
 
 def test_assert_host_allows_loopback_without_lan(monkeypatch):
+    """Assert host allows loopback without lan."""
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
     assert assert_host_allowed("127.0.0.1") == "127.0.0.1"
 
 
 def test_assert_host_rejects_explicit_non_loopback_without_lan(monkeypatch, strong_token):
+    """Assert host rejects explicit non loopback without lan."""
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     with pytest.raises(LanBindError):
@@ -172,6 +193,7 @@ def test_assert_host_rejects_explicit_non_loopback_without_lan(monkeypatch, stro
 
 
 def test_assert_host_allows_non_loopback_with_lan_and_strong_token(monkeypatch, strong_token):
+    """Assert host allows non loopback with lan and strong token."""
     monkeypatch.setenv("ORAMA_BIND_LAN", "1")
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     host = ".".join(["0"] * 4)
@@ -179,6 +201,7 @@ def test_assert_host_allows_non_loopback_with_lan_and_strong_token(monkeypatch, 
 
 
 def test_insecure_dev_still_enforced_when_listen_host_not_loopback(monkeypatch, strong_token):
+    """Insecure dev still enforced when listen host not loopback."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
@@ -187,6 +210,7 @@ def test_insecure_dev_still_enforced_when_listen_host_not_loopback(monkeypatch, 
 
 
 def test_insecure_dev_loopback_listen_not_enforced(monkeypatch):
+    """Insecure dev loopback listen not enforced."""
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
     monkeypatch.setenv("ORAMA_LISTEN_HOST", "127.0.0.1")
@@ -195,6 +219,7 @@ def test_insecure_dev_loopback_listen_not_enforced(monkeypatch):
 
 
 def test_insecure_dev_honors_uvicorn_host_when_listen_unset(monkeypatch, strong_token):
+    """Insecure dev honors uvicorn host when listen unset."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
@@ -238,6 +263,7 @@ async def test_insecure_dev_bypass_is_closed_when_process_bound_non_loopback_wit
 
 
 def test_observed_listen_host_reads_asgi_scope_server_tuple():
+    """Observed listen host reads asgi scope server tuple."""
     from orama.api.authz.tokens import observed_listen_host
 
     assert observed_listen_host({"server": ("127.0.0.1", 8000)}) == "127.0.0.1"
@@ -250,6 +276,7 @@ def test_observed_listen_host_reads_asgi_scope_server_tuple():
 def test_auth_enforced_scope_ground_truth_overrides_stale_loopback_declaration(
     monkeypatch, strong_token
 ):
+    """Auth enforced scope ground truth overrides stale loopback declaration."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
@@ -267,6 +294,7 @@ def test_auth_enforced_scope_ground_truth_overrides_stale_loopback_declaration(
 
 
 def test_loopback_host_rejects_127_prefix_hostnames():
+    """Loopback host rejects 127 prefix hostnames."""
     assert is_loopback_host("127.0.0.1") is True
     assert is_loopback_host("::1") is True
     assert is_loopback_host("[::1]") is True

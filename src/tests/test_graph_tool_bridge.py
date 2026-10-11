@@ -17,13 +17,21 @@ class Input(BaseModel):
     text: str
 
 
+class _DirectRunner:
+    """Test-only runner preserving explicit scheduling in bridge unit tests."""
+
+    async def invoke(self, graph: object, state: object) -> object:
+        """Invoke the supplied graph without an admission layer in this test fixture."""
+        return await graph.ainvoke(state)
+
+
 def test_graph_tool_signature_and_execution() -> None:
     """Run the real graph while preserving a schema-readable signature."""
     graph = MiniGraph().add_node("a", lambda state: {"scratchpad": {"output": state.messages[0]["content"]}})
     graph.add_edge(START, "a").add_edge("a", END)
     tool = graph_tool("echo_graph", graph.compile(), input_model=Input,
         state_from=lambda value: PerpetuaState(session_id="tool", messages=[{"role": "user", "content": value.text}]),
-        output_key="output", description="Echo through the native graph.")
+        output_key="output", runner=_DirectRunner(), description="Echo through the native graph.")
     assert tool.__name__ == "echo_graph"
     assert inspect.signature(tool).parameters["request"].annotation is Input
     assert "native graph" in tool.__doc__
@@ -47,7 +55,7 @@ def test_graph_tool_does_not_report_stale_output_after_refusal(status, error) ->
             return PerpetuaState(session_id="test", status=status, error=error,
                                  scratchpad={"output": "stale"})
     tool = graph_tool("refused_graph", Graph(), input_model=Input,
-                      state_from=lambda payload: None, output_key="output")
+                      state_from=lambda payload: None, output_key="output", runner=_DirectRunner())
     with pytest.raises(RuntimeError, match="did not complete"):
         asyncio.run(tool(Input(text="hello")))
 
@@ -58,6 +66,19 @@ def test_graph_tool_reports_missing_output_key() -> None:
     graph.add_edge(START, "a").add_edge("a", END)
     tool = graph_tool("missing_output", graph.compile(), input_model=Input,
                       state_from=lambda payload: PerpetuaState(session_id="tool"),
-                      output_key="answer")
+                      output_key="answer", runner=_DirectRunner())
     with pytest.raises(RuntimeError, match="graph completed without output key 'answer'"):
         asyncio.run(tool(Input(text="hello")))
+
+
+def test_graph_tool_refuses_to_construct_without_an_invocation_runner() -> None:
+    """The bridge cannot accidentally schedule a graph outside the admission seam."""
+    graph = MiniGraph().compile()
+    with pytest.raises(ValueError, match="runner"):
+        graph_tool(
+            "unguarded_graph",
+            graph,
+            input_model=Input,
+            state_from=lambda payload: PerpetuaState(session_id="tool"),
+            output_key="answer",
+        )
