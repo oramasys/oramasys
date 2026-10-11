@@ -22,6 +22,7 @@ from orama.graph.bounded_observer import (
     OrderedEvent,
     UnknownDisposition,
 )
+from orama.graph import execution_guard
 from orama.graph.execution_guard import StopSignal
 
 
@@ -232,7 +233,13 @@ async def test_critical_sink_timeout_maps_to_unknown_and_unhealthy():
 async def test_late_acknowledgment_never_reopens_dispatch_authority():
     """Late acknowledgment after circuit has closed must never restore healthy() to True."""
     config = BoundedObserverConfig(critical_ack_timeout=0.05)
-    observer = BoundedObserver(run_id="run-b2-late", config=config)
+    observer = BoundedObserver(
+        run_id="run-b2-late",
+        attempt_id="att-late",
+        hold_id="hold-late",
+        fence_epoch=1,
+        config=config,
+    )
 
     ack_completed = asyncio.Event()
 
@@ -357,3 +364,56 @@ async def test_circuit_is_fenced_against_late_authority_after_stop():
 
     with pytest.raises(RuntimeError, match="observer is shut down"):
         await observer.on_observation(make_obs("run-b3-fenced"))
+
+
+def test_unknown_disposition_is_the_same_type_the_ledger_uses() -> None:
+    """Seam reconciliation: Stream A and Stream B must share ONE UnknownDisposition
+    type, not two structurally-identical-but-unrelated classes.
+
+    Both streams independently implemented Gate 2's schema correctly and
+    identically by field shape -- but as two separate dataclasses in two
+    modules, bounded_observer.UnknownDisposition was never actually the
+    same type as execution_guard.UnknownDisposition, which also carries a
+    schema_version field and real __post_init__ validation that the
+    duplicate lacked entirely. A ledger or any other consumer written
+    against execution_guard.UnknownDisposition would silently accept an
+    unvalidated object from the observer that only duck-types the same
+    shape.
+    """
+    assert UnknownDisposition is execution_guard.UnknownDisposition
+
+
+@pytest.mark.asyncio
+async def test_circuit_trip_produces_a_validated_disposition_not_a_bypass() -> None:
+    """The disposition BoundedObserver records on a critical failure must pass
+    through the real __post_init__ validation Stream A defined -- not a
+    parallel class with no validation at all."""
+    observer = BoundedObserver(
+        run_id="run-seam-1", attempt_id="att-seam-1", hold_id="hold-seam-1", fence_epoch=1
+    )
+
+    def broken_sink(event):
+        raise RuntimeError("critical sink failure")
+
+    observer.register_sink("failing", broken_sink, critical=True)
+    with pytest.raises(RuntimeError):
+        await observer.on_observation(make_obs("run-seam-1"))
+
+    assert len(observer.unknown_dispositions) == 1
+    disposition = observer.unknown_dispositions[0]
+    assert isinstance(disposition, execution_guard.UnknownDisposition)
+    assert disposition.schema_version == 1
+    assert disposition.cause == "critical_delivery_failure"
+
+    # Confirm the validation is real, not accidentally satisfied: constructing
+    # the same type directly with a bad cause must raise, proving this isn't
+    # an unchecked dataclass that happens to pass today's one call site.
+    with pytest.raises(ValueError):
+        execution_guard.UnknownDisposition(
+            attempt_id=disposition.attempt_id,
+            hold_id=disposition.hold_id,
+            fence_epoch=disposition.fence_epoch,
+            cause="not_a_real_cause",  # type: ignore[arg-type]
+            stop_state=disposition.stop_state,
+            settlement_state=disposition.settlement_state,
+        )

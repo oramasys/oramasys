@@ -14,29 +14,19 @@ import inspect
 import json
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal, Protocol
+from dataclasses import dataclass
+from typing import Any, Awaitable, Literal, Protocol
 
 from perpetua_core.graph.engine import GraphObservation
-from orama.graph.execution_guard import DeliveryHealth, StopSignal
+from orama.graph.execution_guard import DeliveryHealth, StopSignal, UnknownDisposition
 
-
-@dataclass(frozen=True, slots=True)
-class UnknownDisposition:
-    """Versioned unknown disposition contract agreed across Stream A and Stream B (Gate 2)."""
-
-    attempt_id: str
-    hold_id: str
-    fence_epoch: int
-    cause: Literal[
-        "crash_before_intent",
-        "crash_before_publish",
-        "crash_before_settle",
-        "critical_delivery_failure",
-        "stop_timeout",
-    ]
-    stop_state: Literal["none", "requested", "acknowledged"]
-    settlement_state: Literal["unsettled", "settled", "irrelevant"]
+# Re-exported for existing importers of this module (seam reconciliation,
+# 2026-10-11): UnknownDisposition is execution_guard's real, versioned,
+# validated type -- Gate 2 requires ONE shared type across Stream A and
+# Stream B, not two structurally-identical-but-unrelated dataclasses. Do not
+# redefine it here; a local duplicate would skip execution_guard's
+# __post_init__ validation and schema_version field entirely.
+__all__ = ["UnknownDisposition"]
 
 
 @dataclass(frozen=True, slots=True)
