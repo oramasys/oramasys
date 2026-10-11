@@ -97,12 +97,15 @@ def _estimate_payload_bytes(observation: GraphObservation) -> int:
 
 def _detach_observation(observation: GraphObservation) -> GraphObservation:
     """Create a completely deep-isolated copy of GraphObservation."""
-    return GraphObservation(
-        event=observation.event,
-        state=observation.state.model_copy(deep=True),
-        delta=deepcopy(observation.delta),
-        provenance=deepcopy(observation.provenance),
-    )
+    fields: dict[str, Any] = {
+        "event": observation.event,
+        "state": observation.state.model_copy(deep=True),
+        "delta": deepcopy(observation.delta),
+    }
+    # Older Core pins (policy-r3) have no provenance field; copy it only where it exists.
+    if hasattr(observation, "provenance"):
+        fields["provenance"] = deepcopy(observation.provenance)
+    return GraphObservation(**fields)
 
 
 class BoundedObserver(DeliveryHealth):
