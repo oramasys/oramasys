@@ -12,7 +12,10 @@ Required acceptance tests per HANDOFF-PLAN-T2-TO-M1-2026-10-11.md §6 Task 5:
 """
 from __future__ import annotations
 
-import multiprocessing as mp
+import json
+import select
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,76 +29,139 @@ from orama.graph.run_control import (
 )
 
 
-def _record_terminal_receipt(
-    store_path: str,
-    receipt: TerminalReceipt,
-    ready: Any,
-    start: Any,
-    results: Any,
-) -> None:
-    """Record one receipt through an independent connection after a bounded rendezvous."""
-    control = RunControl(store_path=store_path)
-    ready.put("ready")
-    if not start.wait(timeout=10):
-        results.put(("handshake_timeout",))
-        control.close()
-        return
+_TERMINAL_WRITER = r"""
+import json
+import sys
+
+from orama.graph.run_control import RunControl, TerminalReceipt
+
+store_path = sys.argv[1]
+payload = json.loads(sys.argv[2])
+control = RunControl(store_path=store_path)
+try:
+    print(json.dumps({"state": "ready"}), flush=True)
+    if sys.stdin.readline() != "go\n":
+        raise RuntimeError("parent did not release terminal writer")
+    receipt = TerminalReceipt(
+        run_id=payload["run_id"],
+        epoch=payload["epoch"],
+        outcome=payload["outcome"],
+        reason=payload["reason"],
+        unresolved_attempts=tuple(payload["unresolved_attempts"]),
+        schema_version=payload["schema_version"],
+    )
     try:
         stored = control.record_terminal_receipt(receipt)
-        results.put(
-            (
-                "ok",
-                stored.epoch,
-                stored.outcome,
-                stored.reason,
-                stored.unresolved_attempts,
-                stored.schema_version,
-            )
-        )
-    except Exception as error:  # noqa: BLE001 - child reports the exact public failure
-        results.put(("error", type(error).__name__, str(error)))
-    finally:
-        control.close()
+    except Exception as error:
+        result = {
+            "state": "error",
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+    else:
+        result = {
+            "state": "ok",
+            "receipt": {
+                "epoch": stored.epoch,
+                "outcome": stored.outcome,
+                "reason": stored.reason,
+                "unresolved_attempts": list(stored.unresolved_attempts),
+                "schema_version": stored.schema_version,
+            },
+        }
+    print(json.dumps(result, sort_keys=True), flush=True)
+finally:
+    control.close()
+"""
+
+
+def _receipt_payload(receipt: TerminalReceipt) -> str:
+    """Serialize one receipt without requiring the child to import this test module."""
+    return json.dumps(
+        {
+            "run_id": receipt.run_id,
+            "epoch": receipt.epoch,
+            "outcome": receipt.outcome,
+            "reason": receipt.reason,
+            "unresolved_attempts": list(receipt.unresolved_attempts),
+            "schema_version": receipt.schema_version,
+        },
+        sort_keys=True,
+    )
+
+
+def _read_child_message(process: subprocess.Popen[str], timeout: float = 10) -> dict[str, Any]:
+    """Read one JSON line without permitting an unbounded child wait."""
+    assert process.stdout is not None
+    readable, _, _ = select.select([process.stdout], [], [], timeout)
+    if not readable:
+        raise AssertionError("terminal writer timed out")
+    line = process.stdout.readline()
+    if not line:
+        stderr = ""
+        if process.poll() is not None and process.stderr is not None:
+            stderr = process.stderr.read()
+        raise AssertionError(f"terminal writer exited before its message: {stderr}")
+    message = json.loads(line)
+    assert isinstance(message, dict)
+    return message
 
 
 def _race_terminal_receipts(
     store_path: Path,
     receipts: tuple[TerminalReceipt, ...],
 ) -> list[tuple[Any, ...]]:
-    """Release independent writers together and return their bounded results."""
+    """Race isolated installed-package writers through a bounded JSON handshake."""
     initializer = RunControl(store_path=store_path)
     initializer.close()
-    context = mp.get_context("spawn")
-    ready = context.Queue()
-    start = context.Event()
-    results = context.Queue()
-    processes = [
-        context.Process(
-            target=_record_terminal_receipt,
-            args=(str(store_path), receipt, ready, start, results),
-        )
-        for receipt in receipts
-    ]
-    for process in processes:
-        process.start()
+    processes: list[subprocess.Popen[str]] = []
     try:
-        for _ in processes:
-            assert ready.get(timeout=10) == "ready"
-        start.set()
-        recorded = [results.get(timeout=10) for _ in processes]
+        for receipt in receipts:
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-I", "-c", _TERMINAL_WRITER, str(store_path), _receipt_payload(receipt)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+            )
         for process in processes:
-            process.join(timeout=10)
-            assert not process.is_alive()
-            assert process.exitcode == 0
+            assert _read_child_message(process) == {"state": "ready"}
+        for process in processes:
+            assert process.stdin is not None
+            process.stdin.write("go\n")
+            process.stdin.flush()
+
+        messages = [_read_child_message(process) for process in processes]
+        recorded = []
+        for message in messages:
+            if message["state"] == "ok":
+                stored = message["receipt"]
+                recorded.append(
+                    (
+                        "ok",
+                        stored["epoch"],
+                        stored["outcome"],
+                        stored["reason"],
+                        tuple(stored["unresolved_attempts"]),
+                        stored["schema_version"],
+                    )
+                )
+            else:
+                recorded.append(("error", message["type"], message["message"]))
+        for process in processes:
+            assert process.wait(timeout=10) == 0
         return recorded
     finally:
-        start.set()
         for process in processes:
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=1)
-        ready.close()
-        results.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=2)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def test_terminal_receipt_taxonomy() -> None:
