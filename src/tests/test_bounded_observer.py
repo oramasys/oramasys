@@ -479,3 +479,42 @@ async def test_unidentified_observer_still_requests_stop_and_surfaces_sink_error
         await observer.on_observation(make_obs("run-noid"))
     assert stop.reason == "delivery.critical_failure"
     assert not observer.healthy()
+
+
+@pytest.mark.asyncio
+async def test_bytes_stay_counted_while_callback_runs_then_release():
+    """A dequeued event still holds memory until its callback finishes."""
+    observer = BoundedObserver(run_id="run-inflight")
+    gate = asyncio.Event()
+
+    async def slow(event: OrderedEvent) -> None:
+        """Block until released."""
+        await gate.wait()
+
+    observer.register_sink("slow", slow, critical=False)
+    await observer.on_observation(make_obs("run-inflight"))
+    await asyncio.sleep(0.01)  # worker dequeues and blocks inside the callback
+    assert observer._queued_bytes > 0
+    gate.set()
+    await observer.shutdown(grace_period=0.5)
+    assert observer._queued_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_replacing_a_sink_releases_its_abandoned_queue_bytes():
+    """Replacing a sink with queued events must not leak its byte allowance."""
+    observer = BoundedObserver(run_id="run-replace")
+    block = asyncio.Event()
+
+    async def stuck(event: OrderedEvent) -> None:
+        """Block so later events stay queued."""
+        await block.wait()
+
+    observer.register_sink("s", stuck, critical=False)
+    for _ in range(3):
+        await observer.on_observation(make_obs("run-replace"))
+    await asyncio.sleep(0.01)
+    observer.register_sink("s", lambda event: None, critical=False)
+    await asyncio.sleep(0.01)
+    assert observer._queued_bytes == 0
+    await observer.shutdown(grace_period=0.5)

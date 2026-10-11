@@ -194,6 +194,15 @@ class BoundedObserver(DeliveryHealth):
         if reg and reg.worker_task and not reg.worker_task.done():
             reg.worker_task.cancel()
             self._pending_callbacks.discard(reg.worker_task)
+        if reg and reg.queue is not None:
+            # Release the allowance of events abandoned in the replaced queue.
+            while True:
+                try:
+                    event = reg.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
+                reg.queue.task_done()
 
     # Core observation dispatch -------------------------------------------------
 
@@ -305,17 +314,22 @@ class BoundedObserver(DeliveryHealth):
                 event = await reg.queue.get()
             except asyncio.CancelledError:
                 break
-            self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
+            # The event's bytes stay counted while its callback runs (it is still held
+            # in memory) and are released in ``finally`` on completion or cancellation.
+            cancelled = False
             try:
                 res = reg.callback(event)
                 if inspect.isawaitable(res):
                     await res
             except asyncio.CancelledError:
-                reg.queue.task_done()
-                break
+                cancelled = True
             except Exception:  # noqa: BLE001 - non-critical sinks never trip the circuit
                 pass
-            reg.queue.task_done()
+            finally:
+                self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
+                reg.queue.task_done()
+            if cancelled:
+                break
 
     # Cooperative stop & shutdown ------------------------------------------------
 
