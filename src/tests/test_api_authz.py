@@ -90,7 +90,8 @@ async def test_run_with_valid_bearer_refuses_without_admission_runner(monkeypatc
             headers={"Authorization": f"Bearer {strong_token}"},
         )
     assert resp.status_code == 503
-    assert resp.json()["detail"] == "admission.enforcement_unavailable"
+    assert resp.json()["detail"]["code"] == "run_unavailable"
+    assert isinstance(resp.json()["detail"]["correlation_id"], str)
 
 
 async def test_run_insecure_dev_loopback_skips_auth(monkeypatch):

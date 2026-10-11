@@ -1,4 +1,6 @@
 """oramasys FastAPI glass-window — handlers ≤ 10 lines each."""
+import uuid
+
 from fastapi import FastAPI, HTTPException
 from orama.api.authz import install_authz
 from orama.api.contracts import RunRequest, RunResponse
@@ -20,7 +22,10 @@ def create_app(*, runner: GraphRunner | None = None, compiled_graph: object | No
         try:
             result = await active_runner.invoke(active_graph, req.to_state())
         except AdmissionRefused as error:
-            raise HTTPException(status_code=503, detail=error.reason) from error
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "run_unavailable", "correlation_id": str(uuid.uuid4())},
+            ) from error
         return RunResponse.from_state(result)
 
     @app.get("/health")
