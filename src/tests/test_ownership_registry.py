@@ -31,7 +31,7 @@ SNAPSHOTS = {
     "core-r3": FIXTURES / "graph-ownership-registry-core-r3.json",
 }
 CORE_PINS = {
-    "production": "4d217f6b9e94e36554a9427198b8c2c4b7febc47",
+    "production": "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973",
     "policy-r3": "04759a50c748444ff97136ea95c1e1289eac3a1a",
     "core-r3": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68",
 }
@@ -52,7 +52,7 @@ def snapshot_for_profile(profile: str) -> Path:
 
 SNAPSHOT = snapshot_for_profile(PROFILE)
 PINNED_DIGESTS = {
-    "baseline": "fbde64f2c3b2bec62f703137f5fddb480d502440b9e1b229c15292816b52f7e2",
+    "baseline": "91d3c74b5cd9aea1d176dd87115f09151fc1e3a6155292aa58a32d8f7bb40787",
     "policy-r3": "4972754f7ceb0ad3e908f6583533fec3c59a807732ac86c3ee967df33e29e36f",
     "core-r3": "e270493a7c924871e50fcf384c792a6922a375976127e26214f69b7c89ba9437",
 }
