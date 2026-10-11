@@ -36,7 +36,7 @@ def _worker_loop(target: Callable[[Any], None], queue: mp.Queue, error_queue: mp
 
 class ProcessIsolatedSink:
     """Wrapper that runs a blocking observation sink in an isolated worker process.
-    
+
     Protects the scheduler and async event loop from hangs, blocking system calls,
     or uncaught signals in synchronous third-party telemetry sinks.
     """

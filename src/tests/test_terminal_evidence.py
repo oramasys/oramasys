@@ -58,7 +58,7 @@ def test_conflicting_terminal_retries_rejected(tmp_path: Path) -> None:
     """A run with a recorded terminal receipt rejects conflicting terminal states."""
     control = RunControl(store_path=tmp_path / "stop.sqlite3")
     control.register_run(run_id="run-term", owner_principal="owner")
-    
+
     first = TerminalReceipt(
         run_id="run-term",
         epoch=1,
@@ -66,7 +66,7 @@ def test_conflicting_terminal_retries_rejected(tmp_path: Path) -> None:
         reason="success",
     )
     control.record_terminal_receipt(first)
-    
+
     # Identical retry is idempotent
     assert control.record_terminal_receipt(first) == first
 

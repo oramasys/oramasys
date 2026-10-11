@@ -219,7 +219,7 @@ class RunControl:
             outcome: TerminalOutcome = "unknown"
         else:
             outcome = "cancelled"
-        
+
         receipt = TerminalReceipt(
             run_id=run_id,
             epoch=epoch,

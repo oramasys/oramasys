@@ -63,7 +63,7 @@ async def test_unicode_payload_counts_encoded_bytes():
     emoji_str = "🔥" * 100  # len is 100, utf-8 byte len is 400
     obs = make_obs(text=emoji_str)
     observer = BoundedObserver(run_id="run-unicode", attempt_id="att-1", hold_id="h-1", fence_epoch=1)
-    
+
     received_bytes = 0
     def sink(event: OrderedEvent):
         nonlocal received_bytes
@@ -72,7 +72,7 @@ async def test_unicode_payload_counts_encoded_bytes():
     observer.register_sink("sink", sink, critical=False)
     await observer.on_observation(obs)
     await observer.shutdown(grace_period=0.5)
-    
+
     # Encoded bytes must reflect UTF-8 multibyte representation
     assert received_bytes >= 400
 
@@ -82,16 +82,16 @@ async def test_gap_metadata_is_bounded():
     """GapRecord accumulation itself must be bounded to prevent memory leaks."""
     config = BoundedObserverConfig(default_max_queue_size=2, aggregate_byte_limit=1024)
     observer = BoundedObserver(run_id="run-gap", config=config, attempt_id="att-1", hold_id="h-1", fence_epoch=1)
-    
+
     async def slow_sink(event: OrderedEvent):
         await asyncio.sleep(0.5)
 
     observer.register_sink("sink", slow_sink, critical=False)
-    
+
     # Overflow queue repeatedly
     for i in range(200):
         await observer.on_observation(make_obs(run_id="run-gap", text=f"event-{i}"))
-        
+
     assert len(observer.gaps) <= 50  # Must be bounded
     await observer.shutdown(grace_period=0.1)
 
@@ -111,12 +111,12 @@ async def test_cancellation_suppressing_sink_returns_within_wait_bound():
             await asyncio.sleep(0.5)
 
     observer.register_sink("bad_sink", misbehaving_sink, critical=True)
-    
+
     t0 = time.monotonic()
     with pytest.raises(TimeoutError):
         await observer.on_observation(make_obs("run-cancel-suppress"))
     elapsed = time.monotonic() - t0
-    
+
     # Outer wait must not hang for 0.5s+; must return within bound
     assert elapsed < 0.25
     assert not observer.healthy()
@@ -138,7 +138,7 @@ async def test_late_ack_has_no_authority():
             sink_finished.set()
 
     observer.register_sink("late", late_sink, critical=True)
-    
+
     with pytest.raises(TimeoutError):
         await observer.on_observation(make_obs("run-late"))
     assert not observer.healthy()
@@ -162,10 +162,10 @@ async def test_replacement_retains_running_task():
     observer.register_sink("s1", long_running_sink, critical=False)
     await observer.on_observation(make_obs("run-replace"))
     await task_running.wait()
-    
+
     # Replace registration
     observer.register_sink("s1", lambda e: None, critical=False)
-    
+
     # Old task must still be tracked in pending tasks
     task_released.set()
     await observer.shutdown(grace_period=0.5)
@@ -182,7 +182,7 @@ async def test_aggregate_bytes_include_inflight_across_sinks():
 
     observer.register_sink("s1", blocking_sink, critical=False)
     observer.register_sink("s2", blocking_sink, critical=False)
-    
+
     await observer.on_observation(make_obs("run-bytes", text="payload-data"))
     await asyncio.sleep(0.01)
     # Both workers hold event in-flight
