@@ -51,8 +51,13 @@ def prepare_private_store(path: Path | str) -> Path:
     try:
         parent_status = os.lstat(parent)
     except FileNotFoundError:
-        os.mkdir(parent, _DIRECTORY_MODE)
-        created_parent = True
+        try:
+            os.mkdir(parent, _DIRECTORY_MODE)
+            created_parent = True
+        except FileExistsError:
+            # Another process won the race: validate its directory below and
+            # never change its permissions.
+            pass
         parent_status = os.lstat(parent)
 
     if stat.S_ISLNK(parent_status.st_mode):

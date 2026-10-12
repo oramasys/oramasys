@@ -1,4 +1,5 @@
 """oramasys FastAPI glass-window — handlers ≤ 10 lines each."""
+import logging
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
@@ -11,6 +12,8 @@ from orama.graph.admission_runtime import (
     UnconfiguredGraphRunner,
 )
 from orama.graph.perpetua_graph import graph
+
+_log = logging.getLogger(__name__)
 
 
 def create_app(*, runner: GraphRunner | None = None, compiled_graph: object | None = None) -> FastAPI:
@@ -32,9 +35,14 @@ def create_app(*, runner: GraphRunner | None = None, compiled_graph: object | No
                 request_runner = active_runner.for_authenticated_principal(principal)
             result = await request_runner.invoke(active_graph, req.to_state())
         except AdmissionRefused as error:
+            correlation_id = str(uuid.uuid4())
+            _log.warning(
+                "run refused",
+                extra={"correlation_id": correlation_id, "reason": error.reason},
+            )
             raise HTTPException(
                 status_code=503,
-                detail={"code": "run_unavailable", "correlation_id": str(uuid.uuid4())},
+                detail={"code": "run_unavailable", "correlation_id": correlation_id},
             ) from error
         return RunResponse.from_state(result)
 

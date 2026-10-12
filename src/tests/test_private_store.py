@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -173,3 +174,20 @@ def test_created_database_is_not_affected_by_process_umask(tmp_path: Path) -> No
         os.umask(original_umask)
 
     assert _mode(store) == 0o600
+
+
+def test_first_open_race_validates_the_winning_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent creator is validated, not turned into a FileExistsError."""
+    real_mkdir = os.mkdir
+
+    def racing_mkdir(path: Any, mode: int = 0o777, **kwargs: Any) -> None:
+        real_mkdir(path, 0o700)  # the other process wins first
+        raise FileExistsError(path)
+
+    monkeypatch.setattr(os, "mkdir", racing_mkdir)
+    store = prepare_private_store(tmp_path / "fresh" / "ledger.sqlite3")
+
+    assert store.parent.is_dir()
+    assert oct(store.parent.stat().st_mode & 0o777) == "0o700"
