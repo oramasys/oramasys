@@ -49,3 +49,25 @@ class RunResponse(BaseModel):
             nodes_visited=state.nodes_visited,
             error=state.error,
         )
+
+
+class AdjustmentRequest(BaseModel):
+    """One signed adjustment grant, in the issuer's wire form, to be spent once."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant: str = Field(min_length=2, max_length=65_536)
+
+
+class AdjustmentReceiptResponse(BaseModel):
+    """The ledger's immutable receipt for a consumed grant; no issuer internals."""
+
+    grant_id: str
+    run_id: str
+    hold_id: str
+    kind: str
+    units_basis: str
+    balance_delta: int
+    verifier_id: str
+    payload_digest: str
+

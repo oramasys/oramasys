@@ -29,6 +29,7 @@ class RouteSpec:
 ROUTE_MANIFEST: tuple[RouteSpec, ...] = (
     RouteSpec("GET", "/health", RouteCapability.PUBLIC),
     RouteSpec("POST", "/run", RouteCapability.MUTATE),
+    RouteSpec("POST", "/adjustments", RouteCapability.LIFECYCLE),
 )
 
 # FastAPI / OpenAPI surfaces: public for alpha (operator docs on loopback).
