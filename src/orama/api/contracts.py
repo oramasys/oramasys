@@ -70,4 +70,3 @@ class AdjustmentReceiptResponse(BaseModel):
     balance_delta: int
     verifier_id: str
     payload_digest: str
-
