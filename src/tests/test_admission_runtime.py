@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from perpetua_core import END, START, MiniGraph, PerpetuaState
-from perpetua_core.graph.gate import DispatchRequest
 from orama.graph.admission import (
     AdmissionProviders,
     AdmissionRefused,
@@ -17,6 +16,7 @@ from orama.graph.admission import (
 from orama.graph.admission_runtime import AdmissionGraphRunner, UnconfiguredGraphRunner
 from orama.graph.execution_guard import StepLedger
 from orama.graph.run_control import RunControl, StopRequest
+from tests.core_capabilities import CORE_GATE_AVAILABLE, invoke_or_expect_gate_refusal
 from tests.test_admission_decision import binding, context, providers
 
 
@@ -119,13 +119,20 @@ async def test_bound_runner_replaces_client_run_and_principal(tmp_path: Path) ->
         clock=clock,
     )
 
-    await runner.for_authenticated_principal("control-plane").invoke(
-        _compiled_graph(), PerpetuaState(session_id="client-session")
+    bound = runner.for_authenticated_principal("control-plane")
+    outcome = await invoke_or_expect_gate_refusal(
+        lambda: bound.invoke(
+            _compiled_graph(), PerpetuaState(session_id="client-session")
+        )
     )
     assert len(seen_contexts) == 1
     effective = seen_contexts[0]
     assert effective.principal_id == "control-plane"
     assert effective.run_id not in {"client-run", "client-session"}
+    if outcome is None:  # Core without a gate: identity was bound, scheduling refused
+        ledger.close()
+        run_control.close()
+        return
     assert ledger.used(effective.run_id) == 1
     receipt = run_control.terminal_receipt(effective.run_id)
     assert receipt is not None
@@ -180,6 +187,8 @@ async def test_stop_between_dispatch_and_start_is_recorded_truthfully(
         """Inject a stop after admission but before the callable start marker."""
 
         async def ainvoke(self, state: object, *, gate: Any) -> object:
+            from perpetua_core.graph.gate import DispatchRequest
+
             request = DispatchRequest("node", ("work",), 0)
             decision = await gate.before_dispatch(request)
             assert decision.verdict == "allow"
@@ -207,8 +216,18 @@ async def test_stop_between_dispatch_and_start_is_recorded_truthfully(
         clock=clock,
     )
 
+    bound = runner.for_authenticated_principal("control-plane")
+    if not CORE_GATE_AVAILABLE:
+        await invoke_or_expect_gate_refusal(
+            lambda: bound.invoke(
+                StopAtStartGraph(), PerpetuaState(session_id="client-session")
+            )
+        )
+        ledger.close()
+        run_control.close()
+        return
     with pytest.raises(AdmissionRefused, match="stop_requested"):
-        await runner.for_authenticated_principal("control-plane").invoke(
+        await bound.invoke(
             StopAtStartGraph(), PerpetuaState(session_id="client-session")
         )
 

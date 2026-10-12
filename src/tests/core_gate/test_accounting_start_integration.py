@@ -6,16 +6,11 @@ from pathlib import Path
 import pytest
 
 from orama.graph.accounting_types import ChargeUnits
-from orama.graph.execution_guard import AdmissionRefused, core_start_seam_available
+from orama.graph.execution_guard import AdmissionRefused
 from tests.core_gate.test_admission_gate_scheduler import fresh, linear, make
 
-requires_start_seam = pytest.mark.skipif(
-    not core_start_seam_available(),
-    reason="pinned perpetua-core lacks the T2 _before_start seam",
-)
 
 
-@requires_start_seam
 async def test_start_marker_is_durable_before_node_callable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46,7 +41,6 @@ async def test_start_marker_is_durable_before_node_callable(
     assert ledger.hold_state("run-1", "node::a::0") == "settled"
 
 
-@requires_start_seam
 async def test_failed_start_marker_never_calls_node(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -63,7 +57,6 @@ async def test_failed_start_marker_never_calls_node(
     assert calls == []
 
 
-@requires_start_seam
 async def test_multi_unit_allowance_is_reserved_before_nodes(tmp_path: Path) -> None:
     """An explicit allowance enforces every configured dimension atomically."""
     gate, _, _, ledger, _ = make(tmp_path)
@@ -82,7 +75,6 @@ async def test_multi_unit_allowance_is_reserved_before_nodes(tmp_path: Path) -> 
     )
 
 
-@requires_start_seam
 def test_accounting_configuration_cannot_expand_admission(tmp_path: Path) -> None:
     """A runtime accounting limit cannot widen owner-approved steps."""
     gate, _, _, _, _ = make(tmp_path, max_steps=2)
@@ -101,7 +93,6 @@ def test_compound_attempt_names_cannot_alias_one_another(tmp_path: Path) -> None
     assert first != second
 
 
-@requires_start_seam
 async def test_idempotent_start_record_does_not_authorize_reexecution(tmp_path: Path) -> None:
     """Reusing a gate cannot replay a completed call for its old reservation."""
     from perpetua_core.graph.gate import GateRefused
