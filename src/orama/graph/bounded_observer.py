@@ -152,6 +152,7 @@ class BoundedObserver(DeliveryHealth):
         self._gaps: list[GapRecord] = []
         self._unknown_dispositions: list[UnknownDisposition] = []
         self._pending_callbacks: set[asyncio.Task[Any]] = set()
+        self._close_tasks: set[asyncio.Task[Any]] = set()  # off-loop sink closes
         self._queued_bytes = 0  # aggregate detached payload bytes held in non-critical queues
         self._inflight_bytes = 0  # bytes currently executing inside active callback tasks
 
@@ -223,11 +224,8 @@ class BoundedObserver(DeliveryHealth):
             reg.retired = True
         if reg and reg.worker_task and not reg.worker_task.done():
             reg.worker_task.cancel()
-        if reg and hasattr(reg.callback, "close") and callable(reg.callback.close):
-            try:
-                reg.callback.close()
-            except Exception:
-                pass
+        if reg:
+            self._close_off_loop(reg.callback)
         if reg and reg.queue is not None:
             # Release the allowance of events abandoned in the replaced queue.
             while True:
@@ -237,6 +235,35 @@ class BoundedObserver(DeliveryHealth):
                     break
                 self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
                 reg.queue.task_done()
+
+    def _close_off_loop(self, callback: Any) -> asyncio.Task[Any] | None:
+        """Close a sink without blocking the event loop; failures are swallowed.
+
+        ``ProcessIsolatedSink.close`` joins its worker process, which blocks for
+        up to a fraction of a second per sink, so it runs in a thread and is
+        tracked so shutdown can wait for it inside its single deadline.
+        """
+        close = getattr(callback, "close", None)
+        if not callable(close):
+            return None
+
+        async def _close_quietly() -> None:
+            try:
+                await asyncio.to_thread(close)
+            except Exception:  # noqa: BLE001 - a failing close must not break shutdown
+                pass
+
+        try:
+            task = asyncio.get_running_loop().create_task(_close_quietly())
+        except RuntimeError:  # no running loop: nothing to protect, close inline
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+        return task
 
     # Core observation dispatch -------------------------------------------------
 
@@ -395,6 +422,13 @@ class BoundedObserver(DeliveryHealth):
 
         self._is_shutdown = True
         grace = grace_period if grace_period is not None else self.config.stop_grace_period
+        # One deadline bounds the whole shutdown: drain, callback cancellation
+        # and sink close share it instead of each spending a fresh grace.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace
+
+        def remaining() -> float:
+            return max(0.0, deadline - loop.time())
 
         # Wait for non-critical queues to drain
         drain_coros = []
@@ -404,7 +438,7 @@ class BoundedObserver(DeliveryHealth):
 
         if drain_coros:
             try:
-                await asyncio.wait_for(asyncio.gather(*drain_coros), timeout=grace)
+                await asyncio.wait_for(asyncio.gather(*drain_coros), timeout=remaining())
             except asyncio.TimeoutError:
                 # Grace period expired: honesty constraint dictates recording stop_timeout
                 self._trip_circuit("stop_timeout", "stop.grace_period_expired")
@@ -420,17 +454,17 @@ class BoundedObserver(DeliveryHealth):
             if not task.done():
                 task.cancel()
         if self._pending_callbacks:
-            _, pending = await asyncio.wait(tuple(self._pending_callbacks), timeout=grace)
+            _, pending = await asyncio.wait(tuple(self._pending_callbacks), timeout=remaining())
             if pending:
                 self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
-        # Close any sinks with an explicit close() lifecycle
+        # Close sinks with an explicit close() lifecycle off the event loop.
         for reg in self._sinks.values():
-            if hasattr(reg.callback, "close") and callable(reg.callback.close):
-                try:
-                    reg.callback.close()
-                except Exception:
-                    pass
+            self._close_off_loop(reg.callback)
+        if self._close_tasks:
+            _, unfinished = await asyncio.wait(tuple(self._close_tasks), timeout=remaining())
+            if unfinished:
+                self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
     async def __aenter__(self) -> BoundedObserver:
         """Enter async context."""

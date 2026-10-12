@@ -250,7 +250,7 @@ async def test_process_isolated_sink_close_lifecycle_on_shutdown():
     observer = BoundedObserver(run_id="run-sink-close", attempt_id="att-1", hold_id="h-1", fence_epoch=1)
     observer.register_sink("isolated", sink, critical=False)
     assert sink._process.is_alive()
-    await observer.shutdown(grace_period=0.1)
+    await observer.shutdown(grace_period=3.0)
     assert not sink._process.is_alive()
 
 
@@ -263,4 +263,66 @@ async def test_process_isolated_sink_close_lifecycle_on_unregister():
     observer.register_sink("isolated", sink, critical=False)
     assert sink._process.is_alive()
     observer.unregister_sink("isolated")
+    # Close runs off the event loop; wait on its tracked task, not on the loop.
+    await asyncio.wait(tuple(observer._close_tasks), timeout=3.0)
     assert not sink._process.is_alive()
+
+
+class _SlowCloseSink:
+    """Sink whose close blocks like a process join."""
+
+    supports_critical_ack = True
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+
+    def __call__(self, event: Any) -> None:
+        return None
+
+    def close(self) -> None:
+        time.sleep(self.seconds)
+
+
+async def test_shutdown_closes_sinks_off_the_loop_inside_one_deadline() -> None:
+    """A slow close neither stalls the loop nor stretches shutdown past its grace."""
+    observer = BoundedObserver(run_id="r", attempt_id="a", hold_id="h", fence_epoch=1)
+    observer.register_sink("slow", _SlowCloseSink(1.5), critical=False)
+    ticks = 0
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    beat = asyncio.create_task(heartbeat())
+    started = time.monotonic()
+    await observer.shutdown(grace_period=0.3)
+    elapsed = time.monotonic() - started
+    beat.cancel()
+
+    assert elapsed < 0.9
+    assert ticks >= 10
+
+
+def _slow_target(event: Any) -> None:
+    time.sleep(5)
+
+
+class _Sized:
+    def __init__(self, size_bytes: int) -> None:
+        self.size_bytes = size_bytes
+
+
+def test_isolated_sink_bytes_stay_bounded_until_the_worker_consumes() -> None:
+    """The process queue cannot retain more than its byte allowance."""
+    sink = ProcessIsolatedSink(
+        _slow_target, queue_size=1024, fail_closed=True, max_queue_bytes=1000
+    )
+    try:
+        with pytest.raises(BufferError, match="allowance"):
+            for _ in range(10):
+                sink(_Sized(400))
+        assert sink._pending_bytes.value <= 1000
+    finally:
+        sink.close(timeout=0.2)
