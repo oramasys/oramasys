@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 import json
 import sqlite3
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +45,12 @@ from orama.graph.admission import (
     ArtifactBinding,
     Clock,
     _utc_now,
+)
+from orama.graph.grant_verifier import (
+    AdjustmentGrantRefused,
+    AdjustmentReceipt,
+    RevocationObservation,
+    VerifiedGrant,
 )
 
 try:  # The seam exists only in Core revisions that include R4 T1.
@@ -166,6 +174,7 @@ class StepLedger:
     SCHEMA_VERSION = 2
     SQLITE_MAX_INT = 2**63 - 1
     LEGACY_COST_BASIS = "legacy_step_only"
+    REVOCATION_MAX_AGE_SECONDS = 60.0  # ratified staleness bound (design 8.1)
 
     def __init__(self, path: Path | str) -> None:
         """Open the durable ledger (WAL, synchronous FULL) at the given path."""
@@ -289,6 +298,43 @@ class StepLedger:
             " event_type TEXT NOT NULL, epoch INTEGER NOT NULL,"
             " payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL)"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS store_metadata ("
+            " key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS consumed_grants ("
+            " grant_id TEXT PRIMARY KEY,"
+            " ledger_store_id TEXT NOT NULL,"
+            " principal TEXT NOT NULL,"
+            " payload_digest TEXT NOT NULL,"
+            " receipt_digest TEXT NOT NULL,"
+            " receipt_json TEXT NOT NULL,"
+            " balance_delta INTEGER NOT NULL,"
+            " consumed_at TEXT NOT NULL,"
+            " run_id TEXT NOT NULL,"
+            " hold_id TEXT NOT NULL,"
+            " units_basis TEXT NOT NULL,"
+            " kind TEXT NOT NULL)"
+        )
+        # A fresh random identity per database, created once and read back: two
+        # workers opening a new store race on INSERT OR IGNORE and both adopt the
+        # winner. Deriving it from the path would let a replacement database
+        # inherit the old one's identity, and with it the old one's grants.
+        self._db.execute(
+            "INSERT OR IGNORE INTO store_metadata (key, value) VALUES ('store_id', ?)",
+            (f"store:{uuid.uuid4().hex}",),
+        )
+        self._store_id = str(
+            self._db.execute(
+                "SELECT value FROM store_metadata WHERE key = 'store_id'"
+            ).fetchone()[0]
+        )
+
+    @property
+    def store_id(self) -> str:
+        """Return the opaque, stable identity of this ledger store."""
+        return self._store_id
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -795,6 +841,11 @@ class StepLedger:
             state = self._hold_state(db, run_id, attempt_id)
             if state == "unknown":
                 raise ValueError("unknown usage cannot release its hold")
+            if db.execute(
+                "SELECT 1 FROM consumed_grants WHERE run_id = ? AND hold_id = ?",
+                (run_id, hold.hold_id),
+            ).fetchone() is not None:
+                raise ValueError("a hold resolved by adjustment grants cannot settle usage")
             if state not in {"held", "settled"}:
                 raise ValueError("usage settlement requires an active hold")
             if usage is not None:
@@ -1409,6 +1460,268 @@ class StepLedger:
             (run_id, batch_id),
         ).fetchall()
         return {str(attempt_id): str(state) for attempt_id, state in rows}
+
+    def retry_adjustment_grant(
+        self,
+        *,
+        grant_id: str,
+        caller_principal: str,
+        payload_digest: str,
+    ) -> AdjustmentReceipt | None:
+        """Return the stored receipt for an exact retry, None if never consumed.
+
+        Read-only and independent of expiry or revocation: an identical retry
+        always sees the recorded result and never a recomputation.
+        """
+        # One connection is shared by every thread, and a connection sees its own
+        # uncommitted writes. Reading under the transaction lock means a receipt
+        # is only ever returned once its consumption has committed.
+        with self._lock:
+            row = self._db.execute(
+                "SELECT ledger_store_id, principal, payload_digest, receipt_json "
+                "FROM consumed_grants WHERE grant_id = ?",
+                (grant_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        stored_store, stored_principal, stored_digest, receipt_json = (str(v) for v in row)
+        if stored_store != self._store_id:
+            raise AdjustmentGrantRefused("grant.store_mismatch")
+        if stored_principal != caller_principal:
+            raise AdjustmentGrantRefused("grant.principal_mismatch")
+        if stored_digest != payload_digest:
+            raise AdjustmentGrantRefused("grant.digest_conflict")
+        return AdjustmentReceipt.from_json(receipt_json)
+
+    def consume_adjustment_grant(
+        self,
+        verified: VerifiedGrant,
+        revocation_obs: RevocationObservation,
+        *,
+        caller_principal: str,
+        now: datetime | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> AdjustmentReceipt:
+        """Spend one verified grant against an UNKNOWN hold in one transaction.
+
+        Verification and the revocation observation arrive already obtained:
+        this method performs no remote I/O. Prefer ``AdjustmentGrantConsumer``,
+        which owns the verifier call, deny-all default and retry semantics.
+        """
+        if not isinstance(verified, VerifiedGrant) or not isinstance(
+            revocation_obs, RevocationObservation
+        ):
+            raise AdjustmentGrantRefused("grant.malformed")
+        if caller_principal != verified.principal:
+            raise AdjustmentGrantRefused("grant.principal_mismatch")
+        # An exact retry always sees the recorded result, even after expiry or
+        # revocation, so it is answered before any freshness policy.
+        replay = self.retry_adjustment_grant(
+            grant_id=verified.grant_id,
+            caller_principal=caller_principal,
+            payload_digest=verified.payload_digest,
+        )
+        if replay is not None:
+            return replay
+
+        if revocation_obs.grant_id != verified.grant_id:
+            raise AdjustmentGrantRefused("grant.malformed")
+        if revocation_obs.revoked:
+            raise AdjustmentGrantRefused("grant.revoked")
+        if verified.ledger_store_id != self._store_id:
+            raise AdjustmentGrantRefused("grant.store_mismatch")
+
+        with self._tx() as db:
+            # The consumption clock is sampled only now that the write lock is
+            # held: time spent waiting for it must not let an expiring grant or
+            # an ageing revocation observation pass on a stale reading.
+            current_time = (now or (clock or (lambda: datetime.now(UTC)))()).astimezone(UTC)
+
+            # A concurrent identical consumer may have won between the read above
+            # and this write lock; an exact match gets the recorded receipt.
+            row = db.execute(
+                "SELECT ledger_store_id, principal, payload_digest, receipt_json "
+                "FROM consumed_grants WHERE grant_id = ?",
+                (verified.grant_id,),
+            ).fetchone()
+            if row is not None:
+                if str(row[0]) != self._store_id:
+                    raise AdjustmentGrantRefused("grant.store_mismatch")
+                if str(row[1]) != caller_principal:
+                    raise AdjustmentGrantRefused("grant.principal_mismatch")
+                if str(row[2]) != verified.payload_digest:
+                    raise AdjustmentGrantRefused("grant.digest_conflict")
+                return AdjustmentReceipt.from_json(str(row[3]))
+
+            staleness = (current_time - revocation_obs.observed_at.astimezone(UTC)).total_seconds()
+            if abs(staleness) > self.REVOCATION_MAX_AGE_SECONDS:
+                raise AdjustmentGrantRefused("revocation.stale")
+            if current_time >= verified.expires_at.astimezone(UTC):
+                raise AdjustmentGrantRefused("grant.expired")
+            if (verified.issued_at.astimezone(UTC) - current_time).total_seconds() > 60.0:
+                raise AdjustmentGrantRefused("grant.future_dated")
+
+            high_water = db.execute(
+                "SELECT observed_utc FROM accounting_time_highwater WHERE run_id = ?",
+                (verified.run_id,),
+            ).fetchone()
+            if high_water is not None and current_time < datetime.fromisoformat(str(high_water[0])):
+                raise AdjustmentGrantRefused("grant.clock_regressed")
+
+            # Both epochs are checked independently: the lease that is writing
+            # now, and the epoch the hold itself was created under.
+            lease = db.execute(
+                "SELECT epoch, used FROM leases WHERE run_id = ?", (verified.run_id,)
+            ).fetchone()
+            if lease is None or int(lease[0]) != verified.consumer_lease_epoch:
+                raise AdjustmentGrantRefused("grant.epoch_fenced")
+            used_steps = int(lease[1])
+
+            hold = db.execute(
+                "SELECT attempt_id, epoch, units, state FROM attempt_holds "
+                "WHERE run_id = ? AND hold_id = ?",
+                (verified.run_id, verified.hold_id),
+            ).fetchone()
+            if hold is None:
+                raise AdjustmentGrantRefused("grant.hold_ineligible")
+            attempt_id, hold_epoch, held_units, hold_state = (
+                str(hold[0]), int(hold[1]), int(hold[2]), str(hold[3]),
+            )
+            if hold_epoch != verified.hold_fence_epoch:
+                raise AdjustmentGrantRefused("grant.epoch_fenced")
+            # Adjustments resolve uncertainty; a live or already-resolved hold
+            # is never touched by a grant.
+            if hold_state != "unknown":
+                raise AdjustmentGrantRefused("grant.hold_ineligible")
+
+            limits = db.execute(
+                "SELECT cost_basis FROM charge_limits WHERE run_id = ?", (verified.run_id,)
+            ).fetchone()
+            running_basis = str(limits[0]) if limits is not None else self.LEGACY_COST_BASIS
+            if verified.ledger_cost_basis != running_basis:
+                raise AdjustmentGrantRefused("grant.basis_mismatch")
+
+            reserved = self._charge_for(db, "charge_reservations", verified.run_id, attempt_id)
+            if reserved is None:
+                held = {"steps": held_units}
+            else:
+                held = {
+                    name: getattr(reserved, name)
+                    for name in ("steps", "elapsed_ms", "cost_microunits", "effect_attempts")
+                    if getattr(reserved, name) > 0
+                }
+
+            def consumed(basis: str) -> int:
+                return int(db.execute(
+                    "SELECT COALESCE(SUM(balance_delta), 0) FROM consumed_grants "
+                    "WHERE run_id = ? AND hold_id = ? AND units_basis = ?",
+                    (verified.run_id, verified.hold_id, basis),
+                ).fetchone()[0])
+
+            remaining = held.get(verified.units_basis, 0) - consumed(verified.units_basis)
+            if verified.units > remaining:
+                raise AdjustmentGrantRefused("grant.units_exceed_remaining")
+
+            if verified.kind == "release":
+                if verified.units_basis == "steps":
+                    db.execute(
+                        "UPDATE leases SET used = ? WHERE run_id = ?",
+                        (max(0, used_steps - verified.units), verified.run_id),
+                    )
+                else:
+                    self._decrease_projection(
+                        db,
+                        verified.run_id,
+                        ChargeUnits(
+                            0,
+                            **{verified.units_basis: verified.units},
+                            cost_basis=running_basis,
+                        ),
+                    )
+
+            receipt = AdjustmentReceipt(
+                grant_id=verified.grant_id,
+                run_id=verified.run_id,
+                hold_id=verified.hold_id,
+                principal=verified.principal,
+                ledger_store_id=self._store_id,
+                kind=verified.kind,
+                units_basis=verified.units_basis,
+                balance_delta=verified.units,
+                consumed_at=current_time,
+                verifier_id=verified.verifier_id,
+                payload_digest=verified.payload_digest,
+            )
+            receipt_json = receipt.to_json()
+            db.execute(
+                "INSERT INTO consumed_grants (grant_id, ledger_store_id, principal, "
+                "payload_digest, receipt_digest, receipt_json, balance_delta, consumed_at, "
+                "run_id, hold_id, units_basis, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    verified.grant_id, self._store_id, verified.principal,
+                    verified.payload_digest,
+                    hashlib.sha256(receipt_json.encode("utf-8")).hexdigest(),
+                    receipt_json, verified.units, current_time.isoformat(),
+                    verified.run_id, verified.hold_id, verified.units_basis, verified.kind,
+                ),
+            )
+
+            # The hold resolves only when every reserved dimension is fully
+            # accounted for; until then it stays UNKNOWN and keeps its balance.
+            if all(consumed(basis) >= amount for basis, amount in held.items()):
+                settled_units = int(db.execute(
+                    "SELECT COALESCE(SUM(balance_delta), 0) FROM consumed_grants "
+                    "WHERE run_id = ? AND hold_id = ? AND kind = 'settle'",
+                    (verified.run_id, verified.hold_id),
+                ).fetchone()[0])
+                final = "settled" if settled_units > 0 else "released"
+                db.execute(
+                    "UPDATE attempt_holds SET state = ? WHERE run_id = ? AND attempt_id = ?",
+                    (final, verified.run_id, attempt_id),
+                )
+                db.execute(
+                    "UPDATE unknown_dispositions SET settlement_state = ? "
+                    "WHERE run_id = ? AND attempt_id = ?",
+                    (final, verified.run_id, attempt_id),
+                )
+
+            # Consumption is an observation of time: later grants must not be
+            # judged against an older clock than this one.
+            stamp = current_time.isoformat(timespec="microseconds")
+            if high_water is None:
+                db.execute(
+                    "INSERT INTO accounting_time_highwater (run_id, observed_utc, epoch) "
+                    "VALUES (?, ?, ?)",
+                    (verified.run_id, stamp, verified.consumer_lease_epoch),
+                )
+            elif current_time > datetime.fromisoformat(str(high_water[0])):
+                db.execute(
+                    "UPDATE accounting_time_highwater SET observed_utc = ?, epoch = ? "
+                    "WHERE run_id = ?",
+                    (stamp, verified.consumer_lease_epoch, verified.run_id),
+                )
+
+            payload_json, payload_digest = self._canonical_payload(
+                {
+                    "grant_id": verified.grant_id,
+                    "hold_id": verified.hold_id,
+                    "kind": verified.kind,
+                    "units": verified.units,
+                    "units_basis": verified.units_basis,
+                    "payload_digest": verified.payload_digest,
+                    "verifier_id": verified.verifier_id,
+                }
+            )
+            self._append_event(
+                db,
+                run_id=verified.run_id,
+                operation_id=self._operation_id("adjustment", verified.run_id, verified.grant_id),
+                event_type="adjustment_consumed",
+                epoch=verified.consumer_lease_epoch,
+                payload_json=payload_json,
+                payload_digest=payload_digest,
+            )
+            return receipt
 
     def release_attempt(self, run_id: str, attempt_id: str, epoch: int) -> None:
         """Reject direct unknown release until a verified adjustment-grant path exists."""
