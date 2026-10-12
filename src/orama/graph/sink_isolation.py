@@ -66,6 +66,10 @@ class ProcessIsolatedSink:
 
     # This wrapper acknowledges enqueue only, not worker execution or persistence.
     supports_critical_ack = False
+    # Pickling for the byte allowance is O(event size); the observer therefore
+    # calls this sink in a worker thread. Its state is a lock-guarded shared
+    # counter and a multiprocessing queue, both safe across threads.
+    runs_off_loop = True
 
     def __init__(
         self,
