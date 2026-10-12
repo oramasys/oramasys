@@ -143,6 +143,8 @@ class RevocationObservation:
         """Validate observation fields at construction."""
         if not self.grant_id.strip():
             raise ValueError("grant_id is required")
+        if type(self.revoked) is not bool:
+            raise ValueError("revoked must be a boolean; a missing answer is not 'not revoked'")
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
             raise ValueError("observed_at must be an aware UTC datetime")
 
@@ -233,8 +235,6 @@ def _refusal_from(exc: BaseException) -> AdjustmentGrantRefused:
     verification vocabulary is honoured; anything else becomes
     ``verifier.unavailable`` so no free text or unknown reason crosses inward.
     """
-    if isinstance(exc, AdjustmentGrantRefused):
-        return exc
     raw = getattr(exc, "reason", None) or getattr(exc, "code", None)
     code = str(getattr(raw, "value", raw)) if raw is not None else ""
     if code in VERIFICATION_REFUSAL_CODES:
@@ -281,6 +281,13 @@ class AdjustmentGrantConsumer:
             if replay is not None:
                 return replay
             raise refusal from exc
+        stored = self._ledger.retry_adjustment_grant(
+            grant_id=verified.grant_id,
+            caller_principal=caller_principal,
+            payload_digest=verified.payload_digest,
+        )
+        if stored is not None:
+            return stored
         try:
             observation = _rebuild(
                 RevocationObservation, self._verifier.revocation(verified.grant_id)
@@ -288,7 +295,7 @@ class AdjustmentGrantConsumer:
         except Exception as exc:  # noqa: BLE001 - normalized below
             raise _refusal_from(exc) from exc
         return self._ledger.consume_adjustment_grant(
-            verified, observation, caller_principal=caller_principal, now=self._clock()
+            verified, observation, caller_principal=caller_principal, clock=self._clock
         )
 
     def _replay_after_refusal(

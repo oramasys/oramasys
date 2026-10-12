@@ -379,8 +379,15 @@ def test_a_terminal_run_can_still_resolve_its_unknown_holds(tmp_path: Path) -> N
 class StubVerifier:
     """Verifier double returning scripted facts or raising a scripted error."""
 
-    def __init__(self, result: Any = None, error: BaseException | None = None, revocation: Any = None) -> None:
+    def __init__(
+        self,
+        result: Any = None,
+        error: BaseException | None = None,
+        revocation: Any = None,
+        revocation_error: BaseException | None = None,
+    ) -> None:
         self.result, self.error, self.obs = result, error, revocation
+        self.revocation_error = revocation_error
         self.calls: list[str] = []
 
     def verify(self, wire: bytes) -> Any:
@@ -391,6 +398,8 @@ class StubVerifier:
 
     def revocation(self, grant_id: str) -> Any:
         self.calls.append("revocation")
+        if self.revocation_error is not None:
+            raise self.revocation_error
         return self.obs or RevocationObservation(grant_id, False, now_utc())
 
 
@@ -513,3 +522,129 @@ def test_shared_conformance_vector_maps_onto_the_verified_grant_contract(ledger:
         verifier_id="phylax.vector",
     )
     assert facts.payload_digest == vector["payload_digest"]
+
+
+# --- review hardening: concurrency, clocks, identity, double refund ----------
+
+
+def test_usage_settlement_cannot_refund_a_hold_that_grants_resolved(ledger: StepLedger) -> None:
+    """Grants and normal usage settlement never both adjust the same hold."""
+    epoch = ledger.open_lease(RUN, max_steps=10)
+    ledger.configure_limits(RUN, epoch, ChargeUnits(steps=10, cost_basis="usd_cents"))
+    hold = ledger.reserve_charge(RUN, epoch, "node::a::0", ChargeUnits(steps=3, cost_basis="usd_cents"))
+    ledger.mark_started(RUN, "node::a::0", epoch)
+    ledger.record_outcome(RUN, "node::a::0", epoch, "digest-a")
+    ledger.mark_unknown(RUN, UnknownDisposition(
+        attempt_id="node::a::0", hold_id=hold.hold_id, fence_epoch=epoch,
+        cause="crash_before_settle", stop_state="none", settlement_state="unsettled"))
+    spend(ledger, grant(ledger, hold, epoch, grant_id="g1", kind="release", units=1, basis="usd_cents"))
+    spend(ledger, grant(ledger, hold, epoch, grant_id="g2", kind="settle", units=2, basis="usd_cents"))
+    assert ledger.hold_state(RUN, "node::a::0") == "settled"
+    used = ledger.used(RUN)
+
+    with pytest.raises(ValueError, match="adjustment grants"):
+        ledger.settle_usage(RUN, "node::a::0", epoch, "receipt-1",
+                            ChargeUnits(steps=2, cost_basis="usd_cents"))
+    assert ledger.used(RUN) == used
+
+
+def test_identical_request_that_lost_the_race_gets_the_recorded_receipt(
+    ledger: StepLedger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both callers missed the pre-lock lookup; the loser must not see a conflict."""
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+    first = spend(ledger, g)
+    monkeypatch.setattr(ledger, "retry_adjustment_grant", lambda **_: None)
+    assert spend(ledger, g) == first
+
+
+def test_consumer_returns_the_saved_receipt_even_if_revocation_now_errors(ledger: StepLedger) -> None:
+    """A spent grant's retry never depends on a fresh revocation answer."""
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+    first = AdjustmentGrantConsumer(ledger, StubVerifier(result=g)).consume(
+        wire_for(g), caller_principal=PRINCIPAL)
+    revoked_now = StubVerifier(result=g, revocation_error=AdjustmentGrantRefused("grant.revoked"))
+    again = AdjustmentGrantConsumer(ledger, revoked_now).consume(wire_for(g), caller_principal=PRINCIPAL)
+    assert again == first and "revocation" not in revoked_now.calls
+
+
+def test_consumption_advances_the_clock_high_water_mark(ledger: StepLedger) -> None:
+    """A later grant cannot be judged against an older clock than an earlier one."""
+    epoch, hold = unknown_hold(ledger, units=3)
+    later = now_utc() + timedelta(minutes=10)
+    first = grant(ledger, hold, epoch, grant_id="g1", units=1,
+                  issued_at=later - timedelta(seconds=5), expires_at=later + timedelta(minutes=5))
+    ledger.consume_adjustment_grant(first, RevocationObservation("g1", False, later),
+                                    caller_principal=PRINCIPAL, now=later)
+    second = grant(ledger, hold, epoch, grant_id="g2", units=1)
+    earlier = later - timedelta(minutes=5)
+    code = refusal(lambda: ledger.consume_adjustment_grant(
+        second, RevocationObservation("g2", False, earlier),
+        caller_principal=PRINCIPAL, now=earlier))
+    assert code == "grant.clock_regressed"
+
+
+def test_the_consumption_clock_is_sampled_under_the_write_lock(ledger: StepLedger) -> None:
+    """Time spent waiting for the lock cannot let an expiring grant pass."""
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+    observed: list[bool] = []
+
+    def clock() -> datetime:
+        observed.append(ledger._db.in_transaction)
+        return g.expires_at + timedelta(seconds=1)
+
+    obs = RevocationObservation(g.grant_id, False, g.expires_at + timedelta(seconds=1))
+    code = refusal(lambda: ledger.consume_adjustment_grant(
+        g, obs, caller_principal=PRINCIPAL, clock=clock))
+    assert code == "grant.expired"
+    assert observed == [True]
+
+
+def test_store_identity_is_created_once_and_never_inherited(tmp_path: Path) -> None:
+    """Two workers share one identity; a replacement database gets a new one."""
+    path = tmp_path / "ledger.sqlite3"
+    first, second = StepLedger(path), StepLedger(path)
+    assert first.store_id == second.store_id
+    first.close()
+    second.close()
+    path.unlink()
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists():
+            sidecar.unlink()
+    replacement = StepLedger(path)
+    assert replacement.store_id != first.store_id
+
+
+def test_a_missing_revocation_answer_is_not_not_revoked() -> None:
+    """Only a real boolean is an answer; None or an empty string is malformed."""
+    for bad in (None, "", 0, "false"):
+        with pytest.raises(ValueError, match="boolean"):
+            RevocationObservation("g", bad, now_utc())  # type: ignore[arg-type]
+
+
+def test_consumer_treats_a_non_boolean_foreign_observation_as_malformed(ledger: StepLedger) -> None:
+    """A foreign observation with revoked=None is refused, never spent."""
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+
+    @dataclass(frozen=True)
+    class Foreign:
+        grant_id: str
+        revoked: Any
+        observed_at: datetime
+
+    verifier = StubVerifier(result=g, revocation=Foreign(g.grant_id, None, now_utc()))
+    assert refusal(lambda: AdjustmentGrantConsumer(ledger, verifier).consume(
+        wire_for(g), caller_principal=PRINCIPAL)) == "grant.malformed"
+    assert ledger.hold_state(RUN, "node::a::0") == "unknown"
+
+
+def test_a_verifier_cannot_raise_ledger_only_codes(ledger: StepLedger) -> None:
+    """Consumption codes are the ledger's voice; a verifier using one is unavailable."""
+    verifier = StubVerifier(error=AdjustmentGrantRefused("grant.store_mismatch"))
+    assert refusal(lambda: AdjustmentGrantConsumer(ledger, verifier).consume(
+        b"{}", caller_principal=PRINCIPAL)) == "verifier.unavailable"

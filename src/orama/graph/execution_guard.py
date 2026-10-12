@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 import json
 import sqlite3
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -315,14 +317,19 @@ class StepLedger:
             " units_basis TEXT NOT NULL,"
             " kind TEXT NOT NULL)"
         )
-        row = self._db.execute("SELECT value FROM store_metadata WHERE key = 'store_id'").fetchone()
-        if row is None:
-            raw_id = hashlib.sha256(f"store:{self._store_path}".encode("utf-8")).hexdigest()
-            default_id = f"store:{raw_id[:32]}"
-            self._db.execute("INSERT INTO store_metadata (key, value) VALUES ('store_id', ?)", (default_id,))
-            self._store_id = default_id
-        else:
-            self._store_id = str(row[0])
+        # A fresh random identity per database, created once and read back: two
+        # workers opening a new store race on INSERT OR IGNORE and both adopt the
+        # winner. Deriving it from the path would let a replacement database
+        # inherit the old one's identity, and with it the old one's grants.
+        self._db.execute(
+            "INSERT OR IGNORE INTO store_metadata (key, value) VALUES ('store_id', ?)",
+            (f"store:{uuid.uuid4().hex}",),
+        )
+        self._store_id = str(
+            self._db.execute(
+                "SELECT value FROM store_metadata WHERE key = 'store_id'"
+            ).fetchone()[0]
+        )
 
     @property
     def store_id(self) -> str:
@@ -834,6 +841,11 @@ class StepLedger:
             state = self._hold_state(db, run_id, attempt_id)
             if state == "unknown":
                 raise ValueError("unknown usage cannot release its hold")
+            if db.execute(
+                "SELECT 1 FROM consumed_grants WHERE run_id = ? AND hold_id = ?",
+                (run_id, hold.hold_id),
+            ).fetchone() is not None:
+                raise ValueError("a hold resolved by adjustment grants cannot settle usage")
             if state not in {"held", "settled"}:
                 raise ValueError("usage settlement requires an active hold")
             if usage is not None:
@@ -1484,6 +1496,7 @@ class StepLedger:
         *,
         caller_principal: str,
         now: datetime | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> AdjustmentReceipt:
         """Spend one verified grant against an UNKNOWN hold in one transaction.
 
@@ -1497,8 +1510,6 @@ class StepLedger:
             raise AdjustmentGrantRefused("grant.malformed")
         if caller_principal != verified.principal:
             raise AdjustmentGrantRefused("grant.principal_mismatch")
-        current_time = (now or datetime.now(UTC)).astimezone(UTC)
-
         # An exact retry always sees the recorded result, even after expiry or
         # revocation, so it is answered before any freshness policy.
         replay = self.retry_adjustment_grant(
@@ -1513,23 +1524,38 @@ class StepLedger:
             raise AdjustmentGrantRefused("grant.malformed")
         if revocation_obs.revoked:
             raise AdjustmentGrantRefused("grant.revoked")
-        staleness = (current_time - revocation_obs.observed_at.astimezone(UTC)).total_seconds()
-        if abs(staleness) > self.REVOCATION_MAX_AGE_SECONDS:
-            raise AdjustmentGrantRefused("revocation.stale")
-        if current_time >= verified.expires_at.astimezone(UTC):
-            raise AdjustmentGrantRefused("grant.expired")
-        if (verified.issued_at.astimezone(UTC) - current_time).total_seconds() > 60.0:
-            raise AdjustmentGrantRefused("grant.future_dated")
         if verified.ledger_store_id != self._store_id:
             raise AdjustmentGrantRefused("grant.store_mismatch")
 
         with self._tx() as db:
+            # The consumption clock is sampled only now that the write lock is
+            # held: time spent waiting for it must not let an expiring grant or
+            # an ageing revocation observation pass on a stale reading.
+            current_time = (now or (clock or (lambda: datetime.now(UTC)))()).astimezone(UTC)
+
             # A concurrent identical consumer may have won between the read above
-            # and this write lock; the primary key makes that loss visible here.
-            if db.execute(
-                "SELECT 1 FROM consumed_grants WHERE grant_id = ?", (verified.grant_id,)
-            ).fetchone() is not None:
-                raise AdjustmentGrantRefused("grant.digest_conflict")
+            # and this write lock; an exact match gets the recorded receipt.
+            row = db.execute(
+                "SELECT ledger_store_id, principal, payload_digest, receipt_json "
+                "FROM consumed_grants WHERE grant_id = ?",
+                (verified.grant_id,),
+            ).fetchone()
+            if row is not None:
+                if str(row[0]) != self._store_id:
+                    raise AdjustmentGrantRefused("grant.store_mismatch")
+                if str(row[1]) != caller_principal:
+                    raise AdjustmentGrantRefused("grant.principal_mismatch")
+                if str(row[2]) != verified.payload_digest:
+                    raise AdjustmentGrantRefused("grant.digest_conflict")
+                return AdjustmentReceipt.from_json(str(row[3]))
+
+            staleness = (current_time - revocation_obs.observed_at.astimezone(UTC)).total_seconds()
+            if abs(staleness) > self.REVOCATION_MAX_AGE_SECONDS:
+                raise AdjustmentGrantRefused("revocation.stale")
+            if current_time >= verified.expires_at.astimezone(UTC):
+                raise AdjustmentGrantRefused("grant.expired")
+            if (verified.issued_at.astimezone(UTC) - current_time).total_seconds() > 60.0:
+                raise AdjustmentGrantRefused("grant.future_dated")
 
             high_water = db.execute(
                 "SELECT observed_utc FROM accounting_time_highwater WHERE run_id = ?",
@@ -1653,6 +1679,22 @@ class StepLedger:
                     "UPDATE unknown_dispositions SET settlement_state = ? "
                     "WHERE run_id = ? AND attempt_id = ?",
                     (final, verified.run_id, attempt_id),
+                )
+
+            # Consumption is an observation of time: later grants must not be
+            # judged against an older clock than this one.
+            stamp = current_time.isoformat(timespec="microseconds")
+            if high_water is None:
+                db.execute(
+                    "INSERT INTO accounting_time_highwater (run_id, observed_utc, epoch) "
+                    "VALUES (?, ?, ?)",
+                    (verified.run_id, stamp, verified.consumer_lease_epoch),
+                )
+            elif current_time > datetime.fromisoformat(str(high_water[0])):
+                db.execute(
+                    "UPDATE accounting_time_highwater SET observed_utc = ?, epoch = ? "
+                    "WHERE run_id = ?",
+                    (stamp, verified.consumer_lease_epoch, verified.run_id),
                 )
 
             payload_json, payload_digest = self._canonical_payload(
