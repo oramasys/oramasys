@@ -648,3 +648,36 @@ def test_a_verifier_cannot_raise_ledger_only_codes(ledger: StepLedger) -> None:
     verifier = StubVerifier(error=AdjustmentGrantRefused("grant.store_mismatch"))
     assert refusal(lambda: AdjustmentGrantConsumer(ledger, verifier).consume(
         b"{}", caller_principal=PRINCIPAL)) == "verifier.unavailable"
+
+
+def test_retry_never_returns_a_receipt_from_an_uncommitted_consumption(ledger: StepLedger) -> None:
+    """A reader on another thread waits for the transaction and sees the rollback."""
+    import threading
+
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+    seen: list[object] = []
+    started = threading.Event()
+
+    def reader() -> None:
+        started.set()
+        seen.append(ledger.retry_adjustment_grant(
+            grant_id=g.grant_id, caller_principal=PRINCIPAL, payload_digest=g.payload_digest))
+
+    thread = threading.Thread(target=reader)
+    with pytest.raises(RuntimeError, match="writer failed"):
+        with ledger._tx() as db:
+            db.execute(
+                "INSERT INTO consumed_grants (grant_id, ledger_store_id, principal, payload_digest, "
+                "receipt_digest, receipt_json, balance_delta, consumed_at, run_id, hold_id, "
+                "units_basis, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (g.grant_id, ledger.store_id, PRINCIPAL, g.payload_digest, "d", "{}", 3,
+                 now_utc().isoformat(), RUN, hold.hold_id, "steps", "release"),
+            )
+            thread.start()
+            started.wait(2)
+            thread.join(0.2)
+            assert thread.is_alive(), "the reader must wait for the open transaction"
+            raise RuntimeError("writer failed after inserting")
+    thread.join(2)
+    assert seen == [None]

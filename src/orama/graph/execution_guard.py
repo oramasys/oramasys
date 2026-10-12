@@ -1473,11 +1473,15 @@ class StepLedger:
         Read-only and independent of expiry or revocation: an identical retry
         always sees the recorded result and never a recomputation.
         """
-        row = self._db.execute(
-            "SELECT ledger_store_id, principal, payload_digest, receipt_json "
-            "FROM consumed_grants WHERE grant_id = ?",
-            (grant_id,),
-        ).fetchone()
+        # One connection is shared by every thread, and a connection sees its own
+        # uncommitted writes. Reading under the transaction lock means a receipt
+        # is only ever returned once its consumption has committed.
+        with self._lock:
+            row = self._db.execute(
+                "SELECT ledger_store_id, principal, payload_digest, receipt_json "
+                "FROM consumed_grants WHERE grant_id = ?",
+                (grant_id,),
+            ).fetchone()
         if row is None:
             return None
         stored_store, stored_principal, stored_digest, receipt_json = (str(v) for v in row)
