@@ -56,7 +56,10 @@ def _trailing_router_graph(on_trailing: Any) -> MiniGraph:
 async def test_stop_persisted_before_trailing_settlement_is_a_stop_not_a_completion(
     tmp_path: Path,
 ) -> None:
-    """A durable stop that wins over final settlement yields a cancelled receipt."""
+    """A stop that wins over final settlement is refused and the receipt keeps its reason.
+
+    Unresolved holds force the outcome to ``unknown`` by contract.
+    """
     from orama.graph.admission import AdmissionRefused
     from orama.graph.run_control import StopRequest
 

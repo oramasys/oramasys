@@ -376,3 +376,41 @@ def test_isolated_sink_charges_serialized_size_not_the_declared_size() -> None:
                 sink(_PaddedEvent())
     finally:
         sink.close(timeout=0.2)
+
+
+class _ThreadRecordingSink:
+    """Non-critical sink that records the thread each event is handled on."""
+
+    supports_critical_ack = True
+
+    def __init__(self, runs_off_loop: bool) -> None:
+        self.runs_off_loop = runs_off_loop
+        self.threads: list[int] = []
+
+    def __call__(self, event: Any) -> None:
+        import threading
+
+        self.threads.append(threading.get_ident())
+
+
+async def test_sink_declaring_runs_off_loop_is_called_in_a_worker_thread() -> None:
+    """Event sizing for isolated sinks cannot run on the scheduler's loop thread."""
+    import threading
+
+    observer = BoundedObserver(run_id="r", attempt_id="a", hold_id="h", fence_epoch=1)
+    inline, offloaded = _ThreadRecordingSink(False), _ThreadRecordingSink(True)
+    observer.register_sink("inline", inline, critical=False)
+    observer.register_sink("offloaded", offloaded, critical=False)
+    await observer.on_observation(
+        GraphObservation(GraphEvent("node.start", node="n", steps=0), PerpetuaState(session_id="s"))
+    )
+    await observer.shutdown(grace_period=2.0)
+
+    loop_thread = threading.get_ident()
+    assert inline.threads == [loop_thread]
+    assert len(offloaded.threads) == 1 and offloaded.threads[0] != loop_thread
+
+
+def test_process_isolated_sink_declares_it_runs_off_the_loop() -> None:
+    """The isolated sink opts in, so production wiring is off-loop by default."""
+    assert ProcessIsolatedSink.runs_off_loop is True

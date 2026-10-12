@@ -400,7 +400,13 @@ class BoundedObserver(DeliveryHealth):
             cancelled = False
             self._inflight_bytes += event.size_bytes
             try:
-                res = reg.callback(event)
+                if getattr(reg.callback, "runs_off_loop", False):
+                    # Sizing and enqueueing a large event is CPU work; a sink that
+                    # declares itself thread-safe is called in a worker thread so
+                    # it cannot stall the scheduler's event loop.
+                    res = await asyncio.to_thread(reg.callback, event)
+                else:
+                    res = reg.callback(event)
                 if inspect.isawaitable(res):
                     await res
             except asyncio.CancelledError:
