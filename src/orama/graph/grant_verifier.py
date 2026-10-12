@@ -8,13 +8,16 @@ Per PHYLAX-ADJUSTMENT-GRANT-DESIGN-v2.md Section 13 (Ratified 2026-10-12):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from collections.abc import Callable
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
-from typing import Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 GrantKind: TypeAlias = Literal["settle", "release"]
 
 RefusalCode: TypeAlias = Literal[
+    # Verification outcomes: the vocabulary shared with the issuer's verifier.
     "grant.malformed",
     "grant.schema_unsupported",
     "grant.key_unknown",
@@ -24,9 +27,18 @@ RefusalCode: TypeAlias = Literal[
     "grant.revoked",
     "revocation.stale",
     "verifier.unavailable",
+    # Consumption outcomes: decided by the ledger, never by the issuer.
+    "grant.principal_mismatch",
+    "grant.store_mismatch",
+    "grant.epoch_fenced",
+    "grant.hold_ineligible",
+    "grant.basis_mismatch",
+    "grant.units_exceed_remaining",
+    "grant.digest_conflict",
+    "grant.clock_regressed",
 ]
 
-CLOSED_REFUSAL_CODES: frozenset[str] = frozenset({
+VERIFICATION_REFUSAL_CODES: frozenset[str] = frozenset({
     "grant.malformed",
     "grant.schema_unsupported",
     "grant.key_unknown",
@@ -37,6 +49,19 @@ CLOSED_REFUSAL_CODES: frozenset[str] = frozenset({
     "revocation.stale",
     "verifier.unavailable",
 })
+
+CONSUMPTION_REFUSAL_CODES: frozenset[str] = frozenset({
+    "grant.principal_mismatch",
+    "grant.store_mismatch",
+    "grant.epoch_fenced",
+    "grant.hold_ineligible",
+    "grant.basis_mismatch",
+    "grant.units_exceed_remaining",
+    "grant.digest_conflict",
+    "grant.clock_regressed",
+})
+
+CLOSED_REFUSAL_CODES: frozenset[str] = VERIFICATION_REFUSAL_CODES | CONSUMPTION_REFUSAL_CODES
 
 
 class AdjustmentGrantRefused(Exception):
@@ -198,3 +223,91 @@ class AdjustmentReceipt:
             verifier_id=data["verifier_id"],
             payload_digest=data["payload_digest"],
         )
+
+
+def _refusal_from(exc: BaseException) -> AdjustmentGrantRefused:
+    """Normalize any verifier failure into the closed vocabulary.
+
+    A verifier lives behind an injected boundary and may raise its own type (the
+    issuer's refusal enum, a transport error). Only a code that is in the
+    verification vocabulary is honoured; anything else becomes
+    ``verifier.unavailable`` so no free text or unknown reason crosses inward.
+    """
+    if isinstance(exc, AdjustmentGrantRefused):
+        return exc
+    raw = getattr(exc, "reason", None) or getattr(exc, "code", None)
+    code = str(getattr(raw, "value", raw)) if raw is not None else ""
+    if code in VERIFICATION_REFUSAL_CODES:
+        return AdjustmentGrantRefused(code)  # type: ignore[arg-type]
+    return AdjustmentGrantRefused("verifier.unavailable")
+
+
+def _rebuild(cls: type, source: Any) -> Any:
+    """Copy a structurally compatible result into this module's own type."""
+    try:
+        return cls(**{f.name: getattr(source, f.name) for f in fields(cls)})
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise AdjustmentGrantRefused("grant.malformed") from exc
+
+
+class AdjustmentGrantConsumer:
+    """The only supported way to spend a grant: verify, then consume atomically.
+
+    Owns the injected verifier (deny-all when none is wired), normalizes its
+    failures, rebuilds its results into Oramasys-owned types, answers an exact
+    retry from the ledger, and performs every remote call before the ledger
+    transaction opens.
+    """
+
+    def __init__(
+        self,
+        ledger: Any,
+        verifier: AdjustmentGrantVerifier | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        """Bind a ledger and an optional verifier; absent verifier denies all."""
+        self._ledger = ledger
+        self._verifier: AdjustmentGrantVerifier = verifier or DenyAllGrantVerifier()
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def consume(self, wire: bytes, *, caller_principal: str) -> AdjustmentReceipt:
+        """Verify ``wire`` and spend it; an exact retry returns the stored receipt."""
+        try:
+            verified = _rebuild(VerifiedGrant, self._verifier.verify(wire))
+        except Exception as exc:  # noqa: BLE001 - normalized below
+            refusal = _refusal_from(exc)
+            replay = self._replay_after_refusal(wire, caller_principal, refusal)
+            if replay is not None:
+                return replay
+            raise refusal from exc
+        try:
+            observation = _rebuild(
+                RevocationObservation, self._verifier.revocation(verified.grant_id)
+            )
+        except Exception as exc:  # noqa: BLE001 - normalized below
+            raise _refusal_from(exc) from exc
+        return self._ledger.consume_adjustment_grant(
+            verified, observation, caller_principal=caller_principal, now=self._clock()
+        )
+
+    def _replay_after_refusal(
+        self, wire: bytes, caller_principal: str, refusal: AdjustmentGrantRefused
+    ) -> AdjustmentReceipt | None:
+        """Answer an exact retry whose grant has since expired or been revoked.
+
+        The wire's grant id and digest are only lookup keys: the stored receipt
+        was produced from a verified grant, and the ledger compares principal
+        and digest before returning it. No other refusal is ever replayed.
+        """
+        if refusal.code not in {"grant.expired", "grant.revoked"}:
+            return None
+        try:
+            body = json.loads(wire)
+            return self._ledger.retry_adjustment_grant(
+                grant_id=str(body["grant_id"]),
+                caller_principal=caller_principal,
+                payload_digest=str(body["payload_digest"]),
+            )
+        except (ValueError, KeyError, TypeError, AdjustmentGrantRefused):
+            return None
