@@ -6,6 +6,8 @@ from perpetua_core.state import PerpetuaState, HardwareTier, TaskType, OptHint
 
 
 class RunRequest(BaseModel):
+    """A request to run one task through the compiled graph."""
+
     model_config = ConfigDict(protected_namespaces=())
 
     session_id: str
@@ -17,6 +19,7 @@ class RunRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def to_state(self) -> PerpetuaState:
+        """Convert the request into the initial graph state."""
         return PerpetuaState(
             session_id=self.session_id,
             messages=[{"role": "user", "content": self.task}],
@@ -29,6 +32,8 @@ class RunRequest(BaseModel):
 
 
 class RunResponse(BaseModel):
+    """The outcome of a run: status, final message and the nodes visited."""
+
     model_config = ConfigDict(protected_namespaces=())
 
     session_id: str
@@ -39,6 +44,7 @@ class RunResponse(BaseModel):
 
     @classmethod
     def from_state(cls, state: PerpetuaState) -> "RunResponse":
+        """Build the response from a finished graph state."""
         last_message = (
             state.messages[-1].get("content") if state.messages else None
         )

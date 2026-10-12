@@ -7,6 +7,8 @@ from typing import Iterable
 
 
 class RouteCapability(str, Enum):
+    """The authorization class a glass-window route demands of its caller."""
+
     PUBLIC = "public"
     READ = "read"
     MUTATE = "mutate"
@@ -16,12 +18,15 @@ class RouteCapability(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class RouteSpec:
+    """One declared route: HTTP method, exact path and the capability it needs."""
+
     method: str
     path: str
     capability: RouteCapability
 
     @property
     def key(self) -> tuple[str, str]:
+        """Return the upper-cased method and path used to match this route."""
         return (self.method.upper(), self.path)
 
 
@@ -58,6 +63,7 @@ def capability_for(method: str, path: str) -> RouteCapability | None:
 
 
 def requires_auth(capability: RouteCapability | None) -> bool:
+    """Return whether ``capability`` needs authentication; undeclared routes do."""
     if capability is None:
         # Undeclared routes fail closed.
         return True
@@ -65,8 +71,10 @@ def requires_auth(capability: RouteCapability | None) -> bool:
 
 
 def manifest_keys() -> set[tuple[str, str]]:
+    """Return the (method, path) key of every declared route."""
     return {spec.key for spec in ROUTE_MANIFEST}
 
 
 def iter_manifest() -> Iterable[RouteSpec]:
+    """Iterate over every declared route in declaration order."""
     return ROUTE_MANIFEST
