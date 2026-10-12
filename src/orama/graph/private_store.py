@@ -10,10 +10,12 @@ _FILE_MODE = 0o600
 
 
 def _permission_error(path: Path, requirement: str) -> PermissionError:
+    """Build the uniform error for a path that violates the private-store contract."""
     return PermissionError(f"{path} {requirement}")
 
 
 def _validate_directory(path: Path, status: os.stat_result) -> None:
+    """Require a real directory owned by this user with mode 0700."""
     if stat.S_ISLNK(status.st_mode):
         raise _permission_error(path, "must not be a symlink")
     if not stat.S_ISDIR(status.st_mode):
@@ -25,6 +27,7 @@ def _validate_directory(path: Path, status: os.stat_result) -> None:
 
 
 def _validate_file(path: Path, status: os.stat_result) -> None:
+    """Require a regular file owned by this user with mode 0600."""
     if stat.S_ISLNK(status.st_mode):
         raise _permission_error(path, "must not be a symlink")
     if not stat.S_ISREG(status.st_mode):
@@ -36,6 +39,7 @@ def _validate_file(path: Path, status: os.stat_result) -> None:
 
 
 def _lstat_at(parent_fd: int, name: str) -> os.stat_result | None:
+    """Stat ``name`` under ``parent_fd`` without following symlinks; None if absent."""
     try:
         return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:

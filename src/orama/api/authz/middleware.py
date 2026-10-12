@@ -38,6 +38,7 @@ class AuthzMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # CORS preflight (if ever added) skips auth; no CORS middleware here.
+        """Authorize the request's capability before the handler runs; refuse otherwise."""
         if request.method.upper() == "OPTIONS":
             return await call_next(request)
 

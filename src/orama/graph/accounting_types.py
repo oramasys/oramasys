@@ -80,5 +80,6 @@ class ChargeUnits:
         )
 
     def _require_same_basis(self, other: ChargeUnits) -> None:
+        """Refuse arithmetic or comparison across different cost bases."""
         if self.cost_basis != other.cost_basis:
             raise ValueError("cost_basis must match")
