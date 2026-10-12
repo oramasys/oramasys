@@ -15,8 +15,6 @@ from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
-from perpetua_core.graph.gate import GateRefused
-
 from orama.graph.admission import (
     AdmissionContext,
     AdmissionProviders,
@@ -27,6 +25,7 @@ from orama.graph.admission import (
     admit_artifact,
 )
 from orama.graph.execution_guard import (
+    CORE_GATE_AVAILABLE,
     AdmissionGate,
     DeliveryHealth,
     DurableStopRequested,
@@ -34,6 +33,13 @@ from orama.graph.execution_guard import (
     StepLedger,
 )
 from orama.graph.run_control import RunControl, TerminalOutcome
+
+if CORE_GATE_AVAILABLE:
+    from perpetua_core.graph.gate import GateRefused
+else:  # pre-T1 Core pin: keep the module importable so the API can refuse safely
+
+    class GateRefused(Exception):  # type: ignore[no-redef]
+        """Placeholder that is never raised when Core has no gate seam."""
 
 
 class GraphRunner(Protocol):
@@ -110,6 +116,7 @@ class AdmissionGraphRunner:
         if not isinstance(graph, _GateCapableGraph):
             raise AdmissionRefused("admission.graph_gate_unsupported")
 
+        state = self._bind_run_identity(state, run_id)
         context = replace(
             self.context_from_state(state),
             run_id=run_id,
@@ -185,6 +192,8 @@ class AdmissionGraphRunner:
                 )
             raise
         status = getattr(result, "status", None)
+        if status == "done":
+            gate.finish_run()
         stop_reason = self.run_control.stop_for(run_id)
         outcome = {
             "done": "completed",
@@ -200,6 +209,19 @@ class AdmissionGraphRunner:
             run_id=run_id, epoch=epoch, outcome=outcome, reason=reason
         )
         return result
+
+    @staticmethod
+    def _bind_run_identity(state: object, run_id: str) -> object:
+        """Overwrite any client-supplied run identity with the server-minted one.
+
+        Admission, accounting and provider/outbound records must all describe
+        the invocation under the same trusted ``run_id``.
+        """
+        metadata = getattr(state, "metadata", None)
+        merge = getattr(state, "merge", None)
+        if not isinstance(metadata, dict) or not callable(merge):
+            raise AdmissionRefused("admission.state_identity_unbindable")
+        return merge({"metadata": {**metadata, "run_id": run_id}})
 
     def _record_terminal_after_boundary_failure(
         self,

@@ -52,6 +52,15 @@ except ImportError:  # pragma: no cover - exercised on the pre-T1 production pin
     CORE_GATE_AVAILABLE = False
 
 
+def core_start_seam_available() -> bool:
+    """Report whether the installed Core exposes the durable callable-start seam."""
+    try:
+        from perpetua_core.graph.engine import CompiledGraph
+    except ImportError:  # pragma: no cover - Core absent entirely
+        return False
+    return hasattr(CompiledGraph, "_before_start")
+
+
 class LeaseFenced(RuntimeError):
     """This holder's lease epoch is no longer current (a newer holder took it)."""
 
@@ -354,16 +363,12 @@ class StepLedger:
         ):
             raise ValueError("steps must be a positive integer")
         with self._tx() as db:
-            row = db.execute(
-                "SELECT epoch, max_steps, used FROM leases WHERE run_id = ?", (run_id,)
-            ).fetchone()
-            if row is None or row[0] != epoch:
-                raise LeaseFenced(run_id)
+            _, max_steps, used = self._lease_row(db, run_id, epoch)
             if db.execute(
                 "SELECT 1 FROM charge_limits WHERE run_id = ?", (run_id,)
             ).fetchone() is not None:
                 raise ValueError("configured runs must use reserve_charge")
-            if row[2] + steps > row[1]:
+            if used + steps > max_steps:
                 return False
             db.execute("UPDATE leases SET used = used + ? WHERE run_id = ?", (steps, run_id))
             return True
@@ -992,16 +997,22 @@ class StepLedger:
                     "VALUES (?, ?, ?)",
                     (run_id, observed_utc, epoch),
                 )
-            payload_json, payload_digest = self._canonical_payload({"observed_utc": observed_utc})
-            self._append_event(
-                db,
-                run_id=run_id,
-                operation_id=self._operation_id("time", run_id, observed_utc),
-                event_type="time_observed",
-                epoch=epoch,
-                payload_json=payload_json,
-                payload_digest=payload_digest,
-            )
+                # Only the first observation anchors the timeline in the event
+                # log. Later advances touch the high-water row alone: it is all
+                # the rollback check reads, and one event per boundary would
+                # grow events(run_id) without bound.
+                payload_json, payload_digest = self._canonical_payload(
+                    {"observed_utc": observed_utc}
+                )
+                self._append_event(
+                    db,
+                    run_id=run_id,
+                    operation_id=self._operation_id("time", run_id, observed_utc),
+                    event_type="time_observed",
+                    epoch=epoch,
+                    payload_json=payload_json,
+                    payload_digest=payload_digest,
+                )
             return True
 
     def reserve_attempt(
@@ -1752,6 +1763,7 @@ class AdmissionGate:
     delivery: DeliveryHealth = field(default_factory=NoDeliverySinks)
     _charge_allowance: ChargeUnits | None = field(default=None, init=False, repr=False)
     _started_attempts: set[str] = field(default_factory=set, init=False, repr=False)
+    _open_callables: list[str] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Fail closed unless Core's gate seam exists and the lease matches admission."""
@@ -1769,9 +1781,7 @@ class AdmissionGate:
 
     def configure_accounting(self, *, limits: ChargeUnits, allowance: ChargeUnits) -> None:
         """Opt into explicit multi-unit bounds without widening owner admission."""
-        from perpetua_core.graph.engine import CompiledGraph
-
-        if not hasattr(CompiledGraph, "_before_start"):
+        if not core_start_seam_available():
             raise AdmissionRefused("gate.core_start_seam_unavailable")
         if limits.steps > self.decision.max_steps or allowance.steps < 1:
             raise AdmissionRefused("gate.accounting_bound_invalid")
@@ -1794,9 +1804,7 @@ class AdmissionGate:
     @staticmethod
     def _has_start_protocol() -> bool:
         """Identify the candidate start seam, never infer it from new storage."""
-        from perpetua_core.graph.engine import CompiledGraph
-
-        return hasattr(CompiledGraph, "_before_start")
+        return core_start_seam_available()
 
     async def before_start(self, request: DispatchRequest) -> None:
         """Persist a fenced marker immediately before every actual callable."""
@@ -1817,17 +1825,56 @@ class AdmissionGate:
             if not self.ledger.mark_started(self.run_id, attempt_id, self.lease_epoch):
                 raise ValueError("an existing start marker never authorizes callable replay")
             self._started_attempts.add(attempt_id)
+            if request.boundary != "node":
+                self._open_callables.append(attempt_id)
         except LeaseFenced as error:
             raise GateRefused(GateDecision.refuse("authority.lease_fenced"), request) from error
         except ValueError as error:
             reason = "budget.steps_exhausted" if str(error) == "budget exhausted" else "ledger.start_invalid"
             raise GateRefused(GateDecision.refuse(reason), request) from error
 
+    def _finish_open_callables(self) -> str | None:
+        """Settle router/join/reducer holds whose callable has returned.
+
+        Core is sequential between boundaries, so reaching the next boundary
+        proves the previous callable returned. A callable that raised never
+        reaches one, so its hold stays held and surfaces as unknown, never as
+        completed work. Returns a refusal reason, or None when all settled.
+        """
+        while self._open_callables:
+            attempt_id = self._open_callables[0]
+            digest = hashlib.sha256(f"callable-returned\0{attempt_id}".encode()).hexdigest()
+            try:
+                hold = self.ledger.hold(self.run_id, attempt_id)
+                self.ledger.record_outcome(self.run_id, attempt_id, self.lease_epoch, digest)
+                self.ledger.prepare_commit(
+                    self.run_id, attempt_id, hold.hold_id, self.lease_epoch, digest,
+                )
+                self.ledger.settle_commit(self.run_id, attempt_id, digest)
+            except LeaseFenced:
+                return "authority.lease_fenced"
+            except ValueError:
+                return "ledger.commit_unprepared"
+            self._open_callables.pop(0)
+        return None
+
+    def finish_run(self) -> None:
+        """Best-effort settlement of trailing callables after a successful run.
+
+        A failure leaves the hold held; the terminal receipt then reports the
+        run as unknown rather than overstating completion.
+        """
+        if self._common() is None:
+            self._finish_open_callables()
+
     async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
         """Check authority, stop, delivery and reserve budget before the call."""
         early = self._common()
         if early is not None:
             return early
+        pending = self._finish_open_callables()
+        if pending is not None:
+            return GateDecision.refuse(pending)
         if request.boundary == "node":
             try:
                 self._reserve_callable(
@@ -1869,6 +1916,9 @@ class AdmissionGate:
         early = self._common()
         if early is not None:
             return early
+        pending = self._finish_open_callables()
+        if pending is not None:
+            return GateDecision.refuse(pending)
         if request.boundary not in {"node", "region"}:
             return GateDecision.allow()
         if not isinstance(request.result_digest, str) or not request.result_digest:
