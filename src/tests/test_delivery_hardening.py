@@ -326,3 +326,53 @@ def test_isolated_sink_bytes_stay_bounded_until_the_worker_consumes() -> None:
         assert sink._pending_bytes.value <= 1000
     finally:
         sink.close(timeout=0.2)
+
+
+class _CountingCloseSink:
+    """Sink that records how many times its close lifecycle ran."""
+
+    supports_critical_ack = True
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def __call__(self, event: Any) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+async def test_repeated_shutdown_closes_each_sink_once() -> None:
+    """A second shutdown pass must not re-close registrations already closed."""
+    sink = _CountingCloseSink()
+    observer = BoundedObserver(run_id="r", attempt_id="a", hold_id="h", fence_epoch=1)
+    observer.register_sink("counting", sink, critical=False)
+    await observer.shutdown(grace_period=1.0)
+    finished = asyncio.ensure_future(asyncio.sleep(0))
+    await finished
+    observer._pending_callbacks.add(finished)  # forces the second pass to run
+    await observer.shutdown(grace_period=1.0)
+
+    assert sink.closed == 1
+
+
+class _PaddedEvent:
+    """Event whose declared size omits a large field that still crosses the pipe."""
+
+    def __init__(self) -> None:
+        self.size_bytes = 1
+        self.run_id = "r" * 600
+
+
+def test_isolated_sink_charges_serialized_size_not_the_declared_size() -> None:
+    """An understated ``size_bytes`` cannot defeat the process byte allowance."""
+    sink = ProcessIsolatedSink(
+        _slow_target, queue_size=1024, fail_closed=True, max_queue_bytes=1000
+    )
+    try:
+        with pytest.raises(BufferError, match="allowance"):
+            for _ in range(10):
+                sink(_PaddedEvent())
+    finally:
+        sink.close(timeout=0.2)

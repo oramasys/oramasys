@@ -17,11 +17,16 @@ class BlockingSinkRequiresIsolationError(ValueError):
 
 
 def _event_size(event: Any) -> int:
-    """Return the charged size of one event: its own ``size_bytes`` or its pickle."""
+    """Return the charged size of one event: never less than its pickle.
+
+    A producer's ``size_bytes`` can omit fields that still cross the process
+    boundary (for example a large run identity), so it is only a lower bound.
+    """
+    wire = len(pickle.dumps(event, protocol=pickle.HIGHEST_PROTOCOL))
     size = getattr(event, "size_bytes", None)
     if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
-        return size
-    return len(pickle.dumps(event, protocol=pickle.HIGHEST_PROTOCOL))
+        return max(size, wire)
+    return wire
 
 
 def _worker_loop(
@@ -69,15 +74,16 @@ class ProcessIsolatedSink:
         fail_closed: bool = False,
         max_queue_bytes: int = DEFAULT_MAX_QUEUE_BYTES,
     ) -> None:
+        """Configure the isolated worker, its queue bounds and its shared byte allowance."""
         if isinstance(max_queue_bytes, bool) or not isinstance(max_queue_bytes, int) or max_queue_bytes <= 0:
             raise ValueError("max_queue_bytes must be a positive integer")
         self.target = target
         self.max_queue_bytes = max_queue_bytes
-        self._pending_bytes = mp.get_context("spawn").Value("q", 0)
         self.queue_size = queue_size
         self.fail_closed = fail_closed
         self.is_blocking = False  # Wrapped into isolated non-blocking boundary
         self._ctx = mp.get_context("spawn")
+        self._pending_bytes = self._ctx.Value("q", 0)
         self._queue: mp.Queue | None = None
         self._error_queue: mp.Queue | None = None
         self._process = None

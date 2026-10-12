@@ -248,6 +248,7 @@ class BoundedObserver(DeliveryHealth):
             return None
 
         async def _close_quietly() -> None:
+            """Run the sink's blocking close in a thread and swallow its failure."""
             try:
                 await asyncio.to_thread(close)
             except Exception:  # noqa: BLE001 - a failing close must not break shutdown
@@ -428,6 +429,7 @@ class BoundedObserver(DeliveryHealth):
         deadline = loop.time() + grace
 
         def remaining() -> float:
+            """Return the seconds left before the shared shutdown deadline."""
             return max(0.0, deadline - loop.time())
 
         # Wait for non-critical queues to drain
@@ -459,7 +461,9 @@ class BoundedObserver(DeliveryHealth):
                 self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
         # Close sinks with an explicit close() lifecycle off the event loop.
-        for reg in self._sinks.values():
+        closing = list(self._sinks.values())
+        self._sinks.clear()  # a repeated shutdown must not close a sink twice
+        for reg in closing:
             self._close_off_loop(reg.callback)
         if self._close_tasks:
             _, unfinished = await asyncio.wait(tuple(self._close_tasks), timeout=remaining())
