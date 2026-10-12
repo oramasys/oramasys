@@ -151,6 +151,10 @@ class AdmissionGraphRunner:
         )
         try:
             result = await graph.ainvoke(state, gate=gate)
+            if getattr(result, "status", None) == "done":
+                # Inside the try so a stop or failure during trailing
+                # settlement still reaches the terminal-receipt handlers.
+                await gate.finish_run()
         except DurableStopRequested as error:
             self._record_terminal_after_boundary_failure(
                 run_id=run_id,
@@ -192,8 +196,6 @@ class AdmissionGraphRunner:
                 )
             raise
         status = getattr(result, "status", None)
-        if status == "done":
-            gate.finish_run()
         stop_reason = self.run_control.stop_for(run_id)
         outcome = {
             "done": "completed",

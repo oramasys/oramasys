@@ -24,6 +24,7 @@ structural limit; the ledger enforces the admitted bound without double charging
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -1422,6 +1423,7 @@ class StepLedger:
 
     @classmethod
     def _validate_charge(cls, charge: ChargeUnits, *, allow_zero_steps: bool = False) -> None:
+        """Require a well-formed ``ChargeUnits`` with strict, non-negative quantities."""
         if not isinstance(charge, ChargeUnits):
             raise TypeError("charge must be ChargeUnits")
         if not allow_zero_steps and charge.steps < 1:
@@ -1432,16 +1434,19 @@ class StepLedger:
 
     @staticmethod
     def _canonical_payload(payload: object) -> tuple[str, str]:
+        """Return the canonical JSON text and its SHA-256 digest for event payloads."""
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return payload_json, hashlib.sha256(payload_json.encode("ascii")).hexdigest()
 
     @staticmethod
     def _operation_id(kind: str, run_id: str, key: str = "") -> str:
+        """Derive a deterministic idempotency key for one accounting operation."""
         digest = hashlib.sha256(f"{kind}\0{run_id}\0{key}".encode("utf-8")).hexdigest()
         return f"accounting:{kind}:{digest}"
 
     @classmethod
     def _reservation_operation_id(cls, run_id: str, attempt_id: str) -> str:
+        """Derive the idempotency key for one attempt's reservation event."""
         return cls._operation_id("reservation", run_id, attempt_id)
 
     @classmethod
@@ -1456,6 +1461,7 @@ class StepLedger:
         payload_json: str,
         payload_digest: str,
     ) -> bool:
+        """Append one accounting event; an identical replay is a no-op, a conflicting one is refused."""
         existing = db.execute(
             "SELECT schema_version, run_id, event_type, epoch, payload_digest, payload_json "
             "FROM accounting_events WHERE operation_id = ?",
@@ -1495,6 +1501,7 @@ class StepLedger:
         run_id: str,
         attempt_id: str | None = None,
     ) -> ChargeUnits | None:
+        """Read the stored charge for a run (and attempt) from ``table``, or None."""
         if table not in {"charge_limits", "charge_reservations"}:
             raise ValueError("unsupported charge table")
         where = "run_id = ?" if attempt_id is None else "run_id = ? AND attempt_id = ?"
@@ -1518,6 +1525,7 @@ class StepLedger:
     def _projection_for(
         db: sqlite3.Connection, run_id: str, cost_basis: str
     ) -> ChargeUnits:
+        """Read the run's cumulative non-step charge projection for ``cost_basis``."""
         row = db.execute(
             "SELECT elapsed_ms, cost_microunits, effect_attempts, cost_basis "
             "FROM charge_projection WHERE run_id = ?",
@@ -1531,6 +1539,7 @@ class StepLedger:
     def _increase_projection(
         cls, db: sqlite3.Connection, run_id: str, charge: ChargeUnits
     ) -> None:
+        """Add ``charge`` to the run's cumulative non-step projection."""
         current = cls._projection_for(db, run_id, charge.cost_basis)
         updated = current + ChargeUnits(
             0,
@@ -1550,6 +1559,7 @@ class StepLedger:
     def _decrease_projection(
         cls, db: sqlite3.Connection, run_id: str, charge: ChargeUnits
     ) -> None:
+        """Subtract a refunded ``charge`` from the run's cumulative projection."""
         current = cls._projection_for(db, run_id, charge.cost_basis)
         reduction = ChargeUnits(
             0,
@@ -1569,6 +1579,7 @@ class StepLedger:
     def _has_reservation_evidence(
         cls, db: sqlite3.Connection, run_id: str, attempt_id: str
     ) -> bool:
+        """Report whether the attempt's reservation event exists and required a start marker."""
         row = db.execute(
             "SELECT payload_json FROM accounting_events WHERE operation_id = ? AND run_id = ? "
             "AND event_type = 'reservation_tracked'",
@@ -1587,6 +1598,7 @@ class StepLedger:
         *,
         cause: UnknownCause,
     ) -> None:
+        """Record the hold as ``unknown`` with its cause, once, inside the caller's transaction."""
         expected = (hold.hold_id, hold.fence_epoch, cause, "none", "unsettled", 1)
         existing = db.execute(
             "SELECT hold_id, epoch, cause, stop_state, settlement_state, schema_version "
@@ -1833,13 +1845,14 @@ class AdmissionGate:
             reason = "budget.steps_exhausted" if str(error) == "budget exhausted" else "ledger.start_invalid"
             raise GateRefused(GateDecision.refuse(reason), request) from error
 
-    def _finish_open_callables(self) -> str | None:
+    def _finish_open_callables(self) -> GateDecision | None:
         """Settle router/join/reducer holds whose callable has returned.
 
         Core is sequential between boundaries, so reaching the next boundary
         proves the previous callable returned. A callable that raised never
         reaches one, so its hold stays held and surfaces as unknown, never as
-        completed work. Returns a refusal reason, or None when all settled.
+        completed work. Returns the decision that ended settlement (a durable
+        stop or a refusal), or None when everything settled.
         """
         while self._open_callables:
             attempt_id = self._open_callables[0]
@@ -1851,22 +1864,35 @@ class AdmissionGate:
                     self.run_id, attempt_id, hold.hold_id, self.lease_epoch, digest,
                 )
                 self.ledger.settle_commit(self.run_id, attempt_id, digest)
+            except DurableStopRequested as error:
+                return GateDecision.stop(error.reason)
             except LeaseFenced:
-                return "authority.lease_fenced"
+                return GateDecision.refuse("authority.lease_fenced")
             except ValueError:
-                return "ledger.commit_unprepared"
+                return GateDecision.refuse("ledger.commit_unprepared")
             self._open_callables.pop(0)
         return None
 
-    def finish_run(self) -> None:
-        """Best-effort settlement of trailing callables after a successful run.
+    def _finish_run_blocking(self) -> None:
+        """Settle trailing callables; a durable stop surfaces as ``DurableStopRequested``.
 
-        A failure leaves the hold held; the terminal receipt then reports the
-        run as unknown rather than overstating completion.
+        A refusal leaves the hold held, so the terminal receipt reports the run
+        as unknown rather than overstating completion.
         """
-        if self._common() is None:
-            self._finish_open_callables()
+        if not self._open_callables:
+            return
+        decision = self._common() or self._finish_open_callables()
+        if decision is not None and decision.verdict == "stop":
+            raise DurableStopRequested(decision.reason)
 
+    async def finish_run(self) -> None:
+        """Settle trailing callables after a successful run without blocking the loop.
+
+        SQLite settlement runs in a worker thread (the ledger connection is
+        lock-guarded and cross-thread safe) and completes before the caller
+        writes the terminal receipt.
+        """
+        await asyncio.to_thread(self._finish_run_blocking)
     async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
         """Check authority, stop, delivery and reserve budget before the call."""
         early = self._common()
@@ -1874,7 +1900,7 @@ class AdmissionGate:
             return early
         pending = self._finish_open_callables()
         if pending is not None:
-            return GateDecision.refuse(pending)
+            return pending
         if request.boundary == "node":
             try:
                 self._reserve_callable(
@@ -1918,7 +1944,7 @@ class AdmissionGate:
             return early
         pending = self._finish_open_callables()
         if pending is not None:
-            return GateDecision.refuse(pending)
+            return pending
         if request.boundary not in {"node", "region"}:
             return GateDecision.allow()
         if not isinstance(request.result_digest, str) or not request.result_digest:
