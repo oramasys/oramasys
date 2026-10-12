@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Literal, Protocol
 
 from perpetua_core.graph.engine import GraphObservation
 from orama.graph.execution_guard import DeliveryHealth, StopSignal, UnknownDisposition
+from orama.graph.sink_isolation import BlockingSinkRequiresIsolationError
 
 # Re-exported for existing importers of this module (seam reconciliation,
 # 2026-10-11): UnknownDisposition is execution_guard's real, versioned,
@@ -60,6 +61,19 @@ class BoundedObserverConfig:
     stop_grace_period: float = 1.0               # 1000 ms per REV3 §4
     max_critical_payload_bytes: int = 8 * 1024 * 1024  # 8 MiB
 
+    def __post_init__(self) -> None:
+        """Validate non-negative and positive limits."""
+        if self.default_max_queue_size <= 0:
+            raise ValueError(f"default_max_queue_size limit must be positive, got {self.default_max_queue_size}")
+        if self.aggregate_byte_limit <= 0:
+            raise ValueError(f"aggregate_byte_limit limit must be positive, got {self.aggregate_byte_limit}")
+        if self.critical_ack_timeout <= 0:
+            raise ValueError(f"critical_ack_timeout limit must be positive, got {self.critical_ack_timeout}")
+        if self.stop_grace_period <= 0:
+            raise ValueError(f"stop_grace_period limit must be positive, got {self.stop_grace_period}")
+        if self.max_critical_payload_bytes <= 0:
+            raise ValueError(f"max_critical_payload_bytes limit must be positive, got {self.max_critical_payload_bytes}")
+
 
 class SinkCallback(Protocol):
     """Callback protocol for an observation sink."""
@@ -77,19 +91,20 @@ class _SinkRegistration:
     max_queue_size: int
     queue: asyncio.Queue[OrderedEvent] | None = None
     worker_task: asyncio.Task[None] | None = None
+    retired: bool = False
 
 
 def _estimate_payload_bytes(observation: GraphObservation) -> int:
-    """Estimate detached payload size in bytes."""
+    """Estimate detached payload size in UTF-8 encoded bytes."""
     total = 128
     if observation.delta:
         try:
-            total += len(json.dumps(observation.delta, default=str))
+            total += len(json.dumps(observation.delta, default=str, ensure_ascii=False).encode("utf-8"))
         except Exception:
             total += 512
     if observation.state:
         try:
-            total += len(json.dumps(observation.state.model_dump(), default=str))
+            total += len(json.dumps(observation.state.model_dump(), default=str, ensure_ascii=False).encode("utf-8"))
         except Exception:
             total += 1024
     return total
@@ -137,13 +152,20 @@ class BoundedObserver(DeliveryHealth):
         self._gaps: list[GapRecord] = []
         self._unknown_dispositions: list[UnknownDisposition] = []
         self._pending_callbacks: set[asyncio.Task[Any]] = set()
+        self._close_tasks: set[asyncio.Task[Any]] = set()  # off-loop sink closes
         self._queued_bytes = 0  # aggregate detached payload bytes held in non-critical queues
+        self._inflight_bytes = 0  # bytes currently executing inside active callback tasks
 
     # DeliveryHealth protocol ----------------------------------------------------
 
     def healthy(self) -> bool:
         """Report whether delivery is healthy and circuit remains un-tripped."""
         return self._is_healthy and not self._circuit_closed
+
+    @property
+    def inflight_bytes(self) -> int:
+        """Aggregate bytes held in-flight across active callbacks."""
+        return self._inflight_bytes
 
     @property
     def is_shutdown(self) -> bool:
@@ -170,6 +192,13 @@ class BoundedObserver(DeliveryHealth):
         max_queue_size: int | None = None,
     ) -> None:
         """Register or update an observation sink. Idempotent."""
+        if not self.run_id or not isinstance(self.run_id, str):
+            raise ValueError("observer must have valid run_id identity before registering sinks")
+        if getattr(callback, "is_blocking", False):
+            raise BlockingSinkRequiresIsolationError(f"sink {sink_id} is blocking and requires process isolation")
+        if critical and getattr(callback, "supports_critical_ack", True) is False:
+            raise ValueError("critical sinks require persistence-boundary acknowledgment, not enqueue acceptance")
+
         if sink_id in self._sinks:
             self.unregister_sink(sink_id)
 
@@ -184,16 +213,19 @@ class BoundedObserver(DeliveryHealth):
         if not critical:
             reg.queue = asyncio.Queue(maxsize=queue_limit)
             reg.worker_task = asyncio.create_task(self._run_queue_worker(reg))
-            self._pending_callbacks.add(reg.worker_task)
+            self._track_callback(reg.worker_task)
 
         self._sinks[sink_id] = reg
 
     def unregister_sink(self, sink_id: str) -> None:
         """Unregister a sink and cancel its background worker. Idempotent."""
         reg = self._sinks.pop(sink_id, None)
+        if reg is not None:
+            reg.retired = True
         if reg and reg.worker_task and not reg.worker_task.done():
             reg.worker_task.cancel()
-            self._pending_callbacks.discard(reg.worker_task)
+        if reg:
+            self._close_off_loop(reg.callback)
         if reg and reg.queue is not None:
             # Release the allowance of events abandoned in the replaced queue.
             while True:
@@ -204,7 +236,48 @@ class BoundedObserver(DeliveryHealth):
                 self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
                 reg.queue.task_done()
 
+    def _close_off_loop(self, callback: Any) -> asyncio.Task[Any] | None:
+        """Close a sink without blocking the event loop; failures are swallowed.
+
+        ``ProcessIsolatedSink.close`` joins its worker process, which blocks for
+        up to a fraction of a second per sink, so it runs in a thread and is
+        tracked so shutdown can wait for it inside its single deadline.
+        """
+        close = getattr(callback, "close", None)
+        if not callable(close):
+            return None
+
+        async def _close_quietly() -> None:
+            """Run the sink's blocking close in a thread and swallow its failure."""
+            try:
+                await asyncio.to_thread(close)
+            except Exception:  # noqa: BLE001 - a failing close must not break shutdown
+                pass
+
+        try:
+            task = asyncio.get_running_loop().create_task(_close_quietly())
+        except RuntimeError:  # no running loop: nothing to protect, close inline
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+        return task
+
     # Core observation dispatch -------------------------------------------------
+
+    def _track_callback(self, task: asyncio.Task[Any]) -> None:
+        """Own a callback until it finishes, including suppressed cancellation."""
+        self._pending_callbacks.add(task)
+        task.add_done_callback(self._callback_finished)
+
+    def _callback_finished(self, task: asyncio.Task[Any]) -> None:
+        """Release completed ownership and retrieve late exceptions."""
+        self._pending_callbacks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     async def on_observation(self, observation: GraphObservation) -> None:
         """Dispatch observation to critical and non-critical sinks.
@@ -244,6 +317,8 @@ class BoundedObserver(DeliveryHealth):
                     self._queued_bytes += size_bytes
                 except asyncio.QueueFull:
                     # Drop newest and record bounded gap
+                    if len(self._gaps) >= 50:
+                        self._gaps.pop(0)
                     self._gaps.append(
                         GapRecord(
                             sink_id=reg.sink_id,
@@ -271,11 +346,17 @@ class BoundedObserver(DeliveryHealth):
             res = reg.callback(event)
             if inspect.isawaitable(res):
                 task = asyncio.create_task(res)
-                self._pending_callbacks.add(task)
+                self._track_callback(task)
                 try:
-                    await asyncio.wait_for(task, timeout=self.config.critical_ack_timeout)
-                finally:
-                    self._pending_callbacks.discard(task)
+                    _, pending = await asyncio.wait([task], timeout=self.config.critical_ack_timeout)
+                    if task in pending:
+                        task.cancel()
+                        raise asyncio.TimeoutError
+                    task.result()
+                except asyncio.CancelledError:
+                    task.cancel()
+                    self._trip_circuit("critical_delivery_failure", "delivery.critical_cancelled")
+                    raise
         except asyncio.TimeoutError:
             self._trip_circuit("critical_delivery_failure", "delivery.critical_timeout")
             raise TimeoutError(
@@ -309,7 +390,7 @@ class BoundedObserver(DeliveryHealth):
     async def _run_queue_worker(self, reg: _SinkRegistration) -> None:
         """Background worker consuming from a non-critical sink queue."""
         assert reg.queue is not None
-        while True:
+        while not reg.retired:
             try:
                 event = await reg.queue.get()
             except asyncio.CancelledError:
@@ -317,8 +398,15 @@ class BoundedObserver(DeliveryHealth):
             # The event's bytes stay counted while its callback runs (it is still held
             # in memory) and are released in ``finally`` on completion or cancellation.
             cancelled = False
+            self._inflight_bytes += event.size_bytes
             try:
-                res = reg.callback(event)
+                if getattr(reg.callback, "runs_off_loop", False):
+                    # Sizing and enqueueing a large event is CPU work; a sink that
+                    # declares itself thread-safe is called in a worker thread so
+                    # it cannot stall the scheduler's event loop.
+                    res = await asyncio.to_thread(reg.callback, event)
+                else:
+                    res = reg.callback(event)
                 if inspect.isawaitable(res):
                     await res
             except asyncio.CancelledError:
@@ -326,6 +414,7 @@ class BoundedObserver(DeliveryHealth):
             except Exception:  # noqa: BLE001 - non-critical sinks never trip the circuit
                 pass
             finally:
+                self._inflight_bytes = max(0, self._inflight_bytes - event.size_bytes)
                 self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
                 reg.queue.task_done()
             if cancelled:
@@ -335,11 +424,19 @@ class BoundedObserver(DeliveryHealth):
 
     async def shutdown(self, grace_period: float | None = None) -> None:
         """Perform cooperative stop, waiting up to grace_period for drains. Idempotent."""
-        if self._is_shutdown:
+        if self._is_shutdown and not self._pending_callbacks:
             return
 
         self._is_shutdown = True
         grace = grace_period if grace_period is not None else self.config.stop_grace_period
+        # One deadline bounds the whole shutdown: drain, callback cancellation
+        # and sink close share it instead of each spending a fresh grace.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace
+
+        def remaining() -> float:
+            """Return the seconds left before the shared shutdown deadline."""
+            return max(0.0, deadline - loop.time())
 
         # Wait for non-critical queues to drain
         drain_coros = []
@@ -349,22 +446,35 @@ class BoundedObserver(DeliveryHealth):
 
         if drain_coros:
             try:
-                await asyncio.wait_for(asyncio.gather(*drain_coros), timeout=grace)
+                await asyncio.wait_for(asyncio.gather(*drain_coros), timeout=remaining())
             except asyncio.TimeoutError:
                 # Grace period expired: honesty constraint dictates recording stop_timeout
                 self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
         # Cancel remaining workers
         for reg in list(self._sinks.values()):
+            reg.retired = True
             if reg.worker_task and not reg.worker_task.done():
                 reg.worker_task.cancel()
-                self._pending_callbacks.discard(reg.worker_task)
 
         # Cancel any other pending callbacks
         for task in list(self._pending_callbacks):
             if not task.done():
                 task.cancel()
-        self._pending_callbacks.clear()
+        if self._pending_callbacks:
+            _, pending = await asyncio.wait(tuple(self._pending_callbacks), timeout=remaining())
+            if pending:
+                self._trip_circuit("stop_timeout", "stop.grace_period_expired")
+
+        # Close sinks with an explicit close() lifecycle off the event loop.
+        closing = list(self._sinks.values())
+        self._sinks.clear()  # a repeated shutdown must not close a sink twice
+        for reg in closing:
+            self._close_off_loop(reg.callback)
+        if self._close_tasks:
+            _, unfinished = await asyncio.wait(tuple(self._close_tasks), timeout=remaining())
+            if unfinished:
+                self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
     async def __aenter__(self) -> BoundedObserver:
         """Enter async context."""

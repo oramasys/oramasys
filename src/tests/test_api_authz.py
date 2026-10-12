@@ -32,6 +32,33 @@ class _DirectRunner:
         return await graph.ainvoke(state)
 
 
+class _RecordingBoundRunner:
+    """Minimal request runner returned from the authenticated factory."""
+
+    def __init__(self) -> None:
+        """Initialize captured invocation inputs."""
+        self.states: list[object] = []
+
+    async def invoke(self, graph: object, state: object) -> object:
+        """Record the state while preserving the public API response contract."""
+        self.states.append(state)
+        return await graph.ainvoke(state)
+
+
+class _RecordingRunnerFactory:
+    """Probe that makes middleware-established capability binding observable."""
+
+    def __init__(self) -> None:
+        """Initialize captured principal and request runner."""
+        self.principals: list[str] = []
+        self.bound_runner = _RecordingBoundRunner()
+
+    def for_authenticated_principal(self, principal_id: str) -> _RecordingBoundRunner:
+        """Capture the principal supplied by the HTTP authorization boundary."""
+        self.principals.append(principal_id)
+        return self.bound_runner
+
+
 @pytest.fixture
 def strong_token() -> str:
     """Test helper: strong token."""
@@ -90,7 +117,42 @@ async def test_run_with_valid_bearer_refuses_without_admission_runner(monkeypatc
             headers={"Authorization": f"Bearer {strong_token}"},
         )
     assert resp.status_code == 503
-    assert resp.json()["detail"] == "admission.enforcement_unavailable"
+    assert resp.json()["detail"]["code"] == "run_unavailable"
+    assert isinstance(resp.json()["detail"]["correlation_id"], str)
+
+
+async def test_valid_bearer_binds_control_plane_capability_to_runner(monkeypatch, strong_token) -> None:
+    """The verified bearer provides authority without exposing its secret value."""
+    factory = _RecordingRunnerFactory()
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", strong_token)
+    monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(runner=factory)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/run",
+            json=_RUN_PAYLOAD,
+            headers={"Authorization": f"Bearer {strong_token}"},
+        )
+    assert resp.status_code == 200
+    assert factory.principals == ["local-operator"]
+    assert len(factory.bound_runner.states) == 1
+
+
+async def test_insecure_dev_does_not_invent_capability_for_runner(monkeypatch) -> None:
+    """An auth bypass never becomes an implicit production authority source."""
+    factory = _RecordingRunnerFactory()
+    monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
+    monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
+    monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
+    monkeypatch.delenv("ORAMA_LISTEN_HOST", raising=False)
+    monkeypatch.delenv("ORAMA_BIND_HOST", raising=False)
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(runner=factory)), base_url="http://127.0.0.1"
+    ) as client:
+        resp = await client.post("/run", json=_RUN_PAYLOAD)
+    assert resp.status_code == 503
+    assert factory.principals == []
 
 
 async def test_run_insecure_dev_loopback_skips_auth(monkeypatch):

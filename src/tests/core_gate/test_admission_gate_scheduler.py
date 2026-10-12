@@ -233,7 +233,7 @@ async def test_any_join_retains_an_excluded_branch_hold_for_reconciliation(tmp_p
 
 
 async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
-    """Expiry before reducer refuses the fold."""
+    """Expiry refuses the fold, including the earlier T2 callable-start check."""
     from perpetua_core.graph.engine import END, FanOut, MiniGraph
     from perpetua_core.graph.gate import GateRefused
     from perpetua_core.graph.reducers import Reducer
@@ -263,7 +263,10 @@ async def test_expiry_before_reducer_refuses_the_fold(tmp_path):
     graph.add_reducer("messages", Reducer("custom", fold))
     with pytest.raises(GateRefused) as info:
         await graph.compile().ainvoke(fresh(), gate=gate)
-    assert info.value.request.boundary == "reducer"
+    assert info.value.decision.reason == "authority.expired"
+    assert info.value.request.boundary in {"node", "reducer"}
+    if info.value.request.boundary == "node":
+        assert info.value.request.nodes == ("b2",)
     assert folded == []
 
 

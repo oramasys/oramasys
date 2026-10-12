@@ -8,7 +8,12 @@ from orama.api.authz.manifest import (
     manifest_keys,
     requires_auth,
 )
-from orama.api.authz.middleware import AuthzMiddleware, install_authz
+from orama.api.authz.middleware import (
+    AUTHENTICATED_CONTROL_PLANE_PRINCIPAL,
+    AuthzMiddleware,
+    authenticated_control_plane_principal,
+    install_authz,
+)
 from orama.api.authz.tokens import (
     auth_enforced,
     effective_listen_host,
@@ -23,11 +28,13 @@ from orama.api.authz.tokens import (
 
 __all__ = [
     "AuthzMiddleware",
+    "AUTHENTICATED_CONTROL_PLANE_PRINCIPAL",
     "LanBindError",
     "ROUTE_MANIFEST",
     "RouteCapability",
     "RouteSpec",
     "assert_host_allowed",
+    "authenticated_control_plane_principal",
     "auth_enforced",
     "capability_for",
     "effective_listen_host",

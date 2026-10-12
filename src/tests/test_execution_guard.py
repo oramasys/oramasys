@@ -31,6 +31,14 @@ def test_required_core_gate_is_present_when_demanded():
         assert CORE_GATE_AVAILABLE
 
 
+def test_required_core_start_seam_is_present_when_demanded():
+    """The seam-dependent suite cannot silently disappear on a lane that demands it."""
+    if os.environ.get("ORAMA_REQUIRE_CORE_START_SEAM") == "1":
+        from orama.graph.execution_guard import core_start_seam_available
+
+        assert core_start_seam_available()
+
+
 # --- step ledger: single writer, fencing, atomic reservation ----------------
 
 
