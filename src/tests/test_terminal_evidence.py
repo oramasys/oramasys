@@ -17,6 +17,7 @@ import json
 import os
 import select
 import subprocess
+from collections.abc import Mapping
 import sys
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,35 @@ def _read_child_message(
     return message
 
 
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _child_launch(
+    isolated_import_ok: bool,
+    base_env: Mapping[str, str],
+    *,
+    source_root: Path = _SOURCE_ROOT,
+) -> tuple[dict[str, str], list[str]]:
+    """Return the environment and interpreter flags for a cross-process writer.
+
+    These tests prove behaviour of the *installed* package across real processes,
+    so the preferred child is isolated (``-I``) with no ambient ``PYTHONPATH``.
+    When the package is not installed (a source checkout), the child cannot use
+    ``-I`` (it ignores ``PYTHONPATH``) and must be told where ``orama`` lives.
+    The earlier fallback dropped ``PYTHONPATH`` and never added the source root,
+    so it failed exactly in the case it existed for, and CI (which always
+    installs the package) never took that branch to notice. The source root goes
+    first and the caller's own paths, such as a specific Core revision, follow.
+    """
+    env = dict(base_env)
+    if isolated_import_ok:
+        env.pop("PYTHONPATH", None)
+        return env, ["-I"]
+    inherited = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep) if entry]
+    env["PYTHONPATH"] = os.pathsep.join([str(source_root), *inherited])
+    return env, []
+
+
 def _race_terminal_receipts(
     store_path: Path,
     receipts: tuple[TerminalReceipt, ...],
@@ -119,17 +149,16 @@ def _race_terminal_receipts(
     """Race isolated installed-package writers through a bounded JSON handshake."""
     initializer = RunControl(store_path=store_path)
     initializer.close()
-    env = os.environ.copy()
-    env.pop("PYTHONPATH", None)
+    probe_env, _ = _child_launch(True, os.environ)
     isolated_probe = subprocess.run(
         [sys.executable, "-I", "-c", "import orama.graph.run_control"],
         cwd=store_path.parent,
-        env=env,
+        env=probe_env,
         capture_output=True,
         text=True,
         timeout=10,
     )
-    isolation_flag = ["-I"] if isolated_probe.returncode == 0 else []
+    env, isolation_flag = _child_launch(isolated_probe.returncode == 0, os.environ)
     processes: list[subprocess.Popen[str]] = []
     try:
         for receipt in receipts:
@@ -592,3 +621,33 @@ def test_stop_wins_commit_race_and_runtime_receipt_is_conservative(
     assert ledger.hold_state(run_id, "attempt-1") == "held"
     ledger.close()
     control.close()
+
+
+def test_installed_package_children_run_isolated_without_ambient_paths() -> None:
+    """With the package installed, children use it alone: no PYTHONPATH, -I isolation."""
+    env, flags = _child_launch(True, {"PYTHONPATH": "/somewhere", "KEEP": "1"})
+
+    assert flags == ["-I"]
+    assert "PYTHONPATH" not in env
+    assert env["KEEP"] == "1"
+
+
+def test_source_checkout_children_get_the_source_tree_and_the_callers_paths() -> None:
+    """Without an installed package the child must still be able to import ``orama``.
+
+    ``-I`` would ignore PYTHONPATH, so it is not used here. The checkout's source
+    root comes first, and any path the caller deliberately set (for example a
+    specific Core revision) is preserved behind it rather than dropped.
+    """
+    root = Path("/repo/src")
+    env, flags = _child_launch(False, {"PYTHONPATH": "/core/src"}, source_root=root)
+
+    assert flags == []
+    assert env["PYTHONPATH"].split(os.pathsep) == ["/repo/src", "/core/src"]
+
+
+def test_source_checkout_children_work_when_no_pythonpath_was_set() -> None:
+    """An empty or absent PYTHONPATH yields exactly the source root, no blank entry."""
+    env, _ = _child_launch(False, {}, source_root=Path("/repo/src"))
+
+    assert env["PYTHONPATH"] == "/repo/src"

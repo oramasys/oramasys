@@ -1,6 +1,7 @@
 """Ledger and API review hardening that holds on every pinned Core lane."""
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -70,7 +71,18 @@ def test_api_module_imports_when_core_has_no_gate_seam() -> None:
         assert CORE_GATE_AVAILABLE is False
         """
     )
+    # pytest's ``pythonpath`` only configures this process. The child inherits the
+    # environment, so without the source root it can import ``orama`` only when the
+    # package happens to be installed (CI installs it; a source checkout does not).
+    # Keep any caller-supplied paths, such as a specific Core revision, behind it.
+    source_root = str(Path(__file__).resolve().parents[1])
+    inherited = [e for e in os.environ.get("PYTHONPATH", "").split(os.pathsep) if e]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([source_root, *inherited])}
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
