@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 from perpetua_core import END, START, MiniGraph, PerpetuaState
 from orama.graph.admission import AdmissionRequirements
 from orama.graph.admission_runtime import AdmissionGraphRunner, AdmissionRefused
-from orama.graph.bounded_observer import BoundedObserver, OrderedEvent
+from orama.graph.bounded_observer import BoundedObserver, BoundedObserverConfig, OrderedEvent
 from orama.graph.execution_guard import StepLedger
 from orama.graph.run_control import RunControl
 from tests.test_admission_decision import binding, context, providers
@@ -316,5 +317,50 @@ async def test_a_clean_run_whose_delivery_cannot_shut_down_is_not_reported_compl
 
     receipt = run_control.terminal_receipt(holder["d"].run_id)
     assert receipt is not None and receipt.outcome == "unknown"
+    ledger.close()
+    run_control.close()
+
+
+async def test_a_clean_run_whose_off_loop_sink_outlives_the_grace_is_not_reported_complete(
+    tmp_path: Path,
+) -> None:
+    """A thread still running at shutdown is uncertain delivery, not a completed run.
+
+    Shutdown can return normally with the circuit tripped (``stop_timeout``) because a
+    thread cannot be cancelled. That must reach the terminal as ``unknown`` with a
+    delivery-specific reason, never as ``completed``.
+    """
+    release = threading.Event()
+    holder: dict[str, BoundedObserver] = {}
+
+    class _Held:
+        """A thread-safe sink that holds every event until the test releases it."""
+
+        runs_off_loop = True
+
+        def __call__(self, _event: OrderedEvent) -> None:
+            """Block inside the worker thread."""
+            release.wait(timeout=5.0)
+
+    def factory(run_id: str) -> BoundedObserver:
+        """One real observer per run with a short grace and a held off-loop sink."""
+        observer = BoundedObserver(run_id=run_id, config=BoundedObserverConfig(stop_grace_period=0.1))
+        observer.register_sink("telemetry", _Held())
+        holder["d"] = observer
+        return observer
+
+    runner, ledger, run_control, _ = _runner(tmp_path, factory)
+    try:
+        with pytest.raises(RuntimeError, match="delivery.shutdown_incomplete"):
+            await runner.for_authenticated_principal("control-plane").invoke(
+                _node_graph([]), PerpetuaState(session_id="run-1")
+            )
+    finally:
+        release.set()
+
+    receipt = run_control.terminal_receipt(holder["d"].run_id)
+    assert receipt is not None
+    assert receipt.outcome == "unknown"
+    assert receipt.reason == "delivery.shutdown_incomplete"
     ledger.close()
     run_control.close()

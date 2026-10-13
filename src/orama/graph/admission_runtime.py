@@ -132,6 +132,29 @@ async def _quiesce(delivery: object, *, suppress: bool) -> None:
             raise
 
 
+class DeliveryDrainIncomplete(RuntimeError):
+    """A run finished but its delivery could not be shown to be fully drained.
+
+    Shutdown can return normally with the circuit tripped: an off-loop callback is a
+    thread and cannot be cancelled, so one that outlives the grace period is reported
+    (``stop_timeout``) rather than raised. The run's own result is then uncertain
+    delivery state and is recorded as ``unknown``, never ``completed``.
+    """
+
+    reason = "delivery.shutdown_incomplete"
+
+    def __init__(self) -> None:
+        """Carry the stable reason string as the message."""
+        super().__init__(self.reason)
+
+
+def _require_drained(delivery: object) -> None:
+    """Refuse to call a run complete while its delivery reports itself unhealthy."""
+    healthy = getattr(delivery, "healthy", None)
+    if callable(healthy) and not healthy():
+        raise DeliveryDrainIncomplete
+
+
 @dataclass(frozen=True, slots=True)
 class UnconfiguredGraphRunner:
     """Fail closed when trusted deployment admission configuration is absent."""
@@ -255,6 +278,7 @@ class AdmissionGraphRunner:
                 await gate.finish_run()
             if observing:
                 await _quiesce(delivery, suppress=False)
+                _require_drained(delivery)
         except DurableStopRequested as error:
             if observing:
                 await _quiesce(delivery, suppress=True)
@@ -290,6 +314,8 @@ class AdmissionGraphRunner:
             )
             if outcome == "interrupted":
                 reason = "run.interrupted"
+            elif isinstance(error, DeliveryDrainIncomplete):
+                reason = error.reason
             elif observing and not delivery.healthy():
                 reason = "delivery.critical_failure"
             else:
