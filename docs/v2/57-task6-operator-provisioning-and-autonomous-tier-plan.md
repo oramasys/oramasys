@@ -106,14 +106,14 @@ Phylax verifies tier through trusted immutable metadata for the signed `issuer_k
 
 - Done: Phylax #7 merged as `a77b2a2` (its final head was `f590307`).
 - Pending: the two startup-race repairs are **not on Phylax `main`**. Phylax #9 (`5583d6e`, stacked on #7) was closed unmerged when #7 merged, and its branch still exists. The regular-file state-root error contract was reproduced on `main`: it raises a raw `FileExistsError` instead of `CompositionError`.
-- Pending: re-open or re-target the `5583d6e` repair onto `main` as a new PR; its reviews on rows 4305, 4312 and 4317 apply to the patch identity, not to the new PR head, so the countersigns must be re-recorded against the new head SHA.
+- In review: the repair was re-targeted onto `main` as [Phylax #11](https://github.com/oramasys/phylax/pull/11) (head `a76ad39`: the `5583d6e` patch plus a follow-up). Review of `5583d6e` (rows 4305, 4312, 4317) found the concurrent first-key path still racy: the keyring constructor read `active_key()` and `keys()` outside the write transaction, so a worker that read an empty registry could then see a rival's committed key and refuse it. `a76ad39` decides empty/adopt/reject inside one `BEGIN IMMEDIATE` transaction (`ensure_active_key`). The concurrent-startup repair is **pending until #11 is reviewed and merged**; those earlier countersigns do not cover `a76ad39`, so they must be re-recorded against its final head SHA.
 - Pending: Oramasys #33 stays last in the merge order; it imports APIs from Phylax #7, which are now on `main`.
 
 **Files:** Phylax `src/phylax/grant_composition.py`, `src/phylax/grant_store.py`, `src/phylax/adjustment_grant.py` only if constructor changes are required, and corresponding tests.
 
 - [x] Reproduce the `1793fba` regular-file error-contract regression and simultaneous identical first-key registration failure (reproduced again on `main` at `a77b2a2`).
 - [ ] Make state-dir creation tolerate only the expected creation race, then always execute private type/owner/mode validation. Candidate: `5583d6e` on closed Phylax #9; not on `main`.
-- [ ] Make identical bootstrap registration idempotent inside the registry transaction; a mismatched, rotated or revoked identity must still refuse rather than overwrite state. Candidate: `5583d6e`; not on `main`.
+- [ ] Make first-key initialization race-free: the empty-registry decision and the insert share one registry transaction, so a losing worker adopts the committed key; a mismatched, rotated, revoked-only or historical registry must still refuse rather than overwrite state. Candidate: `a76ad39` on Phylax #11, with tests for the read-empty/rival-commit/read-nonempty ordering; not on `main`.
 - [ ] Run composition and concurrent-bootstrap regressions, the full Phylax suite and `git diff --check`; both Codex and AntiGravity must re-countersign the final head of the PR that carries the repair (the new PR replacing #9), recording that exact SHA on GossipBus. Earlier approvals of `17dbe18`, `1793fba`, `43ea187` and `5583d6e` do not satisfy this gate.
 - [ ] Merge through the designated publisher only after the operator's merge decision: the Phylax repair PR before Oramasys #33. (#7 is already merged; the latter imports the APIs it introduced.)
 
@@ -203,7 +203,7 @@ Publication and merge remain designated-reviewer/operator actions. This plan is 
 
 ## 7. Cross-references and review record
 
-- [Phylax startup-race repair PR #9](https://github.com/oramasys/phylax/pull/9) (closed unmerged on 2026-10-13; see Task 0 status).
+- [Phylax startup-race repair PR #9](https://github.com/oramasys/phylax/pull/9) (closed unmerged on 2026-10-13) and its replacement [PR #11](https://github.com/oramasys/phylax/pull/11) (open; see Task 0 status).
 - [Oramasys ADR 56: C4 policy decision](56-operator-provisioning-and-autonomous-tier-adr.md).
 - [Phylax merged issuer PR #6](https://github.com/oramasys/phylax/pull/6).
 - [Oramasys merged consumer PR #32](https://github.com/oramasys/oramasys/pull/32).
@@ -215,16 +215,20 @@ Claude, Agy and the independent reviewer have reviewed the original shared file.
 
 ## 8. 2026-10-13 validation addendum
 
-The two Task 0 startup races were repaired in Phylax commit
+The two Task 0 startup races were addressed in Phylax commit
 `43ea187b4501bb9eceb2bab9406bb8e911e832c5`, descended from the previously
-reviewed `1793fba` candidate:
+reviewed `1793fba` candidate. Neither repair is on Phylax `main` yet, and the
+second was later found incomplete (see Section 8.1):
 
 1. An existing file, symlink, or unsafe directory at the state-root path now
    reaches the established private-path validator rather than leaking a raw
    creation error.
-2. Concurrent identical pristine first-key initialization now adopts exactly one
-   active durable record inside the registry transaction. Mismatched, rotated,
-   revoked, historical, or multi-record state continues to refuse.
+2. Concurrent identical pristine first-key initialization was intended to adopt
+   exactly one active durable record inside the registry transaction. As first
+   written this was only partly true: the keyring constructor's own reads
+   happened outside that transaction. The complete repair is pending (Section
+   8.1). Mismatched, rotated, revoked, historical, or multi-record state must
+   continue to refuse.
 
 Independent validation of the original repair in a clean detached worktree ran
 the complete Phylax suite with declared test and crypto dependencies: **129
@@ -274,3 +278,17 @@ At the time of that review the candidate was pushed and PR #9 was open. Update,
 2026-10-13 04:42Z: PR #7 merged as `a77b2a2` and PR #9 was closed unmerged, so
 `5583d6e` is not on Phylax `main` (see Task 0 status). The operator authorized
 resuming Task 6 and opening the PR. Merge remains a separate operator decision.
+
+Review of `5583d6e` (Greptile on #9) showed that `RotatingIssuerKeyring.__init__`
+read `active_key()` then `keys()` before calling `register_initial_key`, so
+worker B could read an empty registry, worker A could commit, and B would then
+see a nonempty `keys()` and raise "no active key". The repair was re-targeted
+onto `main` as Phylax PR #11, head `a76ad39`
+(`5583d6e` cherry-picked unchanged, plus one commit): a single
+`ensure_active_key` store method makes the empty/adopt/reject decision under
+`BEGIN IMMEDIATE`, and the constructor no longer reads the registry outside it.
+Tests cover that ordering, a barrier at the transaction with two concurrent
+workers, and revoked-only rejection; the Phylax suite passes (213 tests).
+This plan treats the startup-race repair as **pending** until #11 is reviewed,
+countersigned at its final head SHA and merged. The exception contract above is
+unchanged: mismatched or non-active registries raise a plain `ValueError`.
