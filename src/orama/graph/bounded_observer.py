@@ -15,6 +15,7 @@ import json
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from collections.abc import Callable, Iterable
 from typing import Any, Awaitable, Literal, Protocol
 
 from perpetua_core.graph.engine import GraphObservation
@@ -151,6 +152,9 @@ class BoundedObserver(DeliveryHealth):
         self._sinks: dict[str, _SinkRegistration] = {}
         self._gaps: list[GapRecord] = []
         self._unknown_dispositions: list[UnknownDisposition] = []
+        self._unpersisted_dispositions: list[UnknownDisposition] = []
+        self._identity_source: Callable[[], Iterable[Any]] | None = None
+        self._on_unknown: Callable[[UnknownDisposition], None] | None = None
         self._pending_callbacks: set[asyncio.Task[Any]] = set()
         self._close_tasks: set[asyncio.Task[Any]] = set()  # off-loop sink closes
         self._queued_bytes = 0  # aggregate detached payload bytes held in non-critical queues
@@ -181,6 +185,44 @@ class BoundedObserver(DeliveryHealth):
     def unknown_dispositions(self) -> list[UnknownDisposition]:
         """Return list of unknown dispositions recorded during failures."""
         return list(self._unknown_dispositions)
+
+    @property
+    def unpersisted_dispositions(self) -> list[UnknownDisposition]:
+        """Return dispositions whose durable write failed, so none is silently lost."""
+        return list(self._unpersisted_dispositions)
+
+    def bind_authority(
+        self,
+        *,
+        identity_source: Callable[[], Iterable[Any]],
+        on_unknown: Callable[[UnknownDisposition], None],
+        stop_signal: StopSignal | None = None,
+    ) -> None:
+        """Bind the authoritative identity and durable write for this run, once.
+
+        ``identity_source`` is read when the circuit trips and yields the attempts
+        the ledger shows as started and unsettled (``attempt_id``, ``hold_id`` and
+        ``fence_epoch`` each). A critical failure can arrive before any attempt
+        exists, or after the last one settled, so identity is resolved at that
+        moment rather than guessed at construction. Once bound it is the only
+        source: an empty answer means nothing is unsettled and nothing is invented.
+        """
+        if self._identity_source is not None:
+            raise RuntimeError("observer authority is already bound")
+        self._identity_source = identity_source
+        self._on_unknown = on_unknown
+        if stop_signal is not None and self.stop_signal is None:
+            self.stop_signal = stop_signal
+
+    def _unsettled_identities(self) -> list[tuple[str, str, int]]:
+        """Resolve the identities a trip must name, never raising into the failure path."""
+        if self._identity_source is None:
+            return [(self.attempt_id, self.hold_id, self.fence_epoch)]
+        try:
+            holds = tuple(self._identity_source())
+        except Exception:  # noqa: BLE001 - an unreadable authority must not mask the sink failure
+            return []
+        return [(h.attempt_id, h.hold_id, h.fence_epoch) for h in holds]
 
     # Sink registration ----------------------------------------------------------
 
@@ -374,18 +416,25 @@ class BoundedObserver(DeliveryHealth):
         # or replace the original sink failure with a ValueError.
         if self.stop_signal:
             self.stop_signal.request(stop_reason)
-        try:
-            disposition = UnknownDisposition(
-                attempt_id=self.attempt_id,
-                hold_id=self.hold_id,
-                fence_epoch=self.fence_epoch,
-                cause=cause,
-                stop_state="requested" if self.stop_signal else "none",
-                settlement_state="unsettled",
-            )
-        except ValueError:
-            return  # unidentified observer: circuit stays tripped, nothing to settle against
-        self._unknown_dispositions.append(disposition)
+        for attempt_id, hold_id, fence_epoch in self._unsettled_identities():
+            try:
+                disposition = UnknownDisposition(
+                    attempt_id=attempt_id,
+                    hold_id=hold_id,
+                    fence_epoch=fence_epoch,
+                    cause=cause,
+                    stop_state="requested" if self.stop_signal else "none",
+                    settlement_state="unsettled",
+                )
+            except ValueError:
+                continue  # unidentified: circuit stays tripped, nothing to settle against
+            self._unknown_dispositions.append(disposition)
+            if self._on_unknown is None:
+                continue
+            try:
+                self._on_unknown(disposition)
+            except Exception:  # noqa: BLE001 - keep the record; never mask the sink failure
+                self._unpersisted_dispositions.append(disposition)
 
     async def _run_queue_worker(self, reg: _SinkRegistration) -> None:
         """Background worker consuming from a non-critical sink queue."""

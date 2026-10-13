@@ -1432,6 +1432,24 @@ class StepLedger:
                 (run_id, disposition.attempt_id),
             )
 
+    def started_unsettled_attempts(self, run_id: str) -> tuple[AttemptHold, ...]:
+        """Return held attempts that have a durable start marker, in attempt order.
+
+        Only these can have uncertain effects. A held attempt with no start marker
+        never ran, so recovery releases it rather than classifying it unknown; this
+        applies the same evidence rule and names nothing it would release.
+        """
+        rows = self._db.execute(
+            "SELECT h.attempt_id, h.hold_id, h.epoch, h.units FROM attempt_holds AS h "
+            "JOIN accounting_starts AS s ON s.run_id = h.run_id AND s.attempt_id = h.attempt_id "
+            "WHERE h.run_id = ? AND h.state = 'held' ORDER BY h.attempt_id",
+            (run_id,),
+        ).fetchall()
+        return tuple(
+            AttemptHold(run_id, str(attempt), str(hold), int(epoch), int(units))
+            for attempt, hold, epoch, units in rows
+        )
+
     def hold_state(self, run_id: str, attempt_id: str) -> str | None:
         """Return an attempt's durable state, if it exists."""
         row = self._db.execute(
