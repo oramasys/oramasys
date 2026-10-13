@@ -9,6 +9,7 @@ attempt the ledger itself shows as started and unsettled.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 
 from perpetua_core import END, START, MiniGraph, PerpetuaState
@@ -167,5 +168,153 @@ async def test_an_observing_delivery_on_a_graph_without_observation_is_refused(
         await runner.for_authenticated_principal("control-plane").invoke(
             GateOnly(), PerpetuaState(session_id="run-1")
         )
+    ledger.close()
+    run_control.close()
+
+
+def _rows(store_path: Path, table: str) -> int:
+    """Count rows in one shared-store table."""
+    with sqlite3.connect(store_path) as db:
+        return int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+async def test_a_binding_failure_still_records_a_terminal_for_the_run(tmp_path: Path) -> None:
+    """Binding happens inside the guarded lifecycle, so a refusal cannot strand a run."""
+    seen: list[str] = []
+
+    def factory(run_id: str) -> BoundedObserver:
+        """Return an observer that is already bound, as a shared instance would be."""
+        seen.append(run_id)
+        observer = BoundedObserver(run_id=run_id)
+        observer.bind_authority(identity_source=lambda: [], on_unknown=lambda d: None)
+        return observer
+
+    runner, ledger, run_control, _ = _runner(tmp_path, factory)
+    with pytest.raises(RuntimeError, match="already bound"):
+        await runner.for_authenticated_principal("control-plane").invoke(
+            _node_graph([]), PerpetuaState(session_id="run-1")
+        )
+
+    receipt = run_control.terminal_receipt(seen[0])
+    assert receipt is not None and receipt.outcome == "unknown"
+    ledger.close()
+    run_control.close()
+
+
+async def test_a_core_without_the_plugin_runner_is_refused_before_any_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An undrainable Core is an admission refusal: no owner, no lease, no terminal."""
+    monkeypatch.setitem(sys.modules, "perpetua_core.graph.plugins.observer", None)
+    runner, ledger, run_control, store_path = _runner(tmp_path, lambda run_id: _Recording())
+
+    with pytest.raises(AdmissionRefused, match="delivery_core_unsupported"):
+        await runner.for_authenticated_principal("control-plane").invoke(
+            _node_graph([]), PerpetuaState(session_id="run-1")
+        )
+
+    assert _rows(store_path, "run_owners") == 0
+    assert _rows(store_path, "terminal_receipts") == 0
+    ledger.close()
+    run_control.close()
+
+
+class _Quiescing(_Recording):
+    """A delivery that records when it was shut down relative to the terminal receipt."""
+
+    def __init__(self, run_control: RunControl, *, fail_shutdown: bool = False) -> None:
+        """Remember the run control used to observe terminal-receipt ordering."""
+        super().__init__()
+        self.run_control = run_control
+        self.run_id = ""
+        self.fail_shutdown = fail_shutdown
+        self.shutdowns: list[bool] = []
+
+    async def shutdown(self) -> None:
+        """Record whether a terminal receipt already existed when shutdown ran."""
+        self.shutdowns.append(self.run_control.terminal_receipt(self.run_id) is not None)
+        if self.fail_shutdown:
+            raise OSError("sink close failed")
+
+
+async def test_an_observing_delivery_is_shut_down_after_a_clean_run(tmp_path: Path) -> None:
+    """Workers and callbacks are released once per run, before the terminal is recorded."""
+    holder: dict[str, _Quiescing] = {}
+    runner, ledger, run_control, _ = _runner(tmp_path, lambda run_id: holder["d"])
+    holder["d"] = _Quiescing(run_control)
+    runner.run_delivery_factory = lambda run_id: _bind_run(holder["d"], run_id)
+
+    await runner.for_authenticated_principal("control-plane").invoke(
+        _node_graph([]), PerpetuaState(session_id="run-1")
+    )
+
+    assert holder["d"].shutdowns == [False]
+    ledger.close()
+    run_control.close()
+
+
+def _bind_run(delivery: _Quiescing, run_id: str) -> _Quiescing:
+    """Tell the test double which run it serves."""
+    delivery.run_id = run_id
+    return delivery
+
+
+async def test_shutdown_precedes_the_terminal_on_failure_and_never_masks_it(
+    tmp_path: Path,
+) -> None:
+    """A failing close is suppressed so the original failure stays primary."""
+    holder: dict[str, _Quiescing] = {}
+
+    async def failing_sink(event: OrderedEvent) -> None:
+        """Reject the first node-end observation."""
+        if event.observation.event.kind == "node.end":
+            raise RuntimeError("persistence unavailable")
+
+    class Failing(BoundedObserver):
+        """A real bounded observer that also reports shutdown ordering and then fails."""
+
+        def __init__(self, run_control: RunControl, run_id: str) -> None:
+            """Own one critical sink that rejects the first node-end observation."""
+            super().__init__(run_id=run_id)
+            self.run_control = run_control
+            self.shutdowns: list[bool] = []
+            self.register_sink("audit", failing_sink, critical=True)
+
+        async def shutdown(self, grace_period: float | None = None) -> None:
+            """Record whether a terminal already existed, then fail like a sink close can."""
+            self.shutdowns.append(self.run_control.terminal_receipt(self.run_id) is not None)
+            raise OSError("sink close failed")
+
+    runner, ledger, run_control, _ = _runner(tmp_path, lambda run_id: holder["d"])
+    runner.run_delivery_factory = lambda run_id: holder.setdefault("d", Failing(run_control, run_id))
+
+    with pytest.raises((RuntimeError, BaseExceptionGroup)):
+        await runner.for_authenticated_principal("control-plane").invoke(
+            _node_graph([]), PerpetuaState(session_id="run-1")
+        )
+
+    receipt = run_control.terminal_receipt(holder["d"].run_id)
+    assert holder["d"].shutdowns == [False]  # shut down before the terminal existed
+    assert receipt is not None and receipt.reason == "delivery.critical_failure"
+    ledger.close()
+    run_control.close()
+
+
+async def test_a_clean_run_whose_delivery_cannot_shut_down_is_not_reported_complete(
+    tmp_path: Path,
+) -> None:
+    """Un-quiesced delivery is uncertain state, so it must not look like a clean finish."""
+    holder: dict[str, _Quiescing] = {}
+    runner, ledger, run_control, _ = _runner(tmp_path, lambda run_id: holder["d"])
+    holder["d"] = _Quiescing(run_control, fail_shutdown=True)
+    runner.run_delivery_factory = lambda run_id: _bind_run(holder["d"], run_id)
+
+    with pytest.raises(OSError, match="sink close failed"):
+        await runner.for_authenticated_principal("control-plane").invoke(
+            _node_graph([]), PerpetuaState(session_id="run-1")
+        )
+
+    receipt = run_control.terminal_receipt(holder["d"].run_id)
+    assert receipt is not None and receipt.outcome == "unknown"
     ledger.close()
     run_control.close()
