@@ -8,7 +8,7 @@
 
 **Tech stack:** Existing Python packages, SQLite WAL and transactions, PyNaCl RFC 8032 Ed25519ph, existing FastAPI adjustment route, POSIX private-file primitives. No new cryptographic implementation or background recovery daemon.
 
-**Spec:** The design contract below, reconciled against the ratified Task 6 wire contract (`PHYLAX-ADJUSTMENT-GRANT-DESIGN-v2.md`, sections 11-13), Claude's provisioning section and live GossipBus records listed in the provenance table.
+**Spec:** The design contract below, reconciled against the ratified Task 6 wire contract (`PHYLAX-ADJUSTMENT-GRANT-DESIGN-v2.md`, sections 11-13; that source document is not yet published in any oramasys repository, so the pinned, checked-in artifacts that enforce it are the linkable contract: the [v1 conformance vector](https://github.com/oramasys/phylax/blob/a77b2a21a7aebadd0bd646d35e658c64104592e1/docs/vectors/adjustment-grant-v1.json), the [Phylax issuer](https://github.com/oramasys/phylax/blob/a77b2a21a7aebadd0bd646d35e658c64104592e1/src/phylax/adjustment_grant.py) and the [Oramasys verifier port](https://github.com/oramasys/oramasys/blob/5c75a75f2840a48b31c0ba53bf066e3a075f7cfe/src/orama/graph/grant_verifier.py)), Claude's provisioning section and live GossipBus records listed in the provenance table.
 
 **Status:** C4 policy selected directly by the operator in the Codex session, 2026-10-12. Claude, AntiGravity and an independent Cline review accepted the policy and identified the tracked plan refinements in Tasks 0, 3, 5 and 7 below. No new tier, account, secret provisioning or runtime activation has been executed by this plan.
 
@@ -102,13 +102,20 @@ Phylax verifies tier through trusted immutable metadata for the signed `issuer_k
 
 ### Task 0: Close current PR startup review
 
+**Status as of 2026-10-13 04:42Z (checked against GitHub, not the board):**
+
+- Done: Phylax #7 merged as `a77b2a2` (its final head was `f590307`).
+- Pending: the two startup-race repairs are **not on Phylax `main`**. Phylax #9 (`5583d6e`, stacked on #7) was closed unmerged when #7 merged, and its branch still exists. The regular-file state-root error contract was reproduced on `main`: it raises a raw `FileExistsError` instead of `CompositionError`.
+- Pending: re-open or re-target the `5583d6e` repair onto `main` as a new PR; its reviews on rows 4305, 4312 and 4317 apply to the patch identity, not to the new PR head, so the countersigns must be re-recorded against the new head SHA.
+- Pending: Oramasys #33 stays last in the merge order; it imports APIs from Phylax #7, which are now on `main`.
+
 **Files:** Phylax `src/phylax/grant_composition.py`, `src/phylax/grant_store.py`, `src/phylax/adjustment_grant.py` only if constructor changes are required, and corresponding tests.
 
-- [ ] Reproduce the `1793fba` regular-file error-contract regression and simultaneous identical first-key registration failure.
-- [ ] Make state-dir creation tolerate only the expected creation race, then always execute private type/owner/mode validation.
-- [ ] Make identical bootstrap registration idempotent inside the registry transaction; a mismatched, rotated or revoked identity must still refuse rather than overwrite state.
-- [ ] Run composition and concurrent-bootstrap regressions, the full Phylax suite and `git diff --check`; both Codex and AntiGravity must re-countersign the final Phylax #7 head, recording that exact SHA on GossipBus. Earlier approvals of `17dbe18` and `1793fba` do not satisfy this gate.
-- [ ] Merge through the designated publisher only after the operator's merge decision: Phylax #7 before Oramasys #33. The latter imports APIs introduced by #7.
+- [x] Reproduce the `1793fba` regular-file error-contract regression and simultaneous identical first-key registration failure (reproduced again on `main` at `a77b2a2`).
+- [ ] Make state-dir creation tolerate only the expected creation race, then always execute private type/owner/mode validation. Candidate: `5583d6e` on closed Phylax #9; not on `main`.
+- [ ] Make identical bootstrap registration idempotent inside the registry transaction; a mismatched, rotated or revoked identity must still refuse rather than overwrite state. Candidate: `5583d6e`; not on `main`.
+- [ ] Run composition and concurrent-bootstrap regressions, the full Phylax suite and `git diff --check`; both Codex and AntiGravity must re-countersign the final head of the PR that carries the repair (the new PR replacing #9), recording that exact SHA on GossipBus. Earlier approvals of `17dbe18`, `1793fba`, `43ea187` and `5583d6e` do not satisfy this gate.
+- [ ] Merge through the designated publisher only after the operator's merge decision: the Phylax repair PR before Oramasys #33. (#7 is already merged; the latter imports the APIs it introduced.)
 
 ### Task 1: Public verification and tier-aware authority state
 
@@ -192,15 +199,15 @@ Before execution, reviewers must check the exact proposed interfaces, legacy mig
 
 The final feature is complete only when both independent reviews agree, matched dependencies are available, the real authenticated end-to-end recovery passes, operators have provisioning/rotation/revocation/rollback instructions, and readiness distinguishes code availability from deployment activation. Merging a library does not satisfy this gate.
 
-Publication and merge remain designated-reviewer/operator actions. This plan file is local and uncommitted; C4 selection approves the policy design, not creation of service accounts, production provisioning, or automatic deployment.
+Publication and merge remain designated-reviewer/operator actions. This plan is published for review on Oramasys PR #34; C4 selection approves the policy design, not creation of service accounts, production provisioning, or automatic deployment.
 
 ## 7. Cross-references and review record
 
-- [Phylax startup-race repair PR #9](https://github.com/oramasys/phylax/pull/9).
+- [Phylax startup-race repair PR #9](https://github.com/oramasys/phylax/pull/9) (closed unmerged on 2026-10-13; see Task 0 status).
 - [Oramasys ADR 56: C4 policy decision](56-operator-provisioning-and-autonomous-tier-adr.md).
 - [Phylax merged issuer PR #6](https://github.com/oramasys/phylax/pull/6).
 - [Oramasys merged consumer PR #32](https://github.com/oramasys/oramasys/pull/32).
-- [Phylax provisioning PR #7](https://github.com/oramasys/phylax/pull/7).
+- [Phylax provisioning PR #7](https://github.com/oramasys/phylax/pull/7) (merged as `a77b2a2`).
 - [Oramasys adjustment API PR #33](https://github.com/oramasys/oramasys/pull/33).
 - Live board: `TASK6_C4_DIRECT_OPERATOR_SELECTION_AND_CODEX_REPLY_20261012`, `TASK6_PARALLEL_SUBAGENT_FINDINGS_AND_C4_PLAN_PROGRESS_20261012`, `REVIEW_OF_CODEX_CANONICAL_PLAN_20261012`, and the publication/review-request topic for this plan.
 
@@ -225,8 +232,8 @@ passed**, **88.76% coverage**, and `git diff --check 1793fba..43ea187` was clean
 Those initial countersigns applied to `43ea187`, not to the subsequently
 discovered live PR source or its rebased candidate.
 
-This addendum does **not** assert that Phylax PR #7 or #9, or Oramasys PR #33,
-has merged. GitHub API authentication was unavailable during the initial
+This addendum, as first written, did **not** assert that Phylax PR #7 or #9, or Oramasys PR #33,
+had merged; see the Task 0 status for the current state. GitHub API authentication was unavailable during the initial
 validation. For the current pushed candidate and review state, see Section 8.1.
 
 The durable C4 decision record is Oramasys ADR 56. It records the Level 0
@@ -263,6 +270,7 @@ or historical registry key is a plain `ValueError` from
 code change is indicated. Earlier summaries that grouped both cases under
 `CompositionError` were imprecise.
 
-The candidate is pushed and PR #9 is open; neither PR #9 nor its base PR #7 has
-merged. The operator authorized resuming Task 6 and opening the PR. Merge
-remains a separate operator decision.
+At the time of that review the candidate was pushed and PR #9 was open. Update,
+2026-10-13 04:42Z: PR #7 merged as `a77b2a2` and PR #9 was closed unmerged, so
+`5583d6e` is not on Phylax `main` (see Task 0 status). The operator authorized
+resuming Task 6 and opening the PR. Merge remains a separate operator decision.

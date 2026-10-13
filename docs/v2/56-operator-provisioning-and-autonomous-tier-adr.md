@@ -108,8 +108,8 @@ imports the former's public interfaces.
 
 ## References
 
-- [Phylax adjustment-grant design](https://github.com/oramasys/phylax)
-- [Oramasys adjustment-grant consumer](https://github.com/oramasys/oramasys)
+- Phylax adjustment-grant contract, pinned at `a77b2a2`: [v1 conformance vector](https://github.com/oramasys/phylax/blob/a77b2a21a7aebadd0bd646d35e658c64104592e1/docs/vectors/adjustment-grant-v1.json) and [issuer](https://github.com/oramasys/phylax/blob/a77b2a21a7aebadd0bd646d35e658c64104592e1/src/phylax/adjustment_grant.py). The source design document (`PHYLAX-ADJUSTMENT-GRANT-DESIGN-v2.md`) is not yet published in a repository.
+- Oramasys adjustment-grant consumer: [verifier port](https://github.com/oramasys/oramasys/blob/5c75a75f2840a48b31c0ba53bf066e3a075f7cfe/src/orama/graph/grant_verifier.py).
 
 The [Task 6 operator-provisioning and autonomous-tier plan](57-task6-operator-provisioning-and-autonomous-tier-plan.md)
 is the implementation roadmap for this decision. This ADR controls policy;
