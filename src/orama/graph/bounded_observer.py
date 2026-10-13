@@ -200,12 +200,22 @@ class BoundedObserver(DeliveryHealth):
     ) -> None:
         """Bind the authoritative identity and durable write for this run, once.
 
-        ``identity_source`` is read when the circuit trips and yields the attempts
-        the ledger shows as started and unsettled (``attempt_id``, ``hold_id`` and
-        ``fence_epoch`` each). A critical failure can arrive before any attempt
-        exists, or after the last one settled, so identity is resolved at that
-        moment rather than guessed at construction. Once bound it is the only
-        source: an empty answer means nothing is unsettled and nothing is invented.
+        Why: the constructor's ``attempt_id``/``hold_id``/``fence_epoch`` describe a
+        single attempt, but an observer is per run and a run has many. A failure can
+        also arrive before any attempt exists, or after the last one settled. With
+        blank defaults ``UnknownDisposition`` rejects the record and the failure path
+        used to swallow that, so no disposition existed at all; nothing ever wrote
+        the in-memory list to the ledger either.
+
+        How: ``identity_source`` is read at the moment the circuit trips and yields
+        the attempts the ledger shows as started and unsettled (``attempt_id``,
+        ``hold_id`` and ``fence_epoch`` each). ``on_unknown`` is the durable write
+        (the ledger's validated ``mark_unknown``). Once bound it is the only source:
+        an empty answer means nothing is unsettled and nothing is invented, so the
+        run-level terminal is the conservative record. Binding twice raises, because
+        a second source would let identity change mid-run. ``stop_signal`` is adopted
+        only if the observer was not given one, so a recorded disposition truthfully
+        reports that a stop was requested.
         """
         if self._identity_source is not None:
             raise RuntimeError("observer authority is already bound")
@@ -215,7 +225,13 @@ class BoundedObserver(DeliveryHealth):
             self.stop_signal = stop_signal
 
     def _unsettled_identities(self) -> list[tuple[str, str, int]]:
-        """Resolve the identities a trip must name, never raising into the failure path."""
+        """Resolve the identities a trip must name, never raising into the failure path.
+
+        Unbound observers keep the constructor identity (the pre-existing contract).
+        Once bound, the source is read here and only here. An unreadable source
+        yields no identities: the circuit is already tripped and the stop already
+        requested, and the original sink failure must reach the caller unmasked.
+        """
         if self._identity_source is None:
             return [(self.attempt_id, self.hold_id, self.fence_epoch)]
         try:
@@ -409,7 +425,16 @@ class BoundedObserver(DeliveryHealth):
             raise
 
     def _trip_circuit(self, cause: Literal["critical_delivery_failure", "stop_timeout"], stop_reason: str) -> None:
-        """Trip circuit breaker, request stop, and record UnknownDisposition."""
+        """Trip circuit breaker, request stop, and record UnknownDisposition.
+
+        Order matters. The circuit trips and the stop is requested first, so an
+        unreadable authority or an invalid identity can never delay or swallow the
+        stop. Each unsettled identity then becomes one validated disposition,
+        appended in memory and handed to the durable write. A refused write (fenced
+        lease, conflicting record) is kept in ``unpersisted_dispositions`` instead of
+        being raised, so the sink's own failure remains the exception the caller sees.
+        Recovery re-derives the same attempts from the ledger if a write was lost.
+        """
         self._is_healthy = False
         self._circuit_closed = True
         # Request the stop first: an invalid observer identity must never swallow it

@@ -76,10 +76,18 @@ async def _drain(
 ) -> object:
     """Run one graph, draining Core's observations through ``delivery`` when it observes.
 
-    Core already owns the delivery transport: ``run_with_plugins`` drains the
-    canonical observation stream, hands the listener a detached copy, fails closed
-    and closes the iterator deterministically. Reusing it keeps one seam instead
-    of a second, weaker one on ``ainvoke``, and needs no Core release or pin bump.
+    Why: the admitted path used to call ``graph.ainvoke(state, gate=gate)``, so the
+    gate saw delivery *health* but nothing ever fed Core's observation stream to the
+    delivery. Bounded delivery existed but was not live in a normal run.
+
+    How: Core already owns the delivery transport. ``run_with_plugins`` drains the
+    canonical observation stream, hands the listener a detached copy (a listener
+    cannot mutate the scheduler's live state), fails closed, and closes the iterator
+    deterministically so cleanup failure is not lost. Reusing it keeps one seam
+    instead of a second, weaker one on ``ainvoke``, and needs no Core release or pin
+    bump: it is present at the production pin and at Core #12 and #13. It is imported
+    here so a pin without the plugin runner refuses (``admission.delivery_core_
+    unsupported``) rather than failing at module import or skipping delivery.
     """
     if not observing:
         return await graph.ainvoke(state, gate=gate)  # type: ignore[attr-defined]
@@ -107,6 +115,14 @@ class AdmissionGraphRunner:
     transport-bound runner always replaces its principal and run identity.
     Calling this factory directly refuses rather than accepting authority from
     request state.
+
+    Delivery: ``run_delivery_factory(run_id)`` builds one delivery per run from the
+    server-minted run id (``delivery_factory()`` takes no argument, so it cannot
+    name the run; ``BoundedObserver`` refuses sinks without one). A delivery that
+    has ``on_observation`` is drained through Core; one that also has
+    ``bind_authority`` is bound to this run's ledger so a critical failure names
+    only started, unsettled attempts. The default is still no sinks and a plain
+    ``ainvoke``.
     """
 
     binding: ArtifactBinding

@@ -1435,9 +1435,18 @@ class StepLedger:
     def started_unsettled_attempts(self, run_id: str) -> tuple[AttemptHold, ...]:
         """Return held attempts that have a durable start marker, in attempt order.
 
-        Only these can have uncertain effects. A held attempt with no start marker
-        never ran, so recovery releases it rather than classifying it unknown; this
-        applies the same evidence rule and names nothing it would release.
+        Why: a critical delivery failure must name the attempts whose effects may be
+        uncertain, and nothing else. Naming a blank or guessed attempt either gets
+        rejected by ``UnknownDisposition`` (so the record silently disappears) or
+        points at the wrong hold.
+
+        How: ``recover()`` already decides this per attempt: a held attempt WITH a
+        durable start marker may have run, so it becomes unknown; a held attempt
+        WITHOUT one never ran and is released. This applies that same evidence rule
+        read-only, so a live failure and a post-crash recovery can never disagree
+        about which attempts are uncertain. A settled or already-unknown attempt is
+        not ``held`` and is therefore never returned (``mark_unknown`` would refuse
+        a known usage receipt anyway).
         """
         rows = self._db.execute(
             "SELECT h.attempt_id, h.hold_id, h.epoch, h.units FROM attempt_holds AS h "
@@ -1630,6 +1639,13 @@ class StepLedger:
                 }
 
             def consumed(basis: str) -> int:
+                """Return the net units earlier grants already applied to this hold in ``basis``.
+
+                ``balance_delta`` is signed, so a release and a later consumption on the
+                same hold net out. Summing inside the open transaction means a concurrent
+                grant on another connection cannot be missed between this read and the
+                ``units_exceed_remaining`` decision below.
+                """
                 return int(db.execute(
                     "SELECT COALESCE(SUM(balance_delta), 0) FROM consumed_grants "
                     "WHERE run_id = ? AND hold_id = ? AND units_basis = ?",
