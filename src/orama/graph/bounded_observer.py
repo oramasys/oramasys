@@ -95,6 +95,12 @@ class _SinkRegistration:
     retired: bool = False
 
 
+def _retrieve(call: asyncio.Future[Any]) -> None:
+    """Mark a finished call's exception as retrieved; the sink's failure is its own."""
+    if not call.cancelled():
+        call.exception()
+
+
 def _estimate_payload_bytes(observation: GraphObservation) -> int:
     """Estimate detached payload size in UTF-8 encoded bytes."""
     total = 128
@@ -157,6 +163,7 @@ class BoundedObserver(DeliveryHealth):
         self._on_unknown: Callable[[UnknownDisposition], None] | None = None
         self._pending_callbacks: set[asyncio.Task[Any]] = set()
         self._close_tasks: set[asyncio.Task[Any]] = set()  # off-loop sink closes
+        self._offloaded: set[asyncio.Future[Any]] = set()  # off-loop callbacks still in a thread
         self._queued_bytes = 0  # aggregate detached payload bytes held in non-critical queues
         self._inflight_bytes = 0  # bytes currently executing inside active callback tasks
 
@@ -472,24 +479,56 @@ class BoundedObserver(DeliveryHealth):
             except Exception:  # noqa: BLE001 - keep the record; never mask the sink failure
                 self._unpersisted_dispositions.append(disposition)
 
+    def _once_release(self, queue: asyncio.Queue[OrderedEvent], event: OrderedEvent) -> Callable[[], None]:
+        """Return a callable that releases an event's charge and queue slot exactly once."""
+        released = False
+
+        def release() -> None:
+            """Give back the inflight and queued bytes and drain the queue slot."""
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._inflight_bytes = max(0, self._inflight_bytes - event.size_bytes)
+            self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
+            queue.task_done()
+
+        return release
+
     async def _run_queue_worker(self, reg: _SinkRegistration) -> None:
-        """Background worker consuming from a non-critical sink queue."""
+        """Background worker consuming from a non-critical sink queue.
+
+        An event is charged to ``inflight_bytes`` and held in its queue slot until its
+        callback has actually finished. For a callback that runs in a thread this is
+        not the same as the worker's await finishing: a thread cannot be interrupted,
+        so cancelling the worker only stops waiting while the callback keeps running
+        and keeps holding the event. Release is therefore handed to the thread's
+        completion rather than to the cancellation, and ``shutdown`` waits for these
+        calls inside its single deadline.
+        """
         assert reg.queue is not None
+        queue = reg.queue
         while not reg.retired:
             try:
-                event = await reg.queue.get()
+                event = await queue.get()
             except asyncio.CancelledError:
                 break
-            # The event's bytes stay counted while its callback runs (it is still held
-            # in memory) and are released in ``finally`` on completion or cancellation.
-            cancelled = False
             self._inflight_bytes += event.size_bytes
+            release = self._once_release(queue, event)
+            cancelled = False
+            thread_call: asyncio.Future[Any] | None = None
             try:
                 if getattr(reg.callback, "runs_off_loop", False):
                     # Sizing and enqueueing a large event is CPU work; a sink that
                     # declares itself thread-safe is called in a worker thread so
-                    # it cannot stall the scheduler's event loop.
-                    res = await asyncio.to_thread(reg.callback, event)
+                    # it cannot stall the scheduler's event loop. The shield keeps a
+                    # cancelled worker from abandoning the call's bookkeeping.
+                    thread_call = asyncio.get_running_loop().run_in_executor(
+                        None, reg.callback, event
+                    )
+                    self._offloaded.add(thread_call)
+                    thread_call.add_done_callback(self._offloaded.discard)
+                    res = await asyncio.shield(thread_call)
                 else:
                     res = reg.callback(event)
                 if inspect.isawaitable(res):
@@ -499,9 +538,11 @@ class BoundedObserver(DeliveryHealth):
             except Exception:  # noqa: BLE001 - non-critical sinks never trip the circuit
                 pass
             finally:
-                self._inflight_bytes = max(0, self._inflight_bytes - event.size_bytes)
-                self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
-                reg.queue.task_done()
+                if thread_call is not None and not thread_call.done():
+                    # The thread is still running: it owns the event until it returns.
+                    thread_call.add_done_callback(lambda call: (_retrieve(call), release()))
+                else:
+                    release()
             if cancelled:
                 break
 
@@ -549,6 +590,14 @@ class BoundedObserver(DeliveryHealth):
         if self._pending_callbacks:
             _, pending = await asyncio.wait(tuple(self._pending_callbacks), timeout=remaining())
             if pending:
+                self._trip_circuit("stop_timeout", "stop.grace_period_expired")
+
+        # A thread cannot be cancelled: wait for off-loop callbacks inside the same
+        # deadline so a sink is not closed under a call that is still using it, and
+        # report any that outlive it rather than present them as drained.
+        if self._offloaded:
+            _, running = await asyncio.wait(tuple(self._offloaded), timeout=remaining())
+            if running:
                 self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
         # Close sinks with an explicit close() lifecycle off the event loop.
