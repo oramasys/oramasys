@@ -10,8 +10,10 @@ dispatch a node.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -65,6 +67,94 @@ class _GateCapableGraph(Protocol):
         """Run through Core's existing scheduler with its neutral gate."""
 
 
+def _observation_runner() -> Callable[..., Awaitable[object]]:
+    """Resolve Core's plugin runner, refusing as an admission decision if it is absent.
+
+    Resolved during preflight, before any owner or lease record exists. Importing it
+    lazily after the lease would turn "this Core cannot drain observations" into an
+    ``unknown`` runtime terminal for a run that never started, which is the wrong
+    evidence. A Core pin without the plugin runner refuses here instead.
+    """
+    try:
+        from perpetua_core.graph.plugins.observer import run_with_plugins
+    except ImportError as error:
+        raise AdmissionRefused("admission.delivery_core_unsupported") from error
+    return run_with_plugins
+
+
+async def _drain(
+    graph: object,
+    state: object,
+    gate: object,
+    delivery: object,
+    *,
+    runner: Callable[..., Awaitable[object]] | None,
+) -> object:
+    """Run one graph, draining Core's observations through ``delivery`` when it observes.
+
+    Why: the admitted path used to call ``graph.ainvoke(state, gate=gate)``, so the
+    gate saw delivery *health* but nothing ever fed Core's observation stream to the
+    delivery. Bounded delivery existed but was not live in a normal run.
+
+    How: Core already owns the delivery transport. ``run_with_plugins`` drains the
+    canonical observation stream, hands the listener a detached copy (a listener
+    cannot mutate the scheduler's live state), fails closed, and closes the iterator
+    deterministically so cleanup failure is not lost. Reusing it keeps one seam
+    instead of a second, weaker one on ``ainvoke``, and needs no Core release or pin
+    bump: it is present at the production pin and at Core #12 and #13. ``runner`` is
+    resolved in preflight by ``_observation_runner``; ``None`` means no sink observes
+    and the plain gated ``ainvoke`` is used, exactly as before.
+    """
+    if runner is None:
+        return await graph.ainvoke(state, gate=gate)  # type: ignore[attr-defined]
+    return await runner(graph, state, delivery=delivery, gate=gate)
+
+
+async def _quiesce(delivery: object, *, suppress: bool) -> None:
+    """Shut an observing delivery down so its workers and callbacks are released.
+
+    A per-run delivery owns background tasks (non-critical queue workers, in-flight
+    callbacks, off-loop sink closes). Nothing else ever stops them, so without this
+    each run would leak them and late authority could act after the terminal was
+    recorded. Shutdown is idempotent, so the failure handlers call it again safely.
+    On an error path ``suppress`` keeps a failing close from replacing the original
+    failure; cancellation is never suppressed.
+    """
+    shutdown = getattr(delivery, "shutdown", None)
+    if not callable(shutdown):
+        return
+    try:
+        outcome = shutdown()
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:  # noqa: BLE001 - see docstring; CancelledError still propagates
+        if not suppress:
+            raise
+
+
+class DeliveryDrainIncomplete(RuntimeError):
+    """A run finished but its delivery could not be shown to be fully drained.
+
+    Shutdown can return normally with the circuit tripped: an off-loop callback is a
+    thread and cannot be cancelled, so one that outlives the grace period is reported
+    (``stop_timeout``) rather than raised. The run's own result is then uncertain
+    delivery state and is recorded as ``unknown``, never ``completed``.
+    """
+
+    reason = "delivery.shutdown_incomplete"
+
+    def __init__(self) -> None:
+        """Carry the stable reason string as the message."""
+        super().__init__(self.reason)
+
+
+def _require_drained(delivery: object) -> None:
+    """Refuse to call a run complete while its delivery reports itself unhealthy."""
+    healthy = getattr(delivery, "healthy", None)
+    if callable(healthy) and not healthy():
+        raise DeliveryDrainIncomplete
+
+
 @dataclass(frozen=True, slots=True)
 class UnconfiguredGraphRunner:
     """Fail closed when trusted deployment admission configuration is absent."""
@@ -82,6 +172,14 @@ class AdmissionGraphRunner:
     transport-bound runner always replaces its principal and run identity.
     Calling this factory directly refuses rather than accepting authority from
     request state.
+
+    Delivery: ``run_delivery_factory(run_id)`` builds one delivery per run from the
+    server-minted run id (``delivery_factory()`` takes no argument, so it cannot
+    name the run; ``BoundedObserver`` refuses sinks without one). A delivery that
+    has ``on_observation`` is drained through Core; one that also has
+    ``bind_authority`` is bound to this run's ledger so a critical failure names
+    only started, unsettled attempts. The default is still no sinks and a plain
+    ``ainvoke``.
     """
 
     binding: ArtifactBinding
@@ -93,6 +191,7 @@ class AdmissionGraphRunner:
     requirements: AdmissionRequirements
     clock: Clock
     delivery_factory: Callable[[], DeliveryHealth] = NoDeliverySinks
+    run_delivery_factory: Callable[[str], DeliveryHealth] | None = None
 
     def for_authenticated_principal(self, principal_id: str) -> GraphRunner:
         """Bind one verified control-plane capability to future invocations."""
@@ -136,6 +235,18 @@ class AdmissionGraphRunner:
                 f"admission.{decision.outcome}:{decision.reason_code}"
             )
 
+        delivery = (
+            self.run_delivery_factory(run_id)
+            if self.run_delivery_factory is not None
+            else self.delivery_factory()
+        )
+        # A delivery that observes must never be silently skipped: refuse before any
+        # lease or owner record exists if this graph or Core cannot be drained.
+        observing = callable(getattr(delivery, "on_observation", None))
+        if observing and not callable(getattr(graph, "aobserve", None)):
+            raise AdmissionRefused("admission.graph_observation_unsupported")
+        runner = _observation_runner() if observing else None
+
         self._register_store_and_owner(run_id, principal_id)
         epoch = self.ledger.open_lease(run_id, max_steps=decision.max_steps)
         gate = AdmissionGate(
@@ -147,15 +258,30 @@ class AdmissionGraphRunner:
             lease_epoch=epoch,
             stop=self.run_control.durable_signal(run_id=run_id, principal=principal_id),
             clock=self.clock,
-            delivery=self.delivery_factory(),
+            delivery=delivery,
         )
+        bind = getattr(delivery, "bind_authority", None)
         try:
-            result = await graph.ainvoke(state, gate=gate)
+            if observing and callable(bind):
+                # Inside the guarded lifecycle: the owner and lease already exist, so a
+                # refused binding must still reach a terminal receipt, not strand the run.
+                # Identity comes from the ledger at trip time, bound to this run only.
+                bind(
+                    identity_source=partial(self.ledger.started_unsettled_attempts, run_id),
+                    on_unknown=partial(self.ledger.mark_unknown, run_id),
+                    stop_signal=gate.stop,
+                )
+            result = await _drain(graph, state, gate, delivery, runner=runner)
             if getattr(result, "status", None) == "done":
                 # Inside the try so a stop or failure during trailing
                 # settlement still reaches the terminal-receipt handlers.
                 await gate.finish_run()
+            if observing:
+                await _quiesce(delivery, suppress=False)
+                _require_drained(delivery)
         except DurableStopRequested as error:
+            if observing:
+                await _quiesce(delivery, suppress=True)
             self._record_terminal_after_boundary_failure(
                 run_id=run_id,
                 epoch=epoch,
@@ -165,6 +291,8 @@ class AdmissionGraphRunner:
             )
             raise AdmissionRefused("admission.stop_requested") from error
         except GateRefused as error:
+            if observing:
+                await _quiesce(delivery, suppress=True)
             stopped = error.decision.verdict == "stop"
             outcome = "cancelled" if stopped else "refused"
             self._record_terminal_after_boundary_failure(
@@ -179,12 +307,19 @@ class AdmissionGraphRunner:
             )
             raise AdmissionRefused(code) from error
         except BaseException as error:
+            if observing:
+                await _quiesce(delivery, suppress=True)
             outcome = (
                 "interrupted" if type(error).__name__ == "CancelledError" else "unknown"
             )
-            reason = (
-                "run.interrupted" if outcome == "interrupted" else "run.execution_error"
-            )
+            if outcome == "interrupted":
+                reason = "run.interrupted"
+            elif isinstance(error, DeliveryDrainIncomplete):
+                reason = error.reason
+            elif observing and not delivery.healthy():
+                reason = "delivery.critical_failure"
+            else:
+                reason = "run.execution_error"
             try:
                 self.run_control.record_runtime_terminal(
                     run_id=run_id, epoch=epoch, outcome=outcome, reason=reason

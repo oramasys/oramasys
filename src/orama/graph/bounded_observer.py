@@ -15,6 +15,7 @@ import json
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from collections.abc import Callable, Iterable
 from typing import Any, Awaitable, Literal, Protocol
 
 from perpetua_core.graph.engine import GraphObservation
@@ -94,6 +95,12 @@ class _SinkRegistration:
     retired: bool = False
 
 
+def _retrieve(call: asyncio.Future[Any]) -> None:
+    """Mark a finished call's exception as retrieved; the sink's failure is its own."""
+    if not call.cancelled():
+        call.exception()
+
+
 def _estimate_payload_bytes(observation: GraphObservation) -> int:
     """Estimate detached payload size in UTF-8 encoded bytes."""
     total = 128
@@ -151,8 +158,12 @@ class BoundedObserver(DeliveryHealth):
         self._sinks: dict[str, _SinkRegistration] = {}
         self._gaps: list[GapRecord] = []
         self._unknown_dispositions: list[UnknownDisposition] = []
+        self._unpersisted_dispositions: list[UnknownDisposition] = []
+        self._identity_source: Callable[[], Iterable[Any]] | None = None
+        self._on_unknown: Callable[[UnknownDisposition], None] | None = None
         self._pending_callbacks: set[asyncio.Task[Any]] = set()
         self._close_tasks: set[asyncio.Task[Any]] = set()  # off-loop sink closes
+        self._offloaded: set[asyncio.Future[Any]] = set()  # off-loop callbacks still in a thread
         self._queued_bytes = 0  # aggregate detached payload bytes held in non-critical queues
         self._inflight_bytes = 0  # bytes currently executing inside active callback tasks
 
@@ -181,6 +192,60 @@ class BoundedObserver(DeliveryHealth):
     def unknown_dispositions(self) -> list[UnknownDisposition]:
         """Return list of unknown dispositions recorded during failures."""
         return list(self._unknown_dispositions)
+
+    @property
+    def unpersisted_dispositions(self) -> list[UnknownDisposition]:
+        """Return dispositions whose durable write failed, so none is silently lost."""
+        return list(self._unpersisted_dispositions)
+
+    def bind_authority(
+        self,
+        *,
+        identity_source: Callable[[], Iterable[Any]],
+        on_unknown: Callable[[UnknownDisposition], None],
+        stop_signal: StopSignal | None = None,
+    ) -> None:
+        """Bind the authoritative identity and durable write for this run, once.
+
+        Why: the constructor's ``attempt_id``/``hold_id``/``fence_epoch`` describe a
+        single attempt, but an observer is per run and a run has many. A failure can
+        also arrive before any attempt exists, or after the last one settled. With
+        blank defaults ``UnknownDisposition`` rejects the record and the failure path
+        used to swallow that, so no disposition existed at all; nothing ever wrote
+        the in-memory list to the ledger either.
+
+        How: ``identity_source`` is read at the moment the circuit trips and yields
+        the attempts the ledger shows as started and unsettled (``attempt_id``,
+        ``hold_id`` and ``fence_epoch`` each). ``on_unknown`` is the durable write
+        (the ledger's validated ``mark_unknown``). Once bound it is the only source:
+        an empty answer means nothing is unsettled and nothing is invented, so the
+        run-level terminal is the conservative record. Binding twice raises, because
+        a second source would let identity change mid-run. ``stop_signal`` is adopted
+        only if the observer was not given one, so a recorded disposition truthfully
+        reports that a stop was requested.
+        """
+        if self._identity_source is not None:
+            raise RuntimeError("observer authority is already bound")
+        self._identity_source = identity_source
+        self._on_unknown = on_unknown
+        if stop_signal is not None and self.stop_signal is None:
+            self.stop_signal = stop_signal
+
+    def _unsettled_identities(self) -> list[tuple[str, str, int]]:
+        """Resolve the identities a trip must name, never raising into the failure path.
+
+        Unbound observers keep the constructor identity (the pre-existing contract).
+        Once bound, the source is read here and only here. An unreadable source
+        yields no identities: the circuit is already tripped and the stop already
+        requested, and the original sink failure must reach the caller unmasked.
+        """
+        if self._identity_source is None:
+            return [(self.attempt_id, self.hold_id, self.fence_epoch)]
+        try:
+            holds = tuple(self._identity_source())
+        except Exception:  # noqa: BLE001 - an unreadable authority must not mask the sink failure
+            return []
+        return [(h.attempt_id, h.hold_id, h.fence_epoch) for h in holds]
 
     # Sink registration ----------------------------------------------------------
 
@@ -367,44 +432,103 @@ class BoundedObserver(DeliveryHealth):
             raise
 
     def _trip_circuit(self, cause: Literal["critical_delivery_failure", "stop_timeout"], stop_reason: str) -> None:
-        """Trip circuit breaker, request stop, and record UnknownDisposition."""
+        """Trip circuit breaker, request stop, and record UnknownDisposition.
+
+        Order matters. The circuit trips and the stop is requested first, so an
+        unreadable authority or an invalid identity can never delay or swallow the
+        stop. The stop notifier is a side channel: if it raises, records are still
+        written and the sink's own failure still reaches the caller, and the recorded
+        ``stop_state`` follows what the signal actually holds (a durable stop may have
+        committed before the notifier failed). Each unsettled identity then becomes
+        one validated disposition, appended in memory and handed to the durable
+        write. A refused write (fenced lease, conflicting record) is kept in
+        ``unpersisted_dispositions`` instead of being raised. Recovery re-derives the
+        same attempts from the ledger if a write was lost.
+        """
         self._is_healthy = False
         self._circuit_closed = True
         # Request the stop first: an invalid observer identity must never swallow it
         # or replace the original sink failure with a ValueError.
+        stop_requested = False
         if self.stop_signal:
-            self.stop_signal.request(stop_reason)
-        try:
-            disposition = UnknownDisposition(
-                attempt_id=self.attempt_id,
-                hold_id=self.hold_id,
-                fence_epoch=self.fence_epoch,
-                cause=cause,
-                stop_state="requested" if self.stop_signal else "none",
-                settlement_state="unsettled",
-            )
-        except ValueError:
-            return  # unidentified observer: circuit stays tripped, nothing to settle against
-        self._unknown_dispositions.append(disposition)
+            try:
+                self.stop_signal.request(stop_reason)
+                stop_requested = True
+            except Exception:  # noqa: BLE001 - a failing notifier must not skip records
+                try:
+                    stop_requested = getattr(self.stop_signal, "reason", None) is not None
+                except Exception:  # noqa: BLE001
+                    stop_requested = False
+        for attempt_id, hold_id, fence_epoch in self._unsettled_identities():
+            try:
+                disposition = UnknownDisposition(
+                    attempt_id=attempt_id,
+                    hold_id=hold_id,
+                    fence_epoch=fence_epoch,
+                    cause=cause,
+                    stop_state="requested" if stop_requested else "none",
+                    settlement_state="unsettled",
+                )
+            except ValueError:
+                continue  # unidentified: circuit stays tripped, nothing to settle against
+            self._unknown_dispositions.append(disposition)
+            if self._on_unknown is None:
+                continue
+            try:
+                self._on_unknown(disposition)
+            except Exception:  # noqa: BLE001 - keep the record; never mask the sink failure
+                self._unpersisted_dispositions.append(disposition)
+
+    def _once_release(self, queue: asyncio.Queue[OrderedEvent], event: OrderedEvent) -> Callable[[], None]:
+        """Return a callable that releases an event's charge and queue slot exactly once."""
+        released = False
+
+        def release() -> None:
+            """Give back the inflight and queued bytes and drain the queue slot."""
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._inflight_bytes = max(0, self._inflight_bytes - event.size_bytes)
+            self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
+            queue.task_done()
+
+        return release
 
     async def _run_queue_worker(self, reg: _SinkRegistration) -> None:
-        """Background worker consuming from a non-critical sink queue."""
+        """Background worker consuming from a non-critical sink queue.
+
+        An event is charged to ``inflight_bytes`` and held in its queue slot until its
+        callback has actually finished. For a callback that runs in a thread this is
+        not the same as the worker's await finishing: a thread cannot be interrupted,
+        so cancelling the worker only stops waiting while the callback keeps running
+        and keeps holding the event. Release is therefore handed to the thread's
+        completion rather than to the cancellation, and ``shutdown`` waits for these
+        calls inside its single deadline.
+        """
         assert reg.queue is not None
+        queue = reg.queue
         while not reg.retired:
             try:
-                event = await reg.queue.get()
+                event = await queue.get()
             except asyncio.CancelledError:
                 break
-            # The event's bytes stay counted while its callback runs (it is still held
-            # in memory) and are released in ``finally`` on completion or cancellation.
-            cancelled = False
             self._inflight_bytes += event.size_bytes
+            release = self._once_release(queue, event)
+            cancelled = False
+            thread_call: asyncio.Future[Any] | None = None
             try:
                 if getattr(reg.callback, "runs_off_loop", False):
                     # Sizing and enqueueing a large event is CPU work; a sink that
                     # declares itself thread-safe is called in a worker thread so
-                    # it cannot stall the scheduler's event loop.
-                    res = await asyncio.to_thread(reg.callback, event)
+                    # it cannot stall the scheduler's event loop. The shield keeps a
+                    # cancelled worker from abandoning the call's bookkeeping.
+                    thread_call = asyncio.get_running_loop().run_in_executor(
+                        None, reg.callback, event
+                    )
+                    self._offloaded.add(thread_call)
+                    thread_call.add_done_callback(self._offloaded.discard)
+                    res = await asyncio.shield(thread_call)
                 else:
                     res = reg.callback(event)
                 if inspect.isawaitable(res):
@@ -414,9 +538,11 @@ class BoundedObserver(DeliveryHealth):
             except Exception:  # noqa: BLE001 - non-critical sinks never trip the circuit
                 pass
             finally:
-                self._inflight_bytes = max(0, self._inflight_bytes - event.size_bytes)
-                self._queued_bytes = max(0, self._queued_bytes - event.size_bytes)
-                reg.queue.task_done()
+                if thread_call is not None and not thread_call.done():
+                    # The thread is still running: it owns the event until it returns.
+                    thread_call.add_done_callback(lambda call: (_retrieve(call), release()))
+                else:
+                    release()
             if cancelled:
                 break
 
@@ -464,6 +590,14 @@ class BoundedObserver(DeliveryHealth):
         if self._pending_callbacks:
             _, pending = await asyncio.wait(tuple(self._pending_callbacks), timeout=remaining())
             if pending:
+                self._trip_circuit("stop_timeout", "stop.grace_period_expired")
+
+        # A thread cannot be cancelled: wait for off-loop callbacks inside the same
+        # deadline so a sink is not closed under a call that is still using it, and
+        # report any that outlive it rather than present them as drained.
+        if self._offloaded:
+            _, running = await asyncio.wait(tuple(self._offloaded), timeout=remaining())
+            if running:
                 self._trip_circuit("stop_timeout", "stop.grace_period_expired")
 
         # Close sinks with an explicit close() lifecycle off the event loop.
