@@ -106,16 +106,16 @@ Phylax verifies tier through trusted immutable metadata for the signed `issuer_k
 
 - Done: Phylax #7 merged as `a77b2a2` (its final head was `f590307`).
 - Partly done: Phylax #9 (`5583d6e`, stacked on #7) was closed unmerged when #7 merged. The same patch was then merged to `main` through [Phylax #10](https://github.com/oramasys/phylax/pull/10) as `18a9d2e`, which fixes the regular-file state-root contract (raw `FileExistsError` instead of `CompositionError`). Its first-key adoption was still racy, so that half is not complete on `main`.
-- In review: the follow-up is [Phylax #11](https://github.com/oramasys/phylax/pull/11) (head `b4eb981`, merged with `main` after #10 landed; `5393086` added the Darwin create-race retry). Review of `5583d6e` (rows 4305, 4312, 4317) found the concurrent first-key path still racy: the keyring constructor read `active_key()` and `keys()` outside the write transaction, so a worker that read an empty registry could then see a rival's committed key and refuse it. `a76ad39` decides empty/adopt/reject inside one `BEGIN IMMEDIATE` transaction (`ensure_active_key`), and `fc9172b` retries the WAL journal-mode switch when two first-time openers race (found by the empty-directory concurrency test on Python 3.11 CI). The concurrent-startup repair is **pending until #11 is reviewed and merged**; those earlier countersigns do not cover the #11 head, so they must be re-recorded against its final head SHA.
+- Done: the follow-up [Phylax #11](https://github.com/oramasys/phylax/pull/11) merged to `main` as `e41f1e8` (final head `b4eb981`, merged with `main` after #10 landed; `5393086` added the Darwin create-race retry). Review of `5583d6e` (rows 4305, 4312, 4317) found the concurrent first-key path still racy: the keyring constructor read `active_key()` and `keys()` outside the write transaction, so a worker that read an empty registry could then see a rival's committed key and refuse it. `a76ad39` decides empty/adopt/reject inside one `BEGIN IMMEDIATE` transaction (`ensure_active_key`), and `fc9172b` retries the WAL journal-mode switch when two first-time openers race (found by the empty-directory concurrency test on Python 3.11 CI). The concurrent-startup repair is **pending until #11 is reviewed and merged**; those earlier countersigns do not cover the #11 head, so they must be re-recorded against its final head SHA.
 - Pending: Oramasys #33 stays last in the merge order; it imports APIs from Phylax #7, which are now on `main`.
 
 **Files:** Phylax `src/phylax/grant_composition.py`, `src/phylax/grant_store.py`, `src/phylax/adjustment_grant.py` only if constructor changes are required, and corresponding tests.
 
 - [x] Reproduce the `1793fba` regular-file error-contract regression and simultaneous identical first-key registration failure (reproduced again on `main` at `a77b2a2`).
-- [ ] Make state-dir creation tolerate only the expected creation race, then always execute private type/owner/mode validation. Done on `main` via Phylax #10 (`18a9d2e`).
-- [ ] Make first-key initialization race-free: the empty-registry decision and the insert share one registry transaction, so a losing worker adopts the committed key; a mismatched, rotated, revoked-only or historical registry must still refuse rather than overwrite state. Candidate: Phylax #11 (`b4eb981`), with tests for the read-empty/rival-commit/read-nonempty ordering and concurrent empty-directory bootstrap; not on `main`.
+- [x] Make state-dir creation tolerate only the expected creation race, then always execute private type/owner/mode validation. Done on `main` via Phylax #10 (`18a9d2e`).
+- [x] Make first-key initialization race-free: the empty-registry decision and the insert share one registry transaction, so a losing worker adopts the committed key; a mismatched, rotated, revoked-only or historical registry must still refuse rather than overwrite state. Done on `main` via Phylax #11 (`e41f1e8`), with tests for the read-empty/rival-commit/read-nonempty ordering and concurrent empty-directory bootstrap; now on `main`.
 - [ ] Run composition and concurrent-bootstrap regressions, the full Phylax suite and `git diff --check`; both Codex and AntiGravity must re-countersign the final head of the PR that carries the repair (the new PR replacing #9), recording that exact SHA on GossipBus. Earlier approvals of `17dbe18`, `1793fba`, `43ea187` and `5583d6e` do not satisfy this gate.
-- [ ] Merge through the designated publisher only after the operator's merge decision: the Phylax repair PR before Oramasys #33. (#7 is already merged; the latter imports the APIs it introduced.)
+- [ ] Merge Oramasys #33 through the designated publisher after the operator's merge decision. Its Phylax prerequisites (#7, #10, #11) are all on `main`.
 
 ### Task 1: Public verification and tier-aware authority state
 
@@ -289,6 +289,6 @@ onto `main` as Phylax PR #11, head `a76ad39`
 `BEGIN IMMEDIATE`, and the constructor no longer reads the registry outside it.
 Tests cover that ordering, a barrier at the transaction with two concurrent
 workers, and revoked-only rejection; the Phylax suite passes (213 tests).
-This plan treats the startup-race repair as **pending** until #11 is reviewed,
+Update: #11 has since merged as `e41f1e8`, so the startup-race repair is complete on `main`. Until then this plan treated it as **pending** until #11 was reviewed,
 countersigned at its final head SHA and merged. The exception contract above is
 unchanged: mismatched or non-active registries raise a plain `ValueError`.
