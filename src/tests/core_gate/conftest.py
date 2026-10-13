@@ -17,6 +17,7 @@ from orama.graph.execution_guard import CORE_GATE_AVAILABLE, core_start_seam_ava
 _SEAM_REQUIRED = [
     "test_accounting_start_integration.py",
     "test_start_seam_runtime.py",
+    "test_admitted_observation_unknown_disposition.py",
 ]
 _SEAM_ABSENT_ONLY = ["test_start_seam_absent.py"]
 

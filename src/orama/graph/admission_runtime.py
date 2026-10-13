@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -65,6 +66,30 @@ class _GateCapableGraph(Protocol):
         """Run through Core's existing scheduler with its neutral gate."""
 
 
+async def _drain(
+    graph: object,
+    state: object,
+    gate: object,
+    delivery: object,
+    *,
+    observing: bool,
+) -> object:
+    """Run one graph, draining Core's observations through ``delivery`` when it observes.
+
+    Core already owns the delivery transport: ``run_with_plugins`` drains the
+    canonical observation stream, hands the listener a detached copy, fails closed
+    and closes the iterator deterministically. Reusing it keeps one seam instead
+    of a second, weaker one on ``ainvoke``, and needs no Core release or pin bump.
+    """
+    if not observing:
+        return await graph.ainvoke(state, gate=gate)  # type: ignore[attr-defined]
+    try:
+        from perpetua_core.graph.plugins.observer import run_with_plugins
+    except ImportError as error:  # a Core pin without the plugin runner
+        raise AdmissionRefused("admission.delivery_core_unsupported") from error
+    return await run_with_plugins(graph, state, delivery=delivery, gate=gate)  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True, slots=True)
 class UnconfiguredGraphRunner:
     """Fail closed when trusted deployment admission configuration is absent."""
@@ -93,6 +118,7 @@ class AdmissionGraphRunner:
     requirements: AdmissionRequirements
     clock: Clock
     delivery_factory: Callable[[], DeliveryHealth] = NoDeliverySinks
+    run_delivery_factory: Callable[[str], DeliveryHealth] | None = None
 
     def for_authenticated_principal(self, principal_id: str) -> GraphRunner:
         """Bind one verified control-plane capability to future invocations."""
@@ -136,6 +162,17 @@ class AdmissionGraphRunner:
                 f"admission.{decision.outcome}:{decision.reason_code}"
             )
 
+        delivery = (
+            self.run_delivery_factory(run_id)
+            if self.run_delivery_factory is not None
+            else self.delivery_factory()
+        )
+        # A delivery that observes must never be silently skipped: refuse before any
+        # lease or owner record exists if this graph or Core cannot be drained.
+        observing = callable(getattr(delivery, "on_observation", None))
+        if observing and not callable(getattr(graph, "aobserve", None)):
+            raise AdmissionRefused("admission.graph_observation_unsupported")
+
         self._register_store_and_owner(run_id, principal_id)
         epoch = self.ledger.open_lease(run_id, max_steps=decision.max_steps)
         gate = AdmissionGate(
@@ -147,10 +184,18 @@ class AdmissionGraphRunner:
             lease_epoch=epoch,
             stop=self.run_control.durable_signal(run_id=run_id, principal=principal_id),
             clock=self.clock,
-            delivery=self.delivery_factory(),
+            delivery=delivery,
         )
+        bind = getattr(delivery, "bind_authority", None)
+        if observing and callable(bind):
+            # Identity comes from the ledger at trip time, bound to this run only.
+            bind(
+                identity_source=partial(self.ledger.started_unsettled_attempts, run_id),
+                on_unknown=partial(self.ledger.mark_unknown, run_id),
+                stop_signal=gate.stop,
+            )
         try:
-            result = await graph.ainvoke(state, gate=gate)
+            result = await _drain(graph, state, gate, delivery, observing=observing)
             if getattr(result, "status", None) == "done":
                 # Inside the try so a stop or failure during trailing
                 # settlement still reaches the terminal-receipt handlers.
@@ -182,9 +227,12 @@ class AdmissionGraphRunner:
             outcome = (
                 "interrupted" if type(error).__name__ == "CancelledError" else "unknown"
             )
-            reason = (
-                "run.interrupted" if outcome == "interrupted" else "run.execution_error"
-            )
+            if outcome == "interrupted":
+                reason = "run.interrupted"
+            elif observing and not delivery.healthy():
+                reason = "delivery.critical_failure"
+            else:
+                reason = "run.execution_error"
             try:
                 self.run_control.record_runtime_terminal(
                     run_id=run_id, epoch=epoch, outcome=outcome, reason=reason
