@@ -9,7 +9,11 @@ from httpx import ASGITransport, AsyncClient
 from orama.api.authz import AUTHENTICATED_CONTROL_PLANE_PRINCIPAL
 from orama.api.server import create_app
 from orama.graph.execution_guard import StepLedger
-from orama.graph.grant_verifier import AdjustmentGrantConsumer
+from orama.graph.grant_verifier import (
+    VERIFICATION_REFUSAL_CODES,
+    AdjustmentGrantConsumer,
+    AdjustmentGrantRefused,
+)
 from tests.test_adjustment_grant_consumer import (
     StubVerifier,
     grant,
@@ -100,6 +104,17 @@ async def test_a_deny_all_consumer_is_retryable_unavailable(ledger: StepLedger) 
                           {"grant": "{}"}, AUTH)
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "verifier.unavailable"
+
+
+@pytest.mark.parametrize("code", sorted(VERIFICATION_REFUSAL_CODES))
+async def test_every_verification_refusal_is_a_503_not_a_ledger_conflict(
+    ledger: StepLedger, code: str
+) -> None:
+    """Verification refusals never read as definitive ledger answers (409)."""
+    verifier = StubVerifier(error=AdjustmentGrantRefused(code))  # type: ignore[arg-type]
+    response = await post(wired(ledger, verifier), {"grant": "{}"}, AUTH)
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == code
 
 
 async def test_an_exact_retry_returns_the_same_receipt(ledger: StepLedger) -> None:

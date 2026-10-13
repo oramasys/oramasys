@@ -17,15 +17,18 @@ from orama.graph.admission_runtime import (
     GraphRunner,
     UnconfiguredGraphRunner,
 )
-from orama.graph.grant_verifier import AdjustmentGrantConsumer, AdjustmentGrantRefused
+from orama.graph.grant_verifier import (
+    VERIFICATION_REFUSAL_CODES,
+    AdjustmentGrantConsumer,
+    AdjustmentGrantRefused,
+)
 from orama.graph.perpetua_graph import graph
 
 _log = logging.getLogger(__name__)
 
 
-# Verification-side refusals mean "the authority could not vouch right now" and are
-# retryable; every other code is a definitive answer about this grant and ledger.
-_RETRYABLE_ADJUSTMENT_CODES = frozenset({"verifier.unavailable", "revocation.stale"})
+# Every verification-side refusal is 503 (the authority could not vouch for the grant);
+# 409 is reserved for definitive ledger answers, i.e. the consumption refusals.
 
 
 def create_app(
@@ -90,7 +93,7 @@ def create_app(
                 "adjustment refused",
                 extra={"correlation_id": correlation_id, "reason": refused.code},
             )
-            status = 503 if refused.code in _RETRYABLE_ADJUSTMENT_CODES else 409
+            status = 503 if refused.code in VERIFICATION_REFUSAL_CODES else 409
             raise HTTPException(
                 status_code=status,
                 detail={"code": refused.code, "correlation_id": correlation_id},
