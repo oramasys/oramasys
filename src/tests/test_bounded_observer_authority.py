@@ -108,3 +108,45 @@ def test_authority_cannot_be_rebound_to_a_different_source() -> None:
 
     with pytest.raises(RuntimeError, match="already bound"):
         observer.bind_authority(identity_source=lambda: [], on_unknown=lambda d: None)
+
+
+class _Notifier:
+    """A stop signal whose notifier can fail, optionally after the stop was committed."""
+
+    def __init__(self, *, commit_before_raising: bool) -> None:
+        """Choose whether the durable stop is recorded before the notifier raises."""
+        self.reason: str | None = None
+        self.commit_before_raising = commit_before_raising
+
+    def request(self, reason: str) -> None:
+        """Raise like a failing notifier, having committed the stop or not."""
+        if self.commit_before_raising:
+            self.reason = reason
+        raise OSError("stop notifier unavailable")
+
+
+async def test_a_failing_stop_request_neither_skips_records_nor_masks_the_sink_failure() -> None:
+    """The stop notifier is a side channel: records are still written, failure unmasked."""
+    persisted: list[UnknownDisposition] = []
+    observer = BoundedObserver(run_id="run-1", stop_signal=_Notifier(commit_before_raising=False))
+    observer.register_sink("audit", _failing, critical=True)
+    observer.bind_authority(identity_source=lambda: [_Hold("a1", "h1", 3)], on_unknown=persisted.append)
+
+    with pytest.raises(RuntimeError, match="persistence unavailable"):
+        await observer.on_observation(_observation())
+
+    assert [d.attempt_id for d in persisted] == ["a1"]
+    assert persisted[0].stop_state == "none"  # the stop was not recorded, so do not claim it
+
+
+async def test_a_stop_committed_before_the_notifier_failed_is_reported_truthfully() -> None:
+    """When the durable stop landed, the disposition says so even though the call raised."""
+    persisted: list[UnknownDisposition] = []
+    observer = BoundedObserver(run_id="run-1", stop_signal=_Notifier(commit_before_raising=True))
+    observer.register_sink("audit", _failing, critical=True)
+    observer.bind_authority(identity_source=lambda: [_Hold("a1", "h1", 3)], on_unknown=persisted.append)
+
+    with pytest.raises(RuntimeError, match="persistence unavailable"):
+        await observer.on_observation(_observation())
+
+    assert persisted[0].stop_state == "requested"

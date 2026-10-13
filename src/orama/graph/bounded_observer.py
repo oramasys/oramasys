@@ -429,18 +429,29 @@ class BoundedObserver(DeliveryHealth):
 
         Order matters. The circuit trips and the stop is requested first, so an
         unreadable authority or an invalid identity can never delay or swallow the
-        stop. Each unsettled identity then becomes one validated disposition,
-        appended in memory and handed to the durable write. A refused write (fenced
-        lease, conflicting record) is kept in ``unpersisted_dispositions`` instead of
-        being raised, so the sink's own failure remains the exception the caller sees.
-        Recovery re-derives the same attempts from the ledger if a write was lost.
+        stop. The stop notifier is a side channel: if it raises, records are still
+        written and the sink's own failure still reaches the caller, and the recorded
+        ``stop_state`` follows what the signal actually holds (a durable stop may have
+        committed before the notifier failed). Each unsettled identity then becomes
+        one validated disposition, appended in memory and handed to the durable
+        write. A refused write (fenced lease, conflicting record) is kept in
+        ``unpersisted_dispositions`` instead of being raised. Recovery re-derives the
+        same attempts from the ledger if a write was lost.
         """
         self._is_healthy = False
         self._circuit_closed = True
         # Request the stop first: an invalid observer identity must never swallow it
         # or replace the original sink failure with a ValueError.
+        stop_requested = False
         if self.stop_signal:
-            self.stop_signal.request(stop_reason)
+            try:
+                self.stop_signal.request(stop_reason)
+                stop_requested = True
+            except Exception:  # noqa: BLE001 - a failing notifier must not skip records
+                try:
+                    stop_requested = getattr(self.stop_signal, "reason", None) is not None
+                except Exception:  # noqa: BLE001
+                    stop_requested = False
         for attempt_id, hold_id, fence_epoch in self._unsettled_identities():
             try:
                 disposition = UnknownDisposition(
@@ -448,7 +459,7 @@ class BoundedObserver(DeliveryHealth):
                     hold_id=hold_id,
                     fence_epoch=fence_epoch,
                     cause=cause,
-                    stop_state="requested" if self.stop_signal else "none",
+                    stop_state="requested" if stop_requested else "none",
                     settlement_state="unsettled",
                 )
             except ValueError:
