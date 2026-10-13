@@ -1,6 +1,8 @@
 # Task 6 Operator Provisioning and Autonomous Tier Implementation Plan
 
 > For agentic workers: use `superpowers:subagent-driven-development` for independent implementation and review, or `superpowers:executing-plans` for a single-worker execution. This document is a planning artifact; implementation starts after its written review.
+>
+> **Numbering and ownership.** This is plan 72 in `orama-system`'s `docs/v2/` numbering (drafted here as `57-`). Documentation lives in `orama-system`; this file is to become a link-only pointer to [the orama-system copy](https://github.com/diazMelgarejo/orama-system/blob/docs/v2-71-operator-provisioning-adr-20261013/docs/v2/72-task6-operator-provisioning-and-autonomous-tier-plan.md), with no duplicate content.
 
 **Goal:** Make adjustment-grant recovery operational through explicit operator commands, with public-key-only web serving and autonomous settlement limits that increase only after reviewed issuer isolation.
 
@@ -204,7 +206,7 @@ Publication and merge remain designated-reviewer/operator actions. This plan is 
 ## 7. Cross-references and review record
 
 - [Phylax startup-race repair PR #9](https://github.com/oramasys/phylax/pull/9) (closed unmerged on 2026-10-13); its patch landed through [PR #10](https://github.com/oramasys/phylax/pull/10) (merged as `18a9d2e`), with the remaining race fix on [PR #11](https://github.com/oramasys/phylax/pull/11) (open; see Task 0 status).
-- [Oramasys ADR 56: C4 policy decision](56-operator-provisioning-and-autonomous-tier-adr.md).
+- [ADR 71: C4 policy decision](71-operator-provisioning-and-autonomous-tier-adr.md).
 - [Phylax merged issuer PR #6](https://github.com/oramasys/phylax/pull/6).
 - [Oramasys merged consumer PR #32](https://github.com/oramasys/oramasys/pull/32).
 - [Phylax provisioning PR #7](https://github.com/oramasys/phylax/pull/7) (merged as `a77b2a2`).
@@ -240,7 +242,7 @@ This addendum, as first written, did **not** assert that Phylax PR #7 or #9, or 
 had merged; see the Task 0 status for the current state. GitHub API authentication was unavailable during the initial
 validation. For the current pushed candidate and review state, see Section 8.1.
 
-The durable C4 decision record is Oramasys ADR 56. It records the Level 0
+The durable C4 decision record is ADR 71. It records the Level 0
 six-grants-per-hour policy, Level 1 isolation gate, durable quota and recovery
 rules, and the explicit non-activation boundary. It is published alongside
 this plan in the Task 6 documentation change.

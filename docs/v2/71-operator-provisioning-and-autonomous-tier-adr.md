@@ -1,4 +1,6 @@
-# ADR 56: Operator-Provisioned Recovery Grants and C4 Autonomous Tier
+# ADR 71: Operator-Provisioned Recovery Grants and C4 Autonomous Tier
+
+> **Numbering and ownership.** This is ADR 71 in `orama-system`'s `docs/v2/` numbering (drafted here as `56-`). Documentation lives in `orama-system`; this file is to become a link-only pointer to [the orama-system copy](https://github.com/diazMelgarejo/orama-system/blob/docs/v2-71-operator-provisioning-adr-20261013/docs/v2/71-operator-provisioning-and-autonomous-tier-adr.md), with no duplicate content.
 
 **Date:** 2026-10-13
 **Status:** APPROVED POLICY; NOT DEPLOYED
@@ -111,7 +113,7 @@ imports the former's public interfaces.
 - Phylax adjustment-grant contract, pinned at `a77b2a2`: [v1 conformance vector](https://github.com/oramasys/phylax/blob/a77b2a21a7aebadd0bd646d35e658c64104592e1/docs/vectors/adjustment-grant-v1.json) and [issuer](https://github.com/oramasys/phylax/blob/a77b2a21a7aebadd0bd646d35e658c64104592e1/src/phylax/adjustment_grant.py). The source design document (`PHYLAX-ADJUSTMENT-GRANT-DESIGN-v2.md`) is not yet published in a repository.
 - Oramasys adjustment-grant consumer: [verifier port](https://github.com/oramasys/oramasys/blob/5c75a75f2840a48b31c0ba53bf066e3a075f7cfe/src/orama/graph/grant_verifier.py).
 
-The [Task 6 operator-provisioning and autonomous-tier plan](57-task6-operator-provisioning-and-autonomous-tier-plan.md)
+The [Task 6 operator-provisioning and autonomous-tier plan](72-task6-operator-provisioning-and-autonomous-tier-plan.md)
 is the implementation roadmap for this decision. This ADR controls policy;
 implementation details in the plan must not weaken its quotas, isolation gate,
 or recovery rules.
