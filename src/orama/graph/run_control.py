@@ -304,6 +304,19 @@ class RunControl:
                     self._db.execute("ROLLBACK")
         return stored
 
+    def owner_principal(self, run_id: str) -> str | None:
+        """Return the registered owner of a run, or None when it was never registered.
+
+        Read-only. Takeover uses the same authority rule as stop: only this principal.
+        """
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must be a non-empty string")
+        with self._lock:
+            row = self._db.execute(
+                "SELECT owner_principal FROM run_owners WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return None if row is None else str(row[0])
+
     def terminal_receipt(self, run_id: str) -> TerminalReceipt | None:
         """Read the immutable terminal summary for operator/API observability."""
         if not isinstance(run_id, str) or not run_id.strip():
