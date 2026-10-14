@@ -1,0 +1,153 @@
+name: final producer qualification
+
+# A manually invoked, additive evidence lane. It is deliberately not a required
+# check and cannot run without a separately approved, digest-bound freeze record.
+on:
+  workflow_dispatch:
+    inputs:
+      freeze_record:
+        description: Approved immutable freeze JSON for the exact candidate inputs
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  final-producers:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    runs-on: ubuntu-latest
+    env:
+      ORAMA_REQUIRE_AGATE_EVIDENCE: "1"
+      ORAMA_REQUIRE_CLEAN_INSTALL: "1"
+      ORAMA_REQUIRE_CORE_GATE: "1"
+      ORAMA_REQUIRE_CORE_R3: "1"
+      ORAMA_REQUIRE_CORE_START_SEAM: "1"
+      ORAMA_REQUIRE_OWNER_CANDIDATES: "1"
+      ORAMA_REQUIRE_PHYLAX_INTEROP: "1"
+      ORAMA_DOCS_V2_REGISTRY: ${{ github.workspace }}/registry/docs/v2/references/loop-graph-compatibility-2026-10-09/ownership-registry.json
+      FREEZE_RECORD: ${{ inputs.freeze_record }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: oramasys/oramasys
+          ref: f8898b35d5249e483b2f4a68c097957e675a0ef4
+          path: consumer
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: oramasys/oramasys
+          ref: f8898b35d5249e483b2f4a68c097957e675a0ef4
+          path: consumer-rebuild
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: oramasys/oramasys
+          ref: 65ec365
+          path: registry
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Verify checked-out inputs and immutable freeze
+        run: |
+          test -z "$(git status --porcelain)"
+          test -z "$(git -C consumer status --porcelain)"
+          test -z "$(git -C consumer-rebuild status --porcelain)"
+          test -f "$ORAMA_DOCS_V2_REGISTRY"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          Path(os.environ["RUNNER_TEMP"]).joinpath("freeze.json").write_text(
+              os.environ["FREEZE_RECORD"], encoding="utf-8"
+          )
+          PY
+          python scripts/validate_coverage_packet.py requirements/qualification-coverage-packet.v1.json requirements/compatibility-manifest.v3.json
+          python scripts/final_set_install_plan.py validate requirements/final-producers-install-plan.v1.json requirements/compatibility-manifest.v3.json
+          python scripts/qualification_freeze.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --record "$RUNNER_TEMP/freeze.json"
+          python scripts/check_harness_consumer_drift.py f8898b35d5249e483b2f4a68c097957e675a0ef4 "$GITHUB_SHA"
+      - name: Build consumer wheel twice and record provenance
+        run: |
+          python -m pip install --disable-pip-version-check build
+          export SOURCE_DATE_EPOCH="$(git -C consumer show -s --format=%ct HEAD)"
+          python -m build --wheel --sdist --outdir "$RUNNER_TEMP/dist-one" consumer
+          python scripts/build_provenance.py record --source-repo consumer --source-commit f8898b35d5249e483b2f4a68c097957e675a0ef4 --sdist "$RUNNER_TEMP/dist-one/$(basename "$RUNNER_TEMP/dist-one"/*.tar.gz)" --wheel "$RUNNER_TEMP/dist-one/$(basename "$RUNNER_TEMP/dist-one"/*.whl)" --output "$RUNNER_TEMP/provenance-one.json"
+          export SOURCE_DATE_EPOCH="$(git -C consumer-rebuild show -s --format=%ct HEAD)"
+          python -m build --wheel --sdist --outdir "$RUNNER_TEMP/dist-two" consumer-rebuild
+          python scripts/build_provenance.py record --source-repo consumer-rebuild --source-commit f8898b35d5249e483b2f4a68c097957e675a0ef4 --sdist "$RUNNER_TEMP/dist-two/$(basename "$RUNNER_TEMP/dist-two"/*.tar.gz)" --wheel "$RUNNER_TEMP/dist-two/$(basename "$RUNNER_TEMP/dist-two"/*.whl)" --output "$RUNNER_TEMP/provenance-two.json"
+          python scripts/build_provenance.py compare "$RUNNER_TEMP/provenance-one.json" "$RUNNER_TEMP/provenance-two.json" > "$RUNNER_TEMP/rebuild-comparison.json" || true
+      - name: Install the exact candidate set and prove identities
+        run: |
+          python -m venv "$RUNNER_TEMP/qualification-venv"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip install --disable-pip-version-check "consumer[dev]"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip install --disable-pip-version-check --force-reinstall --no-deps "$RUNNER_TEMP/dist-one/"*.whl
+          python scripts/final_set_install_plan.py emit requirements/final-producers-install-plan.v1.json requirements/compatibility-manifest.v3.json > "$RUNNER_TEMP/producers.json"
+          export QUALIFICATION_PYTHON="$RUNNER_TEMP/qualification-venv/bin/python"
+          export QUALIFICATION_REPORT_DIR="$RUNNER_TEMP/install-reports"
+          mkdir "$QUALIFICATION_REPORT_DIR"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          requirements = json.loads(Path(os.environ["RUNNER_TEMP"]).joinpath("producers.json").read_text())
+          for index, requirement in enumerate(requirements, start=1):
+              subprocess.run([
+                  "python", "scripts/install_with_retry.py", "--python", os.environ["QUALIFICATION_PYTHON"],
+                  "--report", str(Path(os.environ["QUALIFICATION_REPORT_DIR"]) / f"producer-{index}.json"),
+                  "--", "--disable-pip-version-check", "--force-reinstall", "--no-deps", requirement,
+              ], check=True)
+          PY
+          consumer_wheel="$(find "$RUNNER_TEMP/dist-one" -maxdepth 1 -name '*.whl' -type f -print -quit)"
+          test -n "$consumer_wheel"
+          mkdir "$RUNNER_TEMP/outside"
+          cd "$RUNNER_TEMP/outside"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/verify_installed_identity.py" "$GITHUB_WORKSPACE/requirements/final-producers-install-plan.v1.json" --consumer-wheel "$consumer_wheel" --consumer-provenance "$RUNNER_TEMP/provenance-one.json" > "$RUNNER_TEMP/identity.json"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip check
+      - name: Run installed suite and deterministic scenarios
+        run: |
+          mkdir "$RUNNER_TEMP/harness-bundle" "$RUNNER_TEMP/outside-suite" "$RUNNER_TEMP/scenario-traces"
+          git archive "$GITHUB_SHA" | tar -x -C "$RUNNER_TEMP/harness-bundle"
+          rm -rf "$RUNNER_TEMP/harness-bundle/src/orama"
+          consumer_wheel="$(find "$RUNNER_TEMP/dist-one" -maxdepth 1 -name '*.whl' -type f -print -quit)"
+          test -n "$consumer_wheel"
+          cd "$RUNNER_TEMP/outside-suite"
+          ORAMA_QUALIFICATION_SOURCE_ROOT="$GITHUB_WORKSPACE/consumer" ORAMA_QUALIFICATION_INSTALL_PLAN="$GITHUB_WORKSPACE/requirements/final-producers-install-plan.v1.json" ORAMA_QUALIFICATION_CONSUMER_WHEEL="$consumer_wheel" ORAMA_QUALIFICATION_CONSUMER_PROVENANCE="$RUNNER_TEMP/provenance-one.json" "$RUNNER_TEMP/qualification-venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/run_installed_qualification_suite.py" --bundle "$RUNNER_TEMP/harness-bundle" --junit "$RUNNER_TEMP/final-results.xml" --collection "$RUNNER_TEMP/collection.json"
+          python "$GITHUB_WORKSPACE/scripts/collection_gate.py" "$RUNNER_TEMP/final-results.xml" "$GITHUB_WORKSPACE/requirements/qualification-coverage-packet.v1.json" "$RUNNER_TEMP/collection.json" > "$RUNNER_TEMP/collection-gate.json"
+          "$RUNNER_TEMP/qualification-venv/bin/python" "$GITHUB_WORKSPACE/scripts/run_qualification_scenarios.py" --manifest-digest "$("$RUNNER_TEMP/qualification-venv/bin/python" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from orama.compat.manifest import canonical_digest
+          print(canonical_digest(json.loads(Path(os.environ['GITHUB_WORKSPACE'], 'requirements/compatibility-manifest.v3.json').read_text())))
+          PY
+          )" --coverage-digest "$("$RUNNER_TEMP/qualification-venv/bin/python" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from orama.compat.manifest import canonical_digest
+          print(canonical_digest(json.loads(Path(os.environ['GITHUB_WORKSPACE'], 'requirements/qualification-coverage-packet.v1.json').read_text())))
+          PY
+          )" --trace-dir "$RUNNER_TEMP/scenario-traces" --output "$RUNNER_TEMP/scenarios.json"
+      - name: Retain sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: final-producer-qualification-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/identity.json
+            ${{ runner.temp }}/collection-gate.json
+            ${{ runner.temp }}/scenarios.json
+            ${{ runner.temp }}/rebuild-comparison.json
+            ${{ runner.temp }}/install-reports
+          if-no-files-found: warn

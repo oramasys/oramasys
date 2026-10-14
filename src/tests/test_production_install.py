@@ -175,6 +175,17 @@ def test_a_clean_install_verifies_from_outside_the_checkout(tmp_path: Path) -> N
     """Required in CI (clean install job); skipped where an editable overlay is expected."""
     if not os.environ.get("ORAMA_REQUIRE_CLEAN_INSTALL"):
         pytest.skip("ORAMA_REQUIRE_CLEAN_INSTALL not set")
-    result = subprocess.run([sys.executable, "-I", str(SCRIPT), SHA], cwd=tmp_path,
+    qualification_plan = os.environ.get("ORAMA_QUALIFICATION_INSTALL_PLAN")
+    if qualification_plan:
+        wheel = os.environ.get("ORAMA_QUALIFICATION_CONSUMER_WHEEL")
+        provenance = os.environ.get("ORAMA_QUALIFICATION_CONSUMER_PROVENANCE")
+        assert wheel and provenance, "qualification clean install needs wheel and provenance"
+        command = [
+            sys.executable, "-I", str(ROOT / "scripts" / "verify_installed_identity.py"),
+            qualification_plan, "--consumer-wheel", wheel, "--consumer-provenance", provenance,
+        ]
+    else:
+        command = [sys.executable, "-I", str(SCRIPT), SHA]
+    result = subprocess.run(command, cwd=tmp_path,
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
