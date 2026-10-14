@@ -284,3 +284,19 @@ def test_the_pin_report_refuses_and_never_reports_observed_values_on_a_mismatch(
     )
     assert code == 1 and line == "commit.mismatch"
     assert "2" * 40 not in line
+
+
+def test_the_new_jobs_have_specific_names_so_a_required_check_context_is_unambiguous() -> None:
+    """A required context is the job name plus matrix; generic names would collide later."""
+    import re
+
+    expected = {
+        "grant-composition-interop.yml": "grant-composition-interop",
+        "manifest-schema3.yml": "manifest-schema3",
+    }
+    for workflow, job in expected.items():
+        text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+        jobs = re.search(r"^jobs:\n((?:  [A-Za-z0-9_-]+:\n)(?:.*\n)*)", text, re.M)
+        assert jobs is not None
+        names = re.findall(r"^  ([A-Za-z0-9_-]+):\n", jobs.group(1), re.M)
+        assert names[0] == job, f"{workflow}: first job is {names[0]!r}, expected {job!r}"

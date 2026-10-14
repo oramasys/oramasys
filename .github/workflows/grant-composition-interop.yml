@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  interop:
+  grant-composition-interop:
     strategy:
       fail-fast: false
       matrix:
