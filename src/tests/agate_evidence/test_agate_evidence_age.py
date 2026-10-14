@@ -1,0 +1,187 @@
+"""A fit decision may neither rest on a stale measurement nor outlive the measurement it rests on.
+
+Agate binds an observation to an aware ``observed_at`` timestamp but never compares it with a clock, and
+the adapter's ``fit_validity`` used to count from *assessment* time. A week-old measurement presented as
+"observed" therefore produced a decision that stayed valid for another full window. These tests pin the
+consumer-side rule: evidence that is not fresh is not assessed, and a decision's expiry is capped by the
+age of its measurement.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+# Measured fit (agate.fit / agate.evidence) is candidate-only: conftest.py collects this package
+# only where Agate provides it, so these imports are unconditional.
+from agate import HardwareObservation, load_policy, load_profile_store
+from agate.evidence import FitEvidence
+from agate.fit import assess_fit
+
+from orama.graph.adapters import AgateAdapter
+
+NOW = datetime(2026, 10, 14, 3, 0, tzinfo=UTC)
+FIVE = timedelta(minutes=5)
+
+
+def _model_and_profile() -> tuple[str, str]:
+    """Pick a real (model, profile id) pair whose verdict allows placement."""
+    policy = load_policy()
+    for profile_id, profile in load_profile_store().profiles.items():
+        for name, spec in policy.models.items():
+            if spec.verdict_for_tier(profile.verdict_tier) in {"PREFER", "ALLOW"}:
+                return name, profile_id
+    pytest.skip("no real profile/model pair with an allowing verdict")
+
+
+def _observation(profile_id: str) -> HardwareObservation:
+    """Build the observation that identifies exactly this profile."""
+    profile = load_profile_store().profiles[profile_id]
+    match = profile.match
+    return HardwareObservation(
+        os=match.get("os", profile.os),
+        cpu=match.get("cpu_contains", profile.cpu),
+        ram_gb=match.get("ram_gb", profile.ram_gb),
+        accelerator=match.get("accelerator_contains", profile.accelerator),
+        accelerator_memory_gb=match.get("accelerator_memory_gb", profile.accelerator_memory_gb),
+    )
+
+
+def _assess(
+    *,
+    measured_at: datetime | None,
+    unidentified: bool = False,
+    **adapter_kwargs: object,
+):
+    """Run the real adapter over real Agate with evidence taken at ``measured_at`` (None = derived)."""
+    model, profile_id = _model_and_profile()
+    observation = HardwareObservation(None, None, None, None, None) if unidentified else _observation(profile_id)
+
+    def evidence_provider(_context: object, obs: HardwareObservation) -> FitEvidence:
+        """Attested evidence stamped with the scenario's collection time, or derived evidence."""
+        if measured_at is None:
+            return FitEvidence.derived(obs)
+        stamp: datetime = measured_at
+        return FitEvidence.observed(obs, collector="local-hardware-collector", clock=lambda: stamp)
+
+    adapter = AgateAdapter(
+        policy=load_policy(),
+        assess_fit=assess_fit,
+        observation_provider=lambda _context: observation,
+        evidence_provider=evidence_provider,
+        clock=lambda: NOW,
+        **adapter_kwargs,
+    )
+    return adapter.assess(SimpleNamespace(run_id="run-1", model=model))
+
+
+def test_a_measurement_older_than_the_window_is_refused_as_stale() -> None:
+    """The reported gap: an hour-old 'observed' measurement used to be admitted as fresh."""
+    decision = _assess(measured_at=NOW - timedelta(hours=1))
+
+    assert decision.allowed is False
+    assert decision.reason_code == "evidence_stale"
+    assert decision.expires_at is None
+    assert decision.overridable is False
+    assert decision.evidence_class == "observed"
+
+
+def test_a_fresh_measurement_is_allowed_and_its_expiry_is_capped_by_its_age() -> None:
+    """Measured 2 minutes ago: the decision may live only for the 3 minutes of freshness left."""
+    decision = _assess(measured_at=NOW - timedelta(minutes=2))
+
+    assert decision.allowed is True
+    assert decision.expires_at == NOW + timedelta(minutes=3)
+
+
+def test_a_decision_never_outlives_its_measurement_even_with_a_long_validity() -> None:
+    """A generous validity window must not stretch the life of an old measurement."""
+    decision = _assess(
+        measured_at=NOW - timedelta(minutes=1),
+        fit_validity=timedelta(hours=1),
+        max_observation_age=timedelta(minutes=10),
+    )
+
+    assert decision.allowed is True
+    assert decision.expires_at == NOW + timedelta(minutes=9)
+
+
+def test_the_age_limit_is_exclusive_so_no_decision_is_dead_on_arrival() -> None:
+    """Exactly at the limit is stale (its expiry would equal now); one second under is fresh."""
+    at_limit = _assess(measured_at=NOW - FIVE)
+    just_under = _assess(measured_at=NOW - FIVE + timedelta(seconds=1))
+
+    assert at_limit.allowed is False and at_limit.reason_code == "evidence_stale"
+    assert just_under.allowed is True and just_under.expires_at == NOW + timedelta(seconds=1)
+
+
+def test_a_fit_that_crosses_the_freshness_deadline_is_refused() -> None:
+    """A slow assessment must not return an allowed decision that has already expired."""
+    model, profile_id = _model_and_profile()
+    observation = _observation(profile_id)
+    measured_at = NOW - FIVE + timedelta(milliseconds=1)
+    current_time = NOW
+
+    def clock() -> datetime:
+        return current_time
+
+    def assess_after_deadline(*args: object) -> object:
+        nonlocal current_time
+        current_time += timedelta(milliseconds=2)
+        return assess_fit(*args)
+
+    adapter = AgateAdapter(
+        policy=load_policy(),
+        assess_fit=assess_after_deadline,
+        observation_provider=lambda _context: observation,
+        evidence_provider=lambda _context, obs: FitEvidence.observed(
+            obs, collector="local-hardware-collector", clock=lambda: measured_at
+        ),
+        clock=clock,
+    )
+
+    decision = adapter.assess(SimpleNamespace(run_id="run-1", model=model))
+
+    assert decision.allowed is False
+    assert decision.reason_code == "evidence_stale"
+    assert decision.expires_at is None
+
+
+@pytest.mark.parametrize("field", ["max_observation_age", "fit_validity"])
+def test_a_non_positive_window_is_refused_at_construction(field: str) -> None:
+    """A zero or negative window would produce already-expired allows."""
+    with pytest.raises(ValueError):
+        _assess(measured_at=NOW, **{field: timedelta(0)})
+
+
+def test_a_future_dated_measurement_is_refused() -> None:
+    """A collector clock ahead of ours is not evidence of freshness."""
+    decision = _assess(measured_at=NOW + timedelta(hours=1))
+
+    assert decision.allowed is False
+    assert decision.reason_code == "evidence_future_dated"
+
+
+def test_small_clock_skew_is_tolerated() -> None:
+    """Thirty seconds of collector skew must not refuse an otherwise fresh measurement."""
+    decision = _assess(measured_at=NOW + timedelta(seconds=30))
+
+    assert decision.allowed is True
+
+
+def test_stale_evidence_is_not_assessed_so_age_takes_precedence_over_a_profile_miss() -> None:
+    """Evidence that is not fresh is not evaluated at all, whatever it would have matched."""
+    decision = _assess(measured_at=NOW - timedelta(hours=1), unidentified=True)
+
+    assert decision.reason_code == "evidence_stale"
+
+
+def test_derived_evidence_is_unchanged_by_the_age_rule() -> None:
+    """Derived evidence carries no timestamp; admission, not this adapter, refuses it."""
+    decision = _assess(measured_at=None)
+
+    assert decision.allowed is True
+    assert decision.evidence_class == "derived"
+    assert decision.expires_at == NOW + FIVE
