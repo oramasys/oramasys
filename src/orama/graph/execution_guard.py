@@ -366,7 +366,8 @@ class StepLedger:
 
         ``expected_epoch`` makes the take-over a compare-and-set: it succeeds only if the
         current epoch is exactly that value, otherwise ``LeaseFenced`` is raised and nothing
-        changes. Competing recoverers use it so that one cannot fence another mid-recovery.
+        changes. It prevents a stale snapshot from overwriting a newer epoch; it does not lock the
+        full recovery sequence, so a later takeover can fence an earlier holder before it finishes.
         """
         if (
             isinstance(max_steps, bool)

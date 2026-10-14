@@ -62,8 +62,9 @@ def recover_lost_run(
     ``ledger`` and ``run_control`` must resolve to the same SQLite store; this is checked before any
     state is read or changed. Safe to call repeatedly and from competing processes: exactly one terminal
     receipt is ever written, and every caller that returns normally returns that receipt. The takeover
-    is a compare-and-set on the lease epoch, so concurrent recoverers cannot fence one another: a loser
-    that finds no receipt yet gets ``LeaseFenced``, which is the documented retryable outcome.
+    is a compare-and-set on the lease epoch, so a stale snapshot cannot overwrite a newer epoch. It does
+    not serialize the full recovery: a later takeover can fence an earlier recoverer before its terminal
+    write. A loser with no visible receipt gets ``LeaseFenced``, the documented retryable outcome.
 
     A retry after a recoverer died between steps advances the epoch once more. That is safe: each
     advance only fences a dead or obsolete recoverer, accounting recovery is idempotent per epoch and
@@ -88,14 +89,26 @@ def recover_lost_run(
     try:
         epoch = ledger.open_lease(run_id, max_steps=max_steps, expected_epoch=current_epoch)
         ledger.recover_accounting(run_id, epoch)
-        return run_control.record_runtime_terminal(
-            run_id=run_id, epoch=epoch, outcome="unknown", reason=LOST_RUN_REASON
-        )
     except (LeaseFenced, ValueError):
-        # Another recoverer, or the original holder finishing, may have written the terminal first.
-        # Whatever raised, an existing terminal IS the run's canonical receipt, so return it; with no
-        # terminal the error is real and propagates (a LeaseFenced loser may simply retry).
+        # A competing recovery or the original holder may have written the receipt first.
         winner = run_control.terminal_receipt(run_id)
         if winner is not None:
             return winner
+        raise
+
+    try:
+        return run_control.record_runtime_terminal(
+            run_id=run_id, epoch=epoch, outcome="unknown", reason=LOST_RUN_REASON
+        )
+    except (LeaseFenced, ValueError) as error:
+        # The winner is canonical if it committed between our first read and this failure.
+        winner = run_control.terminal_receipt(run_id)
+        if winner is not None:
+            return winner
+        if isinstance(error, ValueError):
+            current_lease = ledger.lease_snapshot(run_id)
+            if current_lease is not None and current_lease[0] != epoch:
+                raise LeaseFenced(
+                    f"lease advanced from epoch {epoch} to {current_lease[0]} during recovery"
+                ) from error
         raise

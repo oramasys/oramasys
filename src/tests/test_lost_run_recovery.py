@@ -22,7 +22,7 @@ import pytest
 
 from orama.graph.execution_guard import LeaseFenced, StepLedger
 from orama.graph.lost_run_recovery import LOST_RUN_REASON, LostRunRefused, recover_lost_run
-from orama.graph.run_control import RunControl
+from orama.graph.run_control import RunControl, TerminalOutcome, TerminalReceipt
 
 ROOT = Path(__file__).resolve().parents[2]
 OWNER = "control-plane"
@@ -125,8 +125,26 @@ def _run_child(tmp_path: Path, window: str) -> tuple[str, str | None, int | None
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
-    assert run_id is not None, f"child never reported a run id: {process.stderr.read() if process.stderr else ''}"
+    stderr = process.stderr.read() if process.stderr is not None else ""
+    assert run_id is not None, f"child never reported a run id: {stderr}"
+    expected = {"in-node": "IN-NODE", "in-sink": "IN-SINK", "none": "COMPLETED"}[window]
+    assert marker == expected, f"child exited before {expected} (rc={process.returncode}): {stderr}"
     return run_id, marker, process.returncode
+
+
+def test_child_failure_after_run_id_but_before_marker_fails_the_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run id alone does not prove the child reached the requested execution window."""
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "CHILD",
+        "import sys; print('RUN_ID partial-run', flush=True); "
+        "print('failed before marker', file=sys.stderr, flush=True); sys.exit(7)",
+    )
+
+    with pytest.raises(AssertionError, match=r"child exited before IN-NODE \(rc=7\): failed before marker"):
+        _run_child(tmp_path, "in-node")
 
 
 def _open(tmp_path: Path) -> tuple[StepLedger, RunControl]:
@@ -389,6 +407,41 @@ def test_a_competitor_that_bumps_the_epoch_after_the_snapshot_is_not_fenced_by_u
 
     assert _lease_rows(tmp_path) == [(run_id, 2)]  # only the competitor's bump; ours did not fence it
     assert control.terminal_receipt(run_id) is None
+
+
+def test_epoch_steal_after_accounting_is_reported_as_retryable_fencing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A competing takeover between accounting and terminal write must be retryable."""
+    run_id, _, _ = _run_child(tmp_path, "in-node")
+    store = tmp_path / "shared.sqlite3"
+    ledger, control = _open(tmp_path)
+    competitor = StepLedger(store)
+    record_terminal = control.record_runtime_terminal
+
+    def steal_epoch_then_record(
+        *, run_id: str, epoch: int, outcome: TerminalOutcome, reason: str
+    ) -> TerminalReceipt:
+        """Advance the lease after our accounting but before our terminal transaction."""
+        snapshot = ledger.lease_snapshot(run_id)
+        assert snapshot is not None
+        competitor.open_lease(
+            run_id, max_steps=snapshot[1], expected_epoch=epoch
+        )
+        return record_terminal(run_id=run_id, epoch=epoch, outcome=outcome, reason=reason)
+
+    monkeypatch.setattr(control, "record_runtime_terminal", steal_epoch_then_record)
+
+    with pytest.raises(LeaseFenced):
+        recover_lost_run(ledger=ledger, run_control=control, run_id=run_id, principal=OWNER)
+
+    assert _lease_rows(tmp_path) == [(run_id, 3)]
+    assert control.terminal_receipt(run_id) is None
+
+    monkeypatch.setattr(control, "record_runtime_terminal", record_terminal)
+    retry = recover_lost_run(ledger=ledger, run_control=control, run_id=run_id, principal=OWNER)
+    assert retry.epoch == 4 and retry.outcome == "unknown"
+    assert _node_calls(tmp_path) == ["a"]
 
 
 def test_a_competitor_that_finishes_first_makes_us_return_its_receipt(tmp_path: Path) -> None:
