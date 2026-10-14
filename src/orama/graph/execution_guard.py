@@ -493,6 +493,17 @@ class StepLedger:
             cost_basis=self.LEGACY_COST_BASIS if limits is None else str(limits[0]),
         )
 
+    def lease_snapshot(self, run_id: str) -> tuple[int, int] | None:
+        """Return ``(current epoch, configured max_steps)`` or None when the run has no lease.
+
+        Read-only. It exists so takeover can decide whether a run was ever started WITHOUT calling
+        ``open_lease``, which would create a lease for any id it is given.
+        """
+        row = self._db.execute(
+            "SELECT epoch, max_steps FROM leases WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return None if row is None else (int(row[0]), int(row[1]))
+
     def events(self, run_id: str) -> tuple[AccountingEvent, ...]:
         """Return immutable schema-v2 accounting events in durable insertion order."""
         rows = self._db.execute(
