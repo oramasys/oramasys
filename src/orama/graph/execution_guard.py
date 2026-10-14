@@ -356,11 +356,17 @@ class StepLedger:
         """Open an immediate write transaction guarded by the single-writer lock."""
         return _Immediate(self._db, self._lock)
 
-    def open_lease(self, run_id: str, *, max_steps: int) -> int:
+    def open_lease(
+        self, run_id: str, *, max_steps: int, expected_epoch: int | None = None
+    ) -> int:
         """Take (or take over) the lease; returns the new epoch, fencing older holders.
 
         Steps already used stay charged across a take-over: a new holder never gets a
         fresh allowance for the same run.
+
+        ``expected_epoch`` makes the take-over a compare-and-set: it succeeds only if the
+        current epoch is exactly that value, otherwise ``LeaseFenced`` is raised and nothing
+        changes. Competing recoverers use it so that one cannot fence another mid-recovery.
         """
         if (
             isinstance(max_steps, bool)
@@ -372,6 +378,8 @@ class StepLedger:
         with self._tx() as db:
             self._assert_run_not_terminal(db, run_id)
             row = db.execute("SELECT epoch, used FROM leases WHERE run_id = ?", (run_id,)).fetchone()
+            if expected_epoch is not None and (row is None or int(row[0]) != expected_epoch):
+                raise LeaseFenced(run_id)
             if row is None:
                 db.execute(
                     "INSERT INTO leases (run_id, epoch, max_steps, used) VALUES (?, 1, ?, 0)",

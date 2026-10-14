@@ -275,16 +275,139 @@ def test_two_concurrent_recoverers_converge_on_one_terminal(tmp_path: Path) -> N
     for thread in threads:
         thread.join(timeout=30)
 
-    _, control = _open(tmp_path)
+    ledger, control = _open(tmp_path)
     final = control.terminal_receipt(run_id)
     assert final is not None and final.outcome == "unknown"
     receipts = [r for r in results if not isinstance(r, Exception)]
     assert receipts and all(r == final for r in receipts)
+    # A loser may only fail with the documented retryable fencing outcome, never an arbitrary error.
+    assert all(isinstance(r, LeaseFenced) for r in results if isinstance(r, Exception))
+    # And a retry converges on the canonical receipt without advancing the epoch again.
+    epoch_before = _lease_rows(tmp_path)
+    assert recover_lost_run(ledger=ledger, run_control=control, run_id=run_id, principal=OWNER) == final
+    assert _lease_rows(tmp_path) == epoch_before
     with sqlite3.connect(tmp_path / "shared.sqlite3") as db:
         assert db.execute("SELECT COUNT(*) FROM terminal_receipts WHERE run_id = ?", (run_id,)).fetchone()[0] == 1
+
+
+def test_mismatched_stores_are_rejected_before_any_state_changes(tmp_path: Path) -> None:
+    """A ledger and a run control on different databases must never be half-mutated."""
+    run_id, _, _ = _run_child(tmp_path, "in-node")
+    ledger, _ = _open(tmp_path)
+    other = tmp_path / "other.sqlite3"
+    foreign_control = RunControl(store_path=other)
+
+    with pytest.raises(LostRunRefused) as refusal:
+        recover_lost_run(ledger=ledger, run_control=foreign_control, run_id=run_id, principal=OWNER)
+
+    assert refusal.value.code == "run.store_mismatch"
+    assert _lease_rows(tmp_path) == [(run_id, 1)]  # the real store was not fenced
+    assert foreign_control.terminal_receipt(run_id) is None
+    assert foreign_control.owner_principal(run_id) is None
+
+
+def test_takeover_is_compare_and_set_on_the_epoch(tmp_path: Path) -> None:
+    """open_lease with a stale expected epoch must refuse and must not advance the epoch."""
+    ledger = StepLedger(tmp_path / "shared.sqlite3")
+    epoch = ledger.open_lease("cas-run", max_steps=4)
+
+    with pytest.raises(LeaseFenced):
+        ledger.open_lease("cas-run", max_steps=4, expected_epoch=epoch + 5)
+    assert ledger.lease_snapshot("cas-run") == (epoch, 4)
+
+    assert ledger.open_lease("cas-run", max_steps=4, expected_epoch=epoch) == epoch + 1
+
+
+def test_a_recovery_that_died_after_fencing_is_completed_by_a_retry(tmp_path: Path) -> None:
+    """Crash after the lease was taken over but before accounting ran: a retry finishes the job."""
+    run_id, _, _ = _run_child(tmp_path, "in-node")
+    ledger, control = _open(tmp_path)
+    epoch, max_steps = ledger.lease_snapshot(run_id)
+    ledger.open_lease(run_id, max_steps=max_steps, expected_epoch=epoch)  # the dead recoverer's only step
+
+    receipt = recover_lost_run(ledger=ledger, run_control=control, run_id=run_id, principal=OWNER)
+
+    assert receipt.outcome == "unknown" and receipt.reason == LOST_RUN_REASON
+    assert receipt.unresolved_attempts == ("node::a::0",)
+    assert receipt.epoch == epoch + 2  # one more fence, over a dead recoverer: safe and bounded
+    assert ledger.hold_state(run_id, "node::a::0") == "unknown"
+    assert _node_calls(tmp_path) == ["a"]
+
+
+def test_a_recovery_that_died_after_accounting_is_completed_by_a_retry(tmp_path: Path) -> None:
+    """Crash after accounting recovery but before the terminal: classification is not repeated or lost."""
+    run_id, _, _ = _run_child(tmp_path, "in-node")
+    ledger, control = _open(tmp_path)
+    epoch, max_steps = ledger.lease_snapshot(run_id)
+    taken = ledger.open_lease(run_id, max_steps=max_steps, expected_epoch=epoch)
+    first = ledger.recover_accounting(run_id, taken)
+    assert first.unknown == ("node::a::0",)
+
+    receipt = recover_lost_run(ledger=ledger, run_control=control, run_id=run_id, principal=OWNER)
+
+    assert receipt.unresolved_attempts == ("node::a::0",)
+    assert ledger.hold_state(run_id, "node::a::0") == "unknown"
+    assert receipt.outcome == "unknown" and receipt.reason == LOST_RUN_REASON
+    assert _node_calls(tmp_path) == ["a"]
 
 
 def test_the_child_script_uses_the_real_runner() -> None:
     """Guard against this suite quietly degrading to the ledger-only harness."""
     assert "AdmissionGraphRunner" in CHILD and "run_with_plugins" not in CHILD
     assert "perpetua_core" in CHILD
+
+
+class _RacingLedger(StepLedger):
+    """A ledger whose lease snapshot is followed by a competing action, to land a race exactly there."""
+
+    def __init__(self, path: Path, after_snapshot) -> None:  # noqa: ANN001 - test double
+        """Remember the one-shot action to run right after the first snapshot read."""
+        super().__init__(path)
+        self._after_snapshot = after_snapshot
+
+    def lease_snapshot(self, run_id: str):  # noqa: ANN201 - mirrors the base signature
+        """Read the snapshot, then let a competitor act before the caller can use it."""
+        snapshot = super().lease_snapshot(run_id)
+        hook, self._after_snapshot = self._after_snapshot, None
+        if hook is not None:
+            hook()
+        return snapshot
+
+
+def test_a_competitor_that_bumps_the_epoch_after_the_snapshot_is_not_fenced_by_us(tmp_path: Path) -> None:
+    """Our takeover is compare-and-set: a stale snapshot must lose, not fence the competitor."""
+    run_id, _, _ = _run_child(tmp_path, "in-node")
+    store = tmp_path / "shared.sqlite3"
+    control = RunControl(store_path=store)
+    competitor = StepLedger(store)
+    racing = _RacingLedger(
+        store, lambda: competitor.open_lease(run_id, max_steps=competitor.lease_snapshot(run_id)[1])
+    )
+
+    with pytest.raises(LeaseFenced):
+        recover_lost_run(ledger=racing, run_control=control, run_id=run_id, principal=OWNER)
+
+    assert _lease_rows(tmp_path) == [(run_id, 2)]  # only the competitor's bump; ours did not fence it
+    assert control.terminal_receipt(run_id) is None
+
+
+def test_a_competitor_that_finishes_first_makes_us_return_its_receipt(tmp_path: Path) -> None:
+    """Losing the race to a recoverer that wrote the terminal returns that canonical receipt."""
+    run_id, _, _ = _run_child(tmp_path, "in-node")
+    store = tmp_path / "shared.sqlite3"
+    control = RunControl(store_path=store)
+    competitor_ledger, competitor_control = StepLedger(store), RunControl(store_path=store)
+    winners: list = []
+    racing = _RacingLedger(
+        store,
+        lambda: winners.append(
+            recover_lost_run(
+                ledger=competitor_ledger, run_control=competitor_control, run_id=run_id, principal=OWNER
+            )
+        ),
+    )
+
+    receipt = recover_lost_run(ledger=racing, run_control=control, run_id=run_id, principal=OWNER)
+
+    assert receipt == winners[0]
+    assert _lease_rows(tmp_path) == [(run_id, 2)]  # exactly one takeover happened in total
