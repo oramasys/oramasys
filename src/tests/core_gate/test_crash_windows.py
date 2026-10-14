@@ -97,21 +97,35 @@ def _read_until_marker(proc: subprocess.Popen[str]) -> tuple[str | None, str | N
 
 
 def _run_child(tmp_path: Path, window: str, *, kill: bool) -> tuple[str, str | None]:
-    """Run the child to a window, optionally SIGKILL it, and return run id and marker."""
-    proc = subprocess.Popen(
-        [sys.executable, "-I", "-u", "-c", CHILD, SRC_DIR, str(tmp_path), window],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        cwd=SRC_DIR,
-        env={**os.environ, "PYTHONPATH": SRC_DIR},
-    )
-    run_id, marker = _read_until_marker(proc)
-    if proc.poll() is None:
-        if kill:
-            os.kill(proc.pid, signal.SIGKILL)
-        proc.wait(timeout=DEADLINE_SECONDS)
-    assert run_id is not None, "child never reported a run id"
+    """Run the child to a window, optionally SIGKILL it, and return run id and marker.
+
+    Child stderr goes to a file so an import or runner failure is shown by the
+    assertion, and the child is always killed and reaped even when a wait times out.
+    """
+    stderr_path = tmp_path / "child-stderr.txt"
+    with stderr_path.open("w", encoding="utf-8") as stderr_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-u", "-c", CHILD, SRC_DIR, str(tmp_path), window],
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            text=True,
+            cwd=SRC_DIR,
+            env={**os.environ, "PYTHONPATH": SRC_DIR},
+        )
+        try:
+            run_id, marker = _read_until_marker(proc)
+            if proc.poll() is None and kill:
+                os.kill(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=DEADLINE_SECONDS)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+    child_stderr = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+    assert run_id is not None, f"child never reported a run id; stderr:\n{child_stderr or '<empty>'}"
+    assert marker is not None or kill, f"child exited without a marker; stderr:\n{child_stderr or '<empty>'}"
     return run_id, marker
 
 
