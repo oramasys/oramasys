@@ -78,11 +78,17 @@ def test_only_an_installed_location_satisfies_the_import_proof() -> None:
     assert pin_verifier.check_location(None) == ["location.unknown"]
 
 
-JUNIT = """<testsuites><testsuite>
-<testcase classname="src.tests.interop.test_verify_only_serving" name="test_ready"/>
-<testcase classname="src.tests.interop.test_verify_only_serving" name="test_revoked[a/b]">
-<system-out>PHYLAX_STATE_DIR=/home/runner/secret TOKEN=abc</system-out></testcase>
-</testsuite></testsuites>"""
+CLASS = "src.tests.interop.test_verify_only_serving"
+
+
+def _junit(names: list[str], *, classname: str = CLASS, extra: str = "") -> str:
+    """Build a JUnit document with one passing testcase per name."""
+    cases = "".join(f'<testcase classname="{classname}" name="{n}"/>' for n in names)
+    return f"<testsuites><testsuite>{cases}{extra}</testsuite></testsuites>"
+
+
+NAMES = list(receipt_builder.SCENARIOS)
+JUNIT = _junit(NAMES)
 
 
 def build(junit: str = JUNIT, commit: str = PIN) -> dict:
@@ -93,27 +99,55 @@ def build(junit: str = JUNIT, commit: str = PIN) -> dict:
     )
 
 
-def test_the_receipt_is_minimal_and_carries_no_run_output() -> None:
-    """Only the fixed fields appear; captured output, paths and values never do."""
+def test_the_receipt_is_minimal_and_uses_only_fixed_public_labels() -> None:
+    """Only the fixed fields appear, and scenario labels come from the allowlist."""
     receipt = build()
     assert set(receipt) == {
         "outcome", "expected_pin", "observed_url", "observed_commit", "pin_matches",
-        "counts", "tests", "generated_at",
+        "counts", "scenarios", "generated_at",
     }
-    text = json.dumps(receipt)
-    for forbidden in ("PHYLAX_STATE_DIR", "TOKEN", "/home/runner", "secret", "abc"):
-        assert forbidden not in text
     assert receipt["outcome"] == "pass" and receipt["pin_matches"] is True
-    assert receipt["counts"] == {"total": 2, "failed": 0, "skipped": 0}
-    assert all("/" not in t["id"] for t in receipt["tests"])
+    assert {s["scenario"] for s in receipt["scenarios"]} == set(receipt_builder.SCENARIOS.values())
+    assert receipt["counts"] == {
+        "expected": 5, "recognized": 5, "unrecognized": 0, "failed": 0, "skipped": 0,
+    }
 
 
-def test_a_failure_a_skip_or_an_empty_run_is_not_a_pass() -> None:
-    """Skips consume the allowance and an empty run proves nothing."""
-    failed = JUNIT.replace('name="test_ready"/>', 'name="test_ready"><failure/></testcase>')
+def test_untrusted_junit_text_never_reaches_the_receipt() -> None:
+    """Path-like class names, parameter values and captured output are not copied."""
+    hostile = _junit(
+        [*NAMES, "tenant=alpha", "test_case[secret-token]"],
+        extra=(
+            '<testcase classname="/private/work/secret-token" name="tenant=alpha">'
+            "<system-out>PHYLAX_STATE_DIR=/home/runner/x TOKEN=abc</system-out></testcase>"
+        ),
+    )
+    receipt = build(hostile)
+    text = json.dumps(receipt)
+    for fragment in (
+        "tenant", "alpha", "secret", "token", "/private", "/home", "PHYLAX_STATE_DIR", "abc",
+        "test_case",
+    ):
+        assert fragment not in text.replace("expected_pin", "").replace("observed", "")
+    assert receipt["counts"]["unrecognized"] == 3
+    assert receipt["outcome"] == "fail"  # unknown identities fail the receipt without being quoted
+
+
+def test_a_look_alike_class_name_is_not_trusted() -> None:
+    """A foreign module that reuses a known test name is unrecognized."""
+    receipt = build(_junit(NAMES, classname="some.other.module"))
+    assert receipt["counts"]["recognized"] == 0 and receipt["outcome"] == "fail"
+
+
+def test_a_failure_a_skip_a_missing_or_a_repeated_scenario_is_not_a_pass() -> None:
+    """Every expected scenario must run exactly once, pass, and nothing may be skipped."""
+    first = NAMES[0]
+    failed = JUNIT.replace(f'name="{first}"/>', f'name="{first}"><failure/></testcase>')
     assert build(failed)["outcome"] == "fail"
-    skipped = JUNIT.replace('name="test_ready"/>', 'name="test_ready"><skipped/></testcase>')
+    skipped = JUNIT.replace(f'name="{first}"/>', f'name="{first}"><skipped/></testcase>')
     assert build(skipped)["outcome"] == "fail"
+    assert build(_junit(NAMES[:-1]))["outcome"] == "fail"
+    assert build(_junit([*NAMES, first]))["outcome"] == "fail"
     assert build("<testsuites><testsuite/></testsuites>")["outcome"] == "fail"
 
 
@@ -131,6 +165,28 @@ def test_a_malformed_pin_or_report_raises() -> None:
         receipt_builder.build_receipt(
             JUNIT, expected_pin="main", observed_url=URL, observed_commit=PIN
         )
+
+
+def test_an_observed_url_that_is_not_a_plain_repository_url_is_refused() -> None:
+    """Paths, credentials, queries and spaces cannot ride in through the URL field."""
+    for bad in ("/home/runner/work", "https://user:pw@github.com/x/y", "https://h/x?token=1",
+                "https://github.com/a b", "file:///etc/passwd", ""):
+        with pytest.raises(ValueError):
+            receipt_builder.build_receipt(
+                JUNIT, expected_pin=PIN, observed_url=bad, observed_commit=PIN
+            )
+
+
+def test_every_allowlisted_name_is_a_real_interop_test() -> None:
+    """The allowlist cannot drift from the tests it labels."""
+    import ast
+
+    tree = ast.parse((ROOT / "src/tests/interop/test_verify_only_serving.py").read_text())
+    defined = {
+        n.name for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+    }
+    assert defined == set(receipt_builder.SCENARIOS)
 
 
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -161,8 +217,13 @@ def test_the_new_workflows_are_ubuntu_least_privilege_and_secret_free(name: str)
         assert forbidden not in text
 
 
-def test_the_manifest_workflow_derives_the_producer_ref_from_its_own_checkout() -> None:
-    """The ref passed to the digest script is the checked-out registry HEAD, not the manifest."""
+def test_the_manifest_workflow_ref_is_a_constant_equal_to_the_ci_registry_ref() -> None:
+    """The producer ref is a workflow constant that cannot drift from the ci.yml checkout."""
+    from tests.test_compatibility_pins import producer_refs
+
     text = (WORKFLOWS / "manifest-schema3.yml").read_text(encoding="utf-8")
-    assert 'REF="$(git -C docs-candidate rev-parse HEAD)"' in text
-    assert '--producer-ref "$REF"' in text
+    constants = __import__("re").findall(r"PRODUCER_REGISTRY_REF:\s*([0-9a-f]{40})", text)
+    assert len(constants) == 1
+    assert set(producer_refs()["ci.yml"]) == {constants[0]}
+    assert '--producer-ref "$PRODUCER_REGISTRY_REF"' in text
+    assert "docs-candidate" not in text, "no decorative checkout: nothing reads it"

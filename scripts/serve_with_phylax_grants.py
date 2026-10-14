@@ -58,6 +58,13 @@ def open_phylax_verifier(environ: Mapping[str, str]) -> ManagedVerifier:
     return verifier, close
 
 
+def _cause(error: BaseException) -> str:
+    """Name why the verifier could not open without exposing paths or messages."""
+    if isinstance(error, ModuleNotFoundError) and (error.name or "").split(".")[0] == "phylax":
+        return "phylax_not_installed"
+    return type(error).__name__
+
+
 def close_resources(verifier_close: Callable[[], None], ledger: StepLedger) -> None:
     """Close verifier and ledger even when verifier shutdown reports a failure."""
     try:
@@ -86,7 +93,8 @@ def build_app(
     try:
         verifier, close = open_verifier(environ)
     except Exception as error:  # noqa: BLE001 - public state is only unavailable
-        _log.warning("grant verifier unavailable", extra={"reason": type(error).__name__})
+        # Only a cause label is logged: no state paths or low-level text.
+        _log.warning("grant verifier unavailable", extra={"reason": _cause(error)})
         return create_app(grant_capability="unavailable")
     try:
         ledger = StepLedger(Path(environ["ORAMA_LEDGER_PATH"]))

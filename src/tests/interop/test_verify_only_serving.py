@@ -6,10 +6,9 @@ that directory with its default opener.
 """
 from __future__ import annotations
 
-import gc
 import importlib.util
+import sqlite3
 import sys
-import warnings
 from pathlib import Path
 from types import ModuleType
 
@@ -142,18 +141,25 @@ async def test_a_grant_issued_by_phylax_is_spent_through_the_read_only_verifier(
 async def test_a_revocation_after_open_is_refused_and_readiness_does_not_change(
     serving_module: ModuleType, world: World
 ) -> None:
-    """The retained connection sees a later revocation; a refused grant is not a state change."""
-    grant, attempt = world.grant_for_new_hold()
+    """The retained connection, already used once, sees a later revocation exactly."""
+    first, first_attempt = world.grant_for_new_hold()
     app = serving_module.build_app(world.environ())
     assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
 
-    world.authority.revoke(grant.grant_id)
-    response = await request(
-        app, "POST", "/adjustments", json={"grant": grant.to_wire().decode()}, headers=AUTH
+    spent = await request(
+        app, "POST", "/adjustments", json={"grant": first.to_wire().decode()}, headers=AUTH
     )
-    assert response.status_code in (409, 503)
+    assert spent.status_code == 200  # the connection has served a read before the revoke
+    # A grant issued AFTER the connection opened is visible too; then it is revoked.
+    second, second_attempt = world.grant_for_new_hold()
+    world.authority.revoke(second.grant_id)
+    response = await request(
+        app, "POST", "/adjustments", json={"grant": second.to_wire().decode()}, headers=AUTH
+    )
+    assert response.status_code == 503  # verification refusals are 503, never a 409 conflict
     assert response.json()["detail"]["code"] == "grant.revoked"
-    assert world.ledger.hold_state(RUN, attempt) == "unknown"
+    assert world.ledger.hold_state(RUN, first_attempt) == "released"
+    assert world.ledger.hold_state(RUN, second_attempt) == "unknown"
     assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
 
 
@@ -180,19 +186,59 @@ async def test_missing_verifier_state_is_unavailable_and_never_opens_the_ledger(
     assert list(empty.iterdir()) == []
 
 
-async def test_shutdown_releases_the_verifier_and_the_ledger_without_a_resource_warning(
-    serving_module: ModuleType, world: World
+async def test_shutdown_closes_the_verifier_and_the_ledger_exactly_once(
+    serving_module: ModuleType, world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Lifespan cleanup closes both retained connections; no ResourceWarning follows."""
+    """Closure is asserted positively: a leaked connection warns only on Python 3.13+."""
     grant, _attempt = world.grant_for_new_hold()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ResourceWarning)
-        app = serving_module.build_app(world.environ())
-        await request(
-            app, "POST", "/adjustments", json={"grant": grant.to_wire().decode()}, headers=AUTH
-        )
-        async with app.router.lifespan_context(app):
-            pass
-        del app
-        gc.collect()
-    assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+    real_open = serving_module.open_phylax_verifier
+    closes: list[str] = []
+    opened: dict[str, object] = {}
+
+    def recording_opener(environ: dict[str, str]):  # type: ignore[no-untyped-def]
+        verifier, close = real_open(environ)
+        opened["verifier"] = verifier
+
+        def counted() -> None:
+            closes.append("verifier")
+            close()
+
+        return verifier, counted
+
+    ledgers: list[StepLedger] = []
+
+    def tracking_ledger(path: Path) -> StepLedger:
+        ledgers.append(StepLedger(path))
+        return ledgers[-1]
+
+    monkeypatch.setattr(serving_module, "StepLedger", tracking_ledger)
+    app = serving_module.build_app(world.environ(), open_verifier=recording_opener)
+    spent = await request(
+        app, "POST", "/adjustments", json={"grant": grant.to_wire().decode()}, headers=AUTH
+    )
+    assert spent.status_code == 200
+    assert closes == []  # not closed while serving
+    async with app.router.lifespan_context(app):
+        pass
+    assert closes == ["verifier"]
+    assert len(ledgers) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        ledgers[0]._db.execute("SELECT 1")  # noqa: SLF001 - evidence the connection is closed
+    with pytest.raises(Exception) as refused:
+        opened["verifier"].verify(grant.to_wire())  # type: ignore[attr-defined]
+    assert getattr(refused.value, "reason", None) is not None
+    assert refused.value.reason.value == "verifier.unavailable"  # type: ignore[attr-defined]
+
+
+async def test_a_missing_phylax_is_logged_as_not_installed_not_as_a_mystery(
+    serving_module: ModuleType, world: World, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The unavailable state names its cause class so a rollout can tell why it is off."""
+    def absent(_environ: dict[str, str]):  # type: ignore[no-untyped-def]
+        raise ModuleNotFoundError("No module named 'phylax'", name="phylax")
+
+    with caplog.at_level("WARNING", logger="orama.serve"):
+        app = serving_module.build_app(world.environ(), open_verifier=absent)
+    assert (await request(app, "GET", "/health")).json()["grants"] == "unavailable"
+    assert any(getattr(r, "reason", None) == "phylax_not_installed" for r in caplog.records)
