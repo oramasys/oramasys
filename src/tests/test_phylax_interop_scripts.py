@@ -245,3 +245,42 @@ def test_the_interop_job_installs_through_the_extra_not_a_second_command() -> No
     text = (WORKFLOWS / "grant-composition-interop.yml").read_text(encoding="utf-8")
     assert "'.[dev,grant-serving]'" in text
     assert "oramasys-phylax @" not in text
+
+
+def test_a_suffix_spoofed_class_name_is_not_trusted() -> None:
+    """Only the canonical module path labels a testcase, never a matching final component."""
+    for spoof in (
+        "untrusted.test_verify_only_serving",
+        "tests.interop.test_verify_only_serving",
+        "src.tests.interop.test_verify_only_serving.extra",
+        "src.tests.interop.test_verify_only_serving ",
+        "test_verify_only_serving",
+    ):
+        receipt = build(_junit(NAMES, classname=spoof))
+        assert receipt["counts"]["recognized"] == 0, spoof
+        assert receipt["outcome"] == "fail"
+    assert build(_junit(NAMES, classname=receipt_builder.CANONICAL_CLASSNAME))["outcome"] == "pass"
+
+
+def test_the_pin_report_returns_the_observed_values_not_the_expected_arguments() -> None:
+    """The line the workflow forwards to the receipt carries what direct_url.json recorded."""
+    observed_url = "https://github.com/oramasys/phylax"  # no .git: accepted, but different text
+    document = json.dumps({"url": observed_url, "vcs_info": {"vcs": "git", "commit_id": PIN}})
+    code, line = pin_verifier.report(
+        document, expected_url=URL, expected_commit=PIN,
+        module_file="/opt/lib/python3.12/site-packages/phylax/__init__.py",
+    )
+    assert code == 0
+    assert line == f"OK {observed_url} {PIN}"
+    assert URL not in line  # the expected argument must not be echoed back as an observation
+
+
+def test_the_pin_report_refuses_and_never_reports_observed_values_on_a_mismatch() -> None:
+    """A mismatch exits non-zero with problem codes only."""
+    document = json.dumps({"url": URL, "vcs_info": {"vcs": "git", "commit_id": "2" * 40}})
+    code, line = pin_verifier.report(
+        document, expected_url=URL, expected_commit=PIN,
+        module_file="/opt/lib/python3.12/site-packages/phylax/__init__.py",
+    )
+    assert code == 1 and line == "commit.mismatch"
+    assert "2" * 40 not in line

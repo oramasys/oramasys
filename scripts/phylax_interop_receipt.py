@@ -17,7 +17,10 @@ from pathlib import Path
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _URL = re.compile(r"https://[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+){1,3}")
 _BAD = ("failure", "error")
-_MODULE = "test_verify_only_serving"
+# The only classname pytest emits for the interop module when run from the repository root
+# (rootdir-relative dotted node id); anything else, including a matching final component, is
+# untrusted.
+CANONICAL_CLASSNAME = "src.tests.interop.test_verify_only_serving"
 # Exact testcase names mapped to fixed public labels. Raw JUnit text (class names, test names,
 # parameters) is never copied into the receipt; anything not listed is "unrecognized".
 SCENARIOS = {
@@ -32,7 +35,7 @@ UNRECOGNIZED = "unrecognized"
 
 def _label(classname: str, name: str) -> str:
     """Return the fixed public label for a known interop test, else ``unrecognized``."""
-    if classname.rsplit(".", 1)[-1] != _MODULE:
+    if classname != CANONICAL_CLASSNAME:
         return UNRECOGNIZED
     return SCENARIOS.get(name, UNRECOGNIZED)
 
