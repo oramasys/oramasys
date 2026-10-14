@@ -24,7 +24,7 @@ from orama.graph.execution_guard import LeaseFenced, StepLedger
 from orama.graph.lost_run_recovery import LOST_RUN_REASON, LostRunRefused, recover_lost_run
 from orama.graph.run_control import RunControl, TerminalOutcome, TerminalReceipt
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 OWNER = "control-plane"
 
 CHILD = textwrap.dedent(
