@@ -69,7 +69,7 @@
         "neutral-mechanics": "6d75cfe08af95992dddffab13ae3019aa9c41350",
         "endpoint-policy": "931b6347142e8e66b31136e3ac8159d86eb5b2f7",
         "hardware-eligibility": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
-        "grant-authority": "e41f1e863c65c5f0aae08a6befad21170354b014"
+        "grant-authority": "0c3e860749b3ff8f62e102679f1f415f8acf0a61"
       }
     },
     {
@@ -82,13 +82,13 @@
         "neutral-mechanics": "6d75cfe08af95992dddffab13ae3019aa9c41350",
         "endpoint-policy": "931b6347142e8e66b31136e3ac8159d86eb5b2f7",
         "hardware-eligibility": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
-        "grant-authority": "e41f1e863c65c5f0aae08a6befad21170354b014"
+        "grant-authority": "0c3e860749b3ff8f62e102679f1f415f8acf0a61"
       }
     }
   ],
   "consumer": {
     "repository": "oramasys/oramasys",
-    "sha": "99283f789f078689404653d5105b597e614160b0"
+    "sha": "f8898b35d5249e483b2f4a68c097957e675a0ef4"
   },
   "producers": {
     "neutral-mechanics": {
@@ -107,7 +107,7 @@
       "production_pin": "41a0da9d52e0131049a1469234ac56f6990fc635"
     },
     "grant-authority": {
-      "candidate": "e41f1e863c65c5f0aae08a6befad21170354b014",
+      "candidate": "0c3e860749b3ff8f62e102679f1f415f8acf0a61",
       "declared_dependency": false
     }
   },
