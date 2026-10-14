@@ -2,7 +2,8 @@
   "agate_profile_source": {
     "commit": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
     "path": "src/agate/data/hardware_profiles.json",
-    "repository": "oramasys/agate"
+    "repository": "oramasys/agate",
+    "sha256": "ce0eed94041e191398516958b240fb3bb838255c3644eb63bec55508e7051edc"
   },
   "agate_profiles": [
     "mac-studio",
@@ -17,6 +18,9 @@
     "production-pin-promotion"
   ],
   "final_cell_skips_allowed": 0,
+  "historical_only_modules": [
+    "src/tests/core_gate/test_start_seam_absent.py"
+  ],
   "packet_version": 1,
   "required_capabilities": [
     "seam-positive-modules-collected"
@@ -41,10 +45,12 @@
     "src/tests/core_gate/test_delivery_seam.py",
     "src/tests/core_gate/test_lost_run_recovery.py",
     "src/tests/core_gate/test_runtime_gate_hardening.py",
-    "src/tests/core_gate/test_start_seam_absent.py",
     "src/tests/core_gate/test_start_seam_runtime.py",
     "src/tests/interop/test_verify_only_serving.py",
     "src/tests/owner_candidates/test_adapters.py"
+  ],
+  "required_setup_inputs": [
+    "ORAMA_DOCS_V2_REGISTRY"
   ],
   "residual_limits": [
     "Evidence is GitHub-hosted ubuntu-latest on Python 3.11 and 3.12 only; macOS is auxiliary and non-gating; Windows, NFS and read-only mounts are not covered.",
