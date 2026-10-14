@@ -56,10 +56,13 @@ jobs:
             --junitxml=interop-results.xml
       - name: Build the sanitized receipt
         if: always()
+        env:
+          OBSERVED_URL: ${{ steps.pin.outputs.url }}
+          OBSERVED_COMMIT: ${{ steps.pin.outputs.commit }}
         run: |
           python scripts/phylax_interop_receipt.py interop-results.xml \
             requirements/compatibility-phylax-verify-only.txt \
-            "${{ steps.pin.outputs.url }}" "${{ steps.pin.outputs.commit }}" > interop-receipt.json
+            "$OBSERVED_URL" "$OBSERVED_COMMIT" > interop-receipt.json
       - name: Retain the sanitized receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

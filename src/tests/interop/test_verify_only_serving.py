@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import sqlite3
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -103,11 +104,15 @@ class World:
 
 
 @pytest.fixture
-def world(tmp_path: Path) -> World:
-    """Return an issuer and ledger under a private temporary root."""
+def world(tmp_path: Path) -> Iterator[World]:
+    """Yield an issuer and ledger under a private temporary root, then close the ledger."""
     root = tmp_path / "world"
     root.mkdir(mode=0o700)
-    return World(root)
+    instance = World(root)
+    try:
+        yield instance
+    finally:
+        instance.ledger.close()
 
 
 async def request(app: object, method: str, path: str, **kwargs: object):
@@ -128,14 +133,15 @@ async def test_a_grant_issued_by_phylax_is_spent_through_the_read_only_verifier(
     monkeypatch.setattr(FileSeedProvider, "load_seed", forbidden)
     app = serving_module.build_app(world.environ())
 
-    health = await request(app, "GET", "/health")
-    assert health.json()["grants"] == "ready"
-    body = {"grant": grant.to_wire().decode()}
-    first = await request(app, "POST", "/adjustments", json=body, headers=AUTH)
-    assert first.status_code == 200
-    assert world.ledger.hold_state(RUN, attempt) == "released"
-    second = await request(app, "POST", "/adjustments", json=body, headers=AUTH)
-    assert second.status_code == 200 and second.json() == first.json()
+    async with app.router.lifespan_context(app):
+        health = await request(app, "GET", "/health")
+        assert health.json()["grants"] == "ready"
+        body = {"grant": grant.to_wire().decode()}
+        first = await request(app, "POST", "/adjustments", json=body, headers=AUTH)
+        assert first.status_code == 200
+        assert world.ledger.hold_state(RUN, attempt) == "released"
+        second = await request(app, "POST", "/adjustments", json=body, headers=AUTH)
+        assert second.status_code == 200 and second.json() == first.json()
 
 
 async def test_a_revocation_after_open_is_refused_and_readiness_does_not_change(
@@ -144,23 +150,24 @@ async def test_a_revocation_after_open_is_refused_and_readiness_does_not_change(
     """The retained connection, already used once, sees a later revocation exactly."""
     first, first_attempt = world.grant_for_new_hold()
     app = serving_module.build_app(world.environ())
-    assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
+    async with app.router.lifespan_context(app):
+        assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
 
-    spent = await request(
-        app, "POST", "/adjustments", json={"grant": first.to_wire().decode()}, headers=AUTH
-    )
-    assert spent.status_code == 200  # the connection has served a read before the revoke
-    # A grant issued AFTER the connection opened is visible too; then it is revoked.
-    second, second_attempt = world.grant_for_new_hold()
-    world.authority.revoke(second.grant_id)
-    response = await request(
-        app, "POST", "/adjustments", json={"grant": second.to_wire().decode()}, headers=AUTH
-    )
-    assert response.status_code == 503  # verification refusals are 503, never a 409 conflict
-    assert response.json()["detail"]["code"] == "grant.revoked"
-    assert world.ledger.hold_state(RUN, first_attempt) == "released"
-    assert world.ledger.hold_state(RUN, second_attempt) == "unknown"
-    assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
+        spent = await request(
+            app, "POST", "/adjustments", json={"grant": first.to_wire().decode()}, headers=AUTH
+        )
+        assert spent.status_code == 200  # the connection has served a read before the revoke
+        # A grant issued AFTER the connection opened is visible too; then it is revoked.
+        second, second_attempt = world.grant_for_new_hold()
+        world.authority.revoke(second.grant_id)
+        response = await request(
+            app, "POST", "/adjustments", json={"grant": second.to_wire().decode()}, headers=AUTH
+        )
+        assert response.status_code == 503  # verification refusals are 503, never a 409 conflict
+        assert response.json()["detail"]["code"] == "grant.revoked"
+        assert world.ledger.hold_state(RUN, first_attempt) == "released"
+        assert world.ledger.hold_state(RUN, second_attempt) == "unknown"
+        assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
 
 
 async def test_missing_verifier_state_is_unavailable_and_never_opens_the_ledger(
@@ -241,4 +248,8 @@ async def test_a_missing_phylax_is_logged_as_not_installed_not_as_a_mystery(
     with caplog.at_level("WARNING", logger="orama.serve"):
         app = serving_module.build_app(world.environ(), open_verifier=absent)
     assert (await request(app, "GET", "/health")).json()["grants"] == "unavailable"
-    assert any(getattr(r, "reason", None) == "phylax_not_installed" for r in caplog.records)
+    assert any(
+        getattr(record, "reason", None) == "phylax_not_installed"
+        and record.getMessage() == "grant verifier unavailable: phylax_not_installed"
+        for record in caplog.records
+    )

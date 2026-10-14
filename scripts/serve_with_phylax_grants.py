@@ -70,6 +70,12 @@ def _cause(error: BaseException) -> str:
     return type(error).__name__
 
 
+def _warning_with_cause(message: str, error: BaseException) -> None:
+    """Log a stable operator-visible cause label without exposing exception details."""
+    reason = _cause(error)
+    _log.warning("%s: %s", message, reason, extra={"reason": reason})
+
+
 def close_resources(verifier_close: Callable[[], None], ledger: StepLedger) -> None:
     """Close verifier and ledger even when verifier shutdown reports a failure."""
     try:
@@ -83,7 +89,7 @@ def _release_verifier(close: Callable[[], None]) -> None:
     try:
         close()
     except Exception as error:  # noqa: BLE001 - cleanup of an unused resource
-        _log.warning("verifier cleanup failed", extra={"reason": type(error).__name__})
+        _warning_with_cause("verifier cleanup failed", error)
 
 
 def build_app(
@@ -99,12 +105,12 @@ def build_app(
         verifier, close = open_verifier(environ)
     except Exception as error:  # noqa: BLE001 - public state is only unavailable
         # Only a cause label is logged: no state paths or low-level text.
-        _log.warning("grant verifier unavailable", extra={"reason": _cause(error)})
+        _warning_with_cause("grant verifier unavailable", error)
         return create_app(grant_capability="unavailable")
     try:
         ledger = StepLedger(Path(environ["ORAMA_LEDGER_PATH"]))
     except Exception as error:  # noqa: BLE001 - a ledger that cannot open is "unavailable"
-        _log.warning("grant ledger unavailable", extra={"reason": type(error).__name__})
+        _warning_with_cause("grant ledger unavailable", error)
         _release_verifier(close)
         return create_app(grant_capability="unavailable")
     return create_app(

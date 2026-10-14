@@ -247,6 +247,19 @@ def test_the_interop_job_installs_through_the_extra_not_a_second_command() -> No
     assert "oramasys-phylax @" not in text
 
 
+def test_workflows_preserve_validator_failures_and_pass_receipt_values_via_env() -> None:
+    """CI must not mask manifest failures or splice observed values into shell source."""
+    manifest = (WORKFLOWS / "manifest-schema3.yml").read_text(encoding="utf-8")
+    assert "set -o pipefail" in manifest
+
+    interop = (WORKFLOWS / "grant-composition-interop.yml").read_text(encoding="utf-8")
+    assert "OBSERVED_URL: ${{ steps.pin.outputs.url }}" in interop
+    assert "OBSERVED_COMMIT: ${{ steps.pin.outputs.commit }}" in interop
+    assert '"$OBSERVED_URL" "$OBSERVED_COMMIT"' in interop
+    assert '"${{ steps.pin.outputs.url }}"' not in interop
+    assert '"${{ steps.pin.outputs.commit }}"' not in interop
+
+
 def test_a_suffix_spoofed_class_name_is_not_trusted() -> None:
     """Only the canonical module path labels a testcase, never a matching final component."""
     for spoof in (

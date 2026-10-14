@@ -197,6 +197,24 @@ def test_resource_cleanup_releases_the_ledger_when_verifier_close_fails(
         ledger._db.execute("SELECT 1")
 
 
+def test_verifier_cleanup_warning_includes_only_a_sanitized_cause(
+    serving_module: ModuleType, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Cleanup diagnostics identify the failure class without retaining exception text."""
+    def fail() -> None:
+        raise OSError("private state detail")
+
+    with caplog.at_level("WARNING", logger="orama.serve"):
+        serving_module._release_verifier(fail)  # noqa: SLF001 - exercise cleanup boundary
+
+    assert any(
+        getattr(record, "reason", None) == "OSError"
+        and record.getMessage() == "verifier cleanup failed: OSError"
+        for record in caplog.records
+    )
+    assert "private state detail" not in caplog.text
+
+
 def test_create_app_rejects_empty_or_contradictory_capability_values(tmp_path: Path) -> None:
     """Only a ready app may carry a grant consumer, and empty is not a state."""
     with pytest.raises(ValueError, match="unknown grant capability"):
@@ -238,7 +256,10 @@ def _enabled_environ(serving_module: ModuleType, tmp_path: Path) -> dict[str, st
 
 
 async def test_a_ledger_open_failure_closes_the_verifier_and_is_unavailable(
-    serving_module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    serving_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The verifier must not leak, and the capability must not crash startup."""
     closed = 0
@@ -251,12 +272,18 @@ async def test_a_ledger_open_failure_closes_the_verifier_and_is_unavailable(
         raise OSError("ledger path is unusable")
 
     monkeypatch.setattr(serving_module, "StepLedger", broken_ledger)
-    app = serving_module.build_app(
-        _enabled_environ(serving_module, tmp_path),
-        open_verifier=lambda _environ: (StubVerifier(), close),
-    )
+    with caplog.at_level("WARNING", logger="orama.serve"):
+        app = serving_module.build_app(
+            _enabled_environ(serving_module, tmp_path),
+            open_verifier=lambda _environ: (StubVerifier(), close),
+        )
     assert (await health(app))["grants"] == "unavailable"
     assert closed == 1
+    assert any(
+        getattr(record, "reason", None) == "OSError"
+        and record.getMessage() == "grant ledger unavailable: OSError"
+        for record in caplog.records
+    )
     response = await adjustment(app, "{}")
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "adjustments_unavailable"
