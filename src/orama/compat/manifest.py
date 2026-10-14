@@ -23,6 +23,7 @@ CODE_INVALID = "manifest-invalid"
 CODE_SCHEMA_UNKNOWN = "manifest-schema-unknown"
 CODE_SCHEMA_MISMATCH = "manifest-schema-mismatch"
 CODE_DIGEST_MISMATCH = "manifest-digest-mismatch"
+CODE_CONSUMER_MISMATCH = "manifest-consumer-mismatch"
 PROFILES = ("production", "policy-r3", "core-r3")
 PYTHONS = ("3.11", "3.12")
 PRODUCER_REPOSITORY = "diazMelgarejo/orama-system"
@@ -115,14 +116,24 @@ FINAL_CELL_KEYS = frozenset({"profile", "python", "require_r3", "min_passed", "m
 PRODUCER_ROLES = frozenset({"neutral-mechanics", "endpoint-policy", "hardware-eligibility",
                             "grant-authority"})
 COMPOSITION_ROLE = "grant-authority"
+CORE_PRODUCER_ROLE = "neutral-mechanics"  # the only role with an external anchor (core pins)
+ZERO_SHA = "0" * 40
 CONTRACT_IDS = ("M1-Q-MANIFEST-1", "M1-Q-INSTALL-1", "M1-Q-DELIVERY-1", "M1-Q-ACCOUNTING-1",
                 "M1-Q-COMPOSITION-1", "COLLAB-HANDOFF-1", "INTERACTION-RISK-ASSESSMENT-1")
 
 
 def canonical_digest(manifest: Mapping[str, Any]) -> str:
-    """Return sha256 of the canonical JSON (UTF-8, sorted keys, no extra whitespace)."""
-    text = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    """Return sha256 of the canonical JSON (UTF-8, sorted keys, no extra whitespace).
+
+    NaN/Infinity and unencodable text (lone surrogates) are refused with a stable
+    ``manifest-invalid`` error rather than hashed or raised as a raw traceback.
+    """
+    try:
+        text = json.dumps(manifest, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    except (ValueError, TypeError) as error:
+        raise ManifestError(f"manifest cannot be canonicalised: {error}") from error
 
 
 def _full_sha(value: Any) -> bool:
@@ -130,23 +141,49 @@ def _full_sha(value: Any) -> bool:
     return isinstance(value, str) and FULL_SHA.fullmatch(value) is not None
 
 
-def _check_producers(manifest: Mapping[str, Any]) -> dict[str, str]:
-    """Validate producer identities and return role -> candidate SHA."""
+def _check_pin(role: str, entry: Mapping[str, Any], core_pins: Mapping[str, str]) -> None:
+    """Enforce the production-pin contract for one producer role.
+
+    A declared dependency must carry a real full-SHA pin that differs from its
+    candidate unless ``candidate_equals_pin`` is true (then it must equal it); a
+    non-dependency must carry neither pin field. Only the core producer's pin is bound
+    to an external anchor (the registry production core pin); the others are format-checked.
+    """
+    if entry["declared_dependency"] is not True:
+        _need("production_pin" not in entry and "candidate_equals_pin" not in entry,
+              f"producer {role}: a non-dependency must not carry a production pin")
+        return
+    _need("production_pin" in entry, f"producer {role}: declared dependency needs a production_pin")
+    pin = entry["production_pin"]
+    _need(_full_sha(pin) and pin != ZERO_SHA, f"producer {role}: pin must be a real full SHA")
+    equal_flag = entry.get("candidate_equals_pin", False)
+    _need(isinstance(equal_flag, bool), f"producer {role}: candidate_equals_pin must be a boolean")
+    if equal_flag:
+        _need(pin == entry["candidate"], f"producer {role}: candidate_equals_pin but they differ")
+    else:
+        _need(pin != entry["candidate"],
+              f"producer {role}: pin equals candidate without candidate_equals_pin")
+    if role == CORE_PRODUCER_ROLE:
+        _need(pin == core_pins["production"],
+              f"producer {role}: production_pin differs from the registry production core pin")
+
+
+def _check_producers(manifest: Mapping[str, Any], core_pins: Mapping[str, str]) -> dict[str, str]:
+    """Validate producer identities and pins; return role -> candidate SHA."""
     producers = manifest["producers"]
     _need(isinstance(producers, Mapping) and set(producers) == PRODUCER_ROLES,
           f"producers must be exactly {sorted(PRODUCER_ROLES)}")
     candidates: dict[str, str] = {}
     for role, entry in producers.items():
         allowed = {"candidate", "declared_dependency"} | (
-            set() if role == COMPOSITION_ROLE else {"production_pin"})
+            set() if role == COMPOSITION_ROLE else {"production_pin", "candidate_equals_pin"})
         required = {"candidate", "declared_dependency"}
         _need(isinstance(entry, Mapping) and required <= set(entry) <= allowed,
               f"producer {role}: unexpected keys")
         _need(_full_sha(entry["candidate"]), f"producer {role}: candidate must be a full SHA")
-        if "production_pin" in entry:
-            _need(_full_sha(entry["production_pin"]), f"producer {role}: pin must be a full SHA")
         _need(entry["declared_dependency"] is (role != COMPOSITION_ROLE),
               f"producer {role}: declared_dependency is wrong for its role")
+        _check_pin(role, entry, core_pins)
         candidates[role] = entry["candidate"]
     return candidates
 
@@ -195,7 +232,7 @@ def _validate_v3(
     _need(set(manifest) == TOP_KEYS_V3, f"manifest keys must be exactly {sorted(TOP_KEYS_V3)}")
     _check_registry(manifest, producer_ref)
     _check_v3_extras(manifest)
-    candidates = _check_producers(manifest)
+    candidates = _check_producers(manifest, core_pins)
     _need(manifest["registry_profiles"] == {p: core_pins[p] for p in PROFILES},
           "registry_profiles differ from the registry core pins")
     cells = manifest["cells"]
@@ -218,13 +255,24 @@ def _validate_v3(
     _need(seen == required, f"cells must be exactly {sorted(required)}, got {sorted(seen)}")
 
 
-def _schema_of(manifest: Mapping[str, Any]) -> int:
-    """Return the manifest's schema or refuse it with the stable unknown-schema code."""
-    schema = manifest.get("schema") if isinstance(manifest, Mapping) else None
-    _need(type(schema) is int and schema in SUPPORTED_SCHEMAS,
-          f"unsupported manifest schema {schema!r}; supported {list(SUPPORTED_SCHEMAS)}",
-          CODE_SCHEMA_UNKNOWN)
-    return schema
+def _route(manifest: Any) -> str:
+    """Route a manifest to "v3", "legacy" (the untouched schema-2 path) or refuse it.
+
+    Only a Mapping whose ``schema`` is the int 3 is v3. A Mapping with another int
+    schema that is not 2 is refused with the stable unknown-schema code. Everything
+    else (missing schema, non-Mapping, bool, 2.0, wrong keys) takes the legacy path so
+    its original messages are preserved exactly.
+    """
+    if isinstance(manifest, Mapping):
+        schema = manifest.get("schema")
+        if type(schema) is int:
+            if schema == SCHEMA_V3:
+                return "v3"
+            if schema != SCHEMA:
+                raise ManifestError(
+                    f"unsupported manifest schema {schema!r}; supported {list(SUPPORTED_SCHEMAS)}",
+                    CODE_SCHEMA_UNKNOWN)
+    return "legacy"
 
 
 def validate_manifest(
@@ -235,17 +283,22 @@ def validate_manifest(
     producer_ref: str,
     expected_schema: int | None = None,
     expected_digest: str | None = None,
+    consumer_sha: str | None = None,
 ) -> None:
-    """Dispatch on the manifest schema; schema 2 rules are unchanged, schema 3 adds producers."""
-    schema = _schema_of(manifest)
+    """Dispatch on the manifest schema; schema 2 runs the original code path unchanged."""
+    route = _route(manifest)
+    schema = SCHEMA_V3 if route == "v3" else SCHEMA
     _need(expected_schema is None or schema == expected_schema,
           f"gate requires schema {expected_schema}, manifest is schema {schema}",
           CODE_SCHEMA_MISMATCH)
     if expected_digest is not None:
-        _need(schema == SCHEMA_V3 and canonical_digest(manifest) == expected_digest,
+        _need(route == "v3" and canonical_digest(manifest) == expected_digest,
               "manifest digest differs from the frozen digest", CODE_DIGEST_MISMATCH)
-    checker = _validate_v3 if schema == SCHEMA_V3 else _validate_v2
+    checker = _validate_v3 if route == "v3" else _validate_v2
     checker(manifest, core_pins=core_pins, lane_files=lane_files, producer_ref=producer_ref)
+    if consumer_sha is not None:
+        _need(route == "v3" and manifest["consumer"]["sha"] == consumer_sha,
+              "manifest consumer sha differs from the expected consumer", CODE_CONSUMER_MISMATCH)
 
 
 _ENTRY = re.compile(
@@ -270,8 +323,8 @@ def _matrix_row(cell: Mapping[str, Any]) -> tuple[str, str, str, bool]:
 
 def validate_workflow(manifest: Mapping[str, Any], text: str) -> None:
     """The workflow matrix must contain exactly the manifest's cells, no more or fewer."""
-    schema = _schema_of(manifest)
-    if schema == SCHEMA:
+    route = _route(manifest)
+    if route == "legacy":
         expected = sorted((c["python"], c["profile"], c["core_file"], c["require_r3"])
                           for c in manifest["cells"])
         actual = sorted((c["python"], c["profile"], c["core_file"], c["require_r3"])

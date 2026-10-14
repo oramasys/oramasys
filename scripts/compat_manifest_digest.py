@@ -1,11 +1,15 @@
 """Validate a schema-3 compatibility manifest and print its canonical sha256 digest.
 
-Usage: compat_manifest_digest.py <manifest.json> [--expected-digest HEX] [--producer-ref SHA]
+Usage: compat_manifest_digest.py <manifest.json> [--expected-digest HEX]
+           [--producer-ref SHA] [--consumer-sha SHA] [--allow-unbound]
 
 Exit 0 and print the digest on success; exit 1 and print the stable ManifestError code
-on a refusal; exit 2 on a usage or read error. Lane files are read from the repository's
-requirements directory; the registry core pins come from the manifest's own
-``registry_profiles`` (each historical cell is still checked against its lane file).
+on a refusal; exit 2 on a usage or read error; exit 3 when the digest was printed but
+was not compared with a frozen value (pass --allow-unbound to accept that and exit 0;
+"UNBOUND: ..." is always written to stderr in that case). Duplicate JSON keys and
+NaN/Infinity are refused so the digest is unambiguous. Lane files are read from the
+repository's requirements directory; the registry core pins come from the manifest's
+own ``registry_profiles`` (each historical cell is still checked against its lane file).
 """
 from __future__ import annotations
 
@@ -32,22 +36,50 @@ def lane_files() -> dict[str, dict[str, str]]:
     }
 
 
-def parse_args(argv: list[str]) -> tuple[str, str | None, str | None] | None:
-    """Return (path, expected_digest, producer_ref), or None when usage is wrong."""
+VALUE_OPTIONS = ("--expected-digest", "--producer-ref", "--consumer-sha")
+EXIT_UNBOUND = 3
+
+
+def parse_args(argv: list[str]) -> tuple[str, dict[str, str | None], bool] | None:
+    """Return (path, value options, allow_unbound), or None when usage is wrong."""
     args = argv[1:]
-    options = {"--expected-digest": None, "--producer-ref": None}
+    options: dict[str, str | None] = dict.fromkeys(VALUE_OPTIONS)
+    allow_unbound = False
     positional: list[str] = []
     while args:
         item = args.pop(0)
-        if item in options:
+        if item == "--allow-unbound":
+            allow_unbound = True
+        elif item in options:
             if not args:
                 return None
             options[item] = args.pop(0)
-            continue
-        positional.append(item)
+        else:
+            positional.append(item)
     if len(positional) != 1:
         return None
-    return positional[0], options["--expected-digest"], options["--producer-ref"]
+    return positional[0], options, allow_unbound
+
+
+def _reject_constant(name: str) -> None:
+    """json parse_constant hook: NaN/Infinity are not valid manifest values."""
+    raise ManifestError(f"non-finite number {name} is not allowed")
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """json object_pairs_hook: refuse an object that repeats a key."""
+    keys = [key for key, _ in pairs]
+    duplicates = sorted({key for key in keys if keys.count(key) > 1})
+    if duplicates:
+        raise ManifestError(f"duplicate JSON keys {duplicates}")
+    return dict(pairs)
+
+
+def load_manifest(path: str) -> dict:
+    """Read a manifest strictly: no duplicate keys, no NaN/Infinity."""
+    text = Path(path).read_text(encoding="utf-8")
+    return json.loads(text, parse_constant=_reject_constant,
+                      object_pairs_hook=_no_duplicate_keys)
 
 
 def main(argv: list[str]) -> int:
@@ -56,20 +88,26 @@ def main(argv: list[str]) -> int:
     if parsed is None:
         print(__doc__, file=sys.stderr)
         return 2
-    path, expected, producer_ref = parsed
+    path, options, allow_unbound = parsed
+    expected = options["--expected-digest"]
     try:
-        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+        manifest = load_manifest(path)
         pins = dict(manifest.get("registry_profiles", {}))
-        ref = producer_ref or manifest["producer_registry"]["ref"]
+        ref = options["--producer-ref"] or manifest["producer_registry"]["ref"]
         validate_manifest(manifest, core_pins=pins, lane_files=lane_files(),
-                          producer_ref=ref, expected_digest=expected)
+                          producer_ref=ref, expected_digest=expected,
+                          consumer_sha=options["--consumer-sha"])
+        digest = canonical_digest(manifest)
     except ManifestError as error:
         print(f"{error.code}: {error}", file=sys.stderr)
         return 1
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         print(f"unreadable manifest: {error}", file=sys.stderr)
         return 2
-    print(canonical_digest(manifest))
+    print(digest)
+    if expected is None:
+        print("UNBOUND: digest not compared with a frozen value", file=sys.stderr)
+        return 0 if allow_unbound else EXIT_UNBOUND
     return 0
 
 

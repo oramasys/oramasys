@@ -99,9 +99,61 @@ def test_schema2_relabelled_copy_is_refused() -> None:
 
 
 def test_script_prints_the_canonical_digest() -> None:
-    result = run_script(str(DATA))
+    result = run_script(str(DATA), "--allow-unbound")
     assert result.returncode == 0
     assert result.stdout.strip() == canonical_digest(load())
+    assert "UNBOUND: digest not compared with a frozen value" in result.stderr
+
+
+def test_script_without_expected_digest_exits_3_unless_allowed() -> None:
+    result = run_script(str(DATA))
+    assert result.returncode == 3
+    assert result.stdout.strip() == canonical_digest(load())
+    assert "UNBOUND: digest not compared with a frozen value" in result.stderr
+
+
+def test_script_bound_digest_exits_0_without_unbound_notice() -> None:
+    result = run_script(str(DATA), "--expected-digest", canonical_digest(load()))
+    assert result.returncode == 0
+    assert "UNBOUND" not in result.stderr
+
+
+def test_script_consumer_sha_is_bound() -> None:
+    good = run_script(str(DATA), "--allow-unbound", "--consumer-sha", load()["consumer"]["sha"])
+    assert good.returncode == 0
+    bad = run_script(str(DATA), "--allow-unbound", "--consumer-sha", "0" * 40)
+    assert bad.returncode == 1
+    assert "manifest-consumer-mismatch" in bad.stderr
+
+
+@pytest.mark.parametrize("raw", [
+    '{"a": NaN}', '{"a": Infinity}', '{"a": 1, "a": 2}',
+])
+def test_script_refuses_ambiguous_json(tmp_path: Path, raw: str) -> None:
+    path = tmp_path / "m.json"
+    path.write_text(raw, encoding="utf-8")
+    result = run_script(str(path), "--allow-unbound")
+    assert result.returncode == 1
+    assert "manifest-invalid" in result.stderr
+
+
+def test_script_lone_surrogate_in_unvalidated_section_is_stable_error(tmp_path: Path) -> None:
+    text = DATA.read_text(encoding="utf-8").replace('"seam-positive-modules-collected"',
+                                                     '"\\ud800"')
+    path = tmp_path / "m.json"
+    path.write_text(text, encoding="utf-8")
+    result = run_script(str(path), "--allow-unbound")
+    assert result.returncode == 1
+    assert "manifest-invalid" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_data_pins_differ_from_candidates_and_core_pin_is_registry_bound() -> None:
+    producers = load()["producers"]
+    for role, entry in producers.items():
+        if role != "grant-authority":
+            assert entry["production_pin"] != entry["candidate"]
+    assert producers["neutral-mechanics"]["production_pin"] == CORE_PINS["production"]
 
 
 def test_script_exit_codes_for_digest_mismatch(tmp_path: Path) -> None:
@@ -115,7 +167,7 @@ def test_script_exit_code_for_unknown_schema(tmp_path: Path) -> None:
     bad["schema"] = 9
     path = tmp_path / "m.json"
     path.write_text(json.dumps(bad), encoding="utf-8")
-    result = run_script(str(path))
+    result = run_script(str(path), "--allow-unbound")
     assert result.returncode == 1
     assert "manifest-schema-unknown" in result.stderr
 
@@ -125,7 +177,7 @@ def test_script_exit_code_for_invalid_manifest(tmp_path: Path) -> None:
     bad["cells"] = bad["cells"][:-1]
     path = tmp_path / "m.json"
     path.write_text(json.dumps(bad), encoding="utf-8")
-    result = run_script(str(path))
+    result = run_script(str(path), "--allow-unbound")
     assert result.returncode == 1
     assert "manifest-invalid" in result.stderr
 

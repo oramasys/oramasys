@@ -9,9 +9,19 @@ The frozen value is supplied externally as `expected_digest` (validator) or
 `scripts/compat_manifest_digest.py <file> --expected-digest <hex>`. Only schema 3 may be digest-bound.
 Digest of the file as committed in this lane: recorded in the lane report, not here (any edit changes it).
 
-## Verified inputs (from the lane brief)
+## Transcribed inputs (format-checked only unless stated)
 Consumer, three producer candidates, phylax candidate (composition only, no production pin,
 `declared_dependency` false), three production pins, registry ref, historical cells (copied from schema 2).
+Fields bound to an external anchor (exactly these):
+- `producer_registry.ref` == the workflow checkout's producer ref.
+- `registry_profiles.*` == the registry core pins; historical `cells[*].core_sha` == registry pin and the lane file content.
+- `producers.neutral-mechanics.production_pin` == registry `production` core pin.
+- `consumer.sha` == the caller's `consumer_sha` (validator keyword / `--consumer-sha`), only when supplied.
+- Whole file == frozen digest, only when `expected_digest` / `--expected-digest` is supplied.
+Format-checked only (full SHA, not all zeros, differs from the candidate unless `candidate_equals_pin: true`;
+no external anchor exists, none invented): `producers.endpoint-policy.production_pin`,
+`producers.hardware-eligibility.production_pin`, and every `candidate`. A `declared_dependency: false`
+producer must not carry `production_pin`.
 
 ## PROVISIONAL fields (shape required by the validator; values not verifiable from the repo)
 - `cells[final-producers].min_passed` = 360: copied from the historical floor; the real floor needs a run.

@@ -22,6 +22,18 @@ ROLES = {"neutral-mechanics": "a", "endpoint-policy": "b", "hardware-eligibility
          "grant-authority": "d"}
 
 
+def producers(candidates: dict) -> dict:
+    """Producer entries: distinct pins, the core producer's bound to the registry pin."""
+    out = {}
+    for role, sha in candidates.items():
+        entry = {"candidate": sha, "declared_dependency": role != "grant-authority"}
+        if role != "grant-authority":
+            entry["production_pin"] = ("1" * 40 if role != "neutral-mechanics"
+                                       else CORE_PINS["production"])
+        out[role] = entry
+    return out
+
+
 def v3() -> dict:
     """Build a valid schema-3 manifest from the committed schema-2 one."""
     base = copy.deepcopy(load())
@@ -34,8 +46,7 @@ def v3() -> dict:
         "producer_registry": base["producer_registry"],
         "cells": base["cells"] + final,
         "consumer": {"repository": "oramasys/oramasys", "sha": "e" * 40},
-        "producers": {role: {"candidate": sha, "declared_dependency": role != "grant-authority"}
-                      for role, sha in candidates.items()},
+        "producers": producers(candidates),
         "registry_profiles": dict(CORE_PINS),
         "artifacts": {"install_mode": "wheel"},
         "environments": {"gating": "ubuntu"},
@@ -62,12 +73,22 @@ def test_schema2_manifest_still_validates_unchanged() -> None:
 
 
 def test_unknown_schema_is_refused_with_stable_code() -> None:
-    for bad in (1, 4, "3", None, True):
+    for bad in (1, 4):
         manifest = v3()
         manifest["schema"] = bad
         with pytest.raises(ManifestError) as info:
             check3(manifest)
         assert info.value.code == "manifest-schema-unknown"
+
+
+def test_non_int_schema_takes_the_original_schema2_path() -> None:
+    """Non-int schemas are not "unknown": the untouched schema-2 path refuses them."""
+    for bad in ("3", None, True):
+        manifest = v3()
+        manifest["schema"] = bad
+        with pytest.raises(ManifestError) as info:
+            check3(manifest)
+        assert info.value.code == "manifest-invalid"
 
 
 def test_schema3_relabelled_as_schema2_is_rejected() -> None:
@@ -132,6 +153,18 @@ def test_canonical_digest_is_key_order_independent_and_content_sensitive() -> No
         declared_dependency=True)),
     ("composition with production pin", lambda m: m["producers"]["grant-authority"].update(
         production_pin="1" * 40)),
+    ("pin zeroed", lambda m: m["producers"]["endpoint-policy"].update(production_pin="0" * 40)),
+    ("pin deleted", lambda m: m["producers"]["endpoint-policy"].pop("production_pin")),
+    ("pin equals candidate", lambda m: m["producers"]["endpoint-policy"].update(
+        production_pin=m["producers"]["endpoint-policy"]["candidate"])),
+    ("equal flag but differ", lambda m: m["producers"]["endpoint-policy"].update(
+        candidate_equals_pin=True)),
+    ("equal flag not bool", lambda m: m["producers"]["endpoint-policy"].update(
+        candidate_equals_pin="yes")),
+    ("composition equal flag", lambda m: m["producers"]["grant-authority"].update(
+        candidate_equals_pin=True)),
+    ("core pin differs from registry", lambda m: m["producers"]["neutral-mechanics"].update(
+        production_pin="7" * 40)),
     ("missing producer role", lambda m: m["producers"].pop("hardware-eligibility")),
     ("consumer short sha", lambda m: m["consumer"].update(sha="abc")),
     ("registry profile drift", lambda m: m["registry_profiles"].update(production="0" * 40)),
@@ -145,6 +178,41 @@ def test_schema3_rejects(name: str, change) -> None:
     change(manifest)
     with pytest.raises(ManifestError):
         check3(manifest)
+
+
+def test_pin_equal_to_candidate_allowed_with_explicit_flag() -> None:
+    manifest = v3()
+    entry = manifest["producers"]["endpoint-policy"]
+    entry.update(production_pin=entry["candidate"], candidate_equals_pin=True)
+    check3(manifest)
+
+
+def test_core_producer_pin_is_bound_to_registry_production_pin() -> None:
+    check3(v3())
+
+
+def test_consumer_sha_is_bound() -> None:
+    manifest = v3()
+    check3(manifest, consumer_sha="e" * 40)
+    with pytest.raises(ManifestError) as info:
+        check3(manifest, consumer_sha="f" * 40)
+    assert info.value.code == "manifest-consumer-mismatch"
+
+
+def test_consumer_sha_cannot_bind_schema2() -> None:
+    with pytest.raises(ManifestError) as info:
+        validate_manifest(load(), core_pins=CORE_PINS, lane_files=lane_shas(),
+                          producer_ref=load()["producer_registry"]["ref"], consumer_sha="e" * 40)
+    assert info.value.code == "manifest-consumer-mismatch"
+
+
+def test_canonical_digest_refuses_nan_and_lone_surrogate() -> None:
+    for bad in (float("nan"), "\ud800"):
+        manifest = v3()
+        manifest["artifacts"]["x"] = bad
+        with pytest.raises(ManifestError) as info:
+            canonical_digest(manifest)
+        assert info.value.code == "manifest-invalid"
 
 
 def test_workflow_validated_against_schema3_cells() -> None:
