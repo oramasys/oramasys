@@ -71,7 +71,8 @@ def verify_identity(plan, consumer_wheel=None, consumer_provenance=None, *,
         raise ValueError("consumer wheel and provenance required")
     wheel = Path(consumer_wheel).resolve()
     provenance = _plan.load_json(consumer_provenance)
-    digest = hashlib.file_digest(wheel.open("rb"), "sha256").hexdigest()
+    with wheel.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if not isinstance(provenance, dict) or provenance.get("source_commit") != plan["consumer"]["commit"] or provenance.get("wheel_sha256") != digest:
         raise ValueError("consumer source or wheel digest mismatch")
     getter = distribution_getter or importlib.metadata.distribution
