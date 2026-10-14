@@ -7,6 +7,11 @@ operator requests the exact ``enabled`` value below. This process opens only a
 read-only verifier and owns only its shutdown callback; it never opens an
 issuer authority or falls back to privileged operations.
 
+Phylax is delivered only through the opt-in extra: ``pip install 'oramasys[grant-serving]'``.
+A default install is Phylax-free; with the flag set and no Phylax installed the process stays up,
+``/health`` reports ``grants: unavailable`` and the log names ``phylax_not_installed``. Check
+``/health`` for ``grants: ready`` rather than assuming the flag took effect.
+
 Configuration names paths and labels only:
 
     ORAMA_GRANT_SERVING       exact "enabled" to request grant-backed serving

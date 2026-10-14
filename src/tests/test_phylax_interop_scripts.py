@@ -227,3 +227,21 @@ def test_the_manifest_workflow_ref_is_a_constant_equal_to_the_ci_registry_ref() 
     assert set(producer_refs()["ci.yml"]) == {constants[0]}
     assert '--producer-ref "$PRODUCER_REGISTRY_REF"' in text
     assert "docs-candidate" not in text, "no decorative checkout: nothing reads it"
+
+
+def test_the_grant_serving_extra_delivers_exactly_the_pinned_phylax_and_only_as_an_extra() -> None:
+    """Delivery is opt-in and bound to the one pin; a default install stays Phylax-free."""
+    import tomllib
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    extra = project["optional-dependencies"]["grant-serving"]
+    assert extra == [f"oramasys-phylax @ git+{URL}@{PIN}"]
+    assert not any("phylax" in dep.lower() for dep in project["dependencies"])
+    assert not any("phylax" in dep.lower() for dep in project["optional-dependencies"]["dev"])
+
+
+def test_the_interop_job_installs_through_the_extra_not_a_second_command() -> None:
+    """CI must exercise the delivery surface itself."""
+    text = (WORKFLOWS / "grant-composition-interop.yml").read_text(encoding="utf-8")
+    assert "'.[dev,grant-serving]'" in text
+    assert "oramasys-phylax @" not in text

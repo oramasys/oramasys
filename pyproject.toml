@@ -25,6 +25,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Opt-in delivery of the Phylax verifier that grant-backed serving composes (DEC-Q-05).
+# Never a base dependency: a default install stays Phylax-free and grants stay disabled.
+# The commit must equal requirements/compatibility-phylax-verify-only.txt (a test enforces it).
+grant-serving = [
+    "oramasys-phylax @ git+https://github.com/oramasys/phylax.git@0c3e860749b3ff8f62e102679f1f415f8acf0a61",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
