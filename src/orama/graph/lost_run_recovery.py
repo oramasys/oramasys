@@ -64,7 +64,8 @@ def recover_lost_run(
     receipt is ever written, and every caller that returns normally returns that receipt. The takeover
     is a compare-and-set on the lease epoch, so a stale snapshot cannot overwrite a newer epoch. It does
     not serialize the full recovery: a later takeover can fence an earlier recoverer before its terminal
-    write. A loser with no visible receipt gets ``LeaseFenced``, the documented retryable outcome.
+    write. A loser with no visible receipt gets ``LeaseFenced``, the documented retryable outcome. Other
+    ``ValueError`` causes (for example the immutable step-limit charge) are real errors and propagate unchanged.
 
     A retry after a recoverer died between steps advances the epoch once more. That is safe: each
     advance only fences a dead or obsolete recoverer, accounting recovery is idempotent per epoch and
