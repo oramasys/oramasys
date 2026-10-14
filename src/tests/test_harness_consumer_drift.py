@@ -97,3 +97,52 @@ def test_cli_distinguishes_a_git_error_from_a_refusal(tmp_path: Path) -> None:
     repo, _consumer, harness = _repo_with(tmp_path, "scripts/tool.py")
     assert guard.main(["x", "0" * 40, harness, "--repo", str(repo)]) == 2
     assert guard.main(["x", "only-one-arg"]) == 2
+
+
+def _commit_all(repo: Path, message: str) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_a_gitlink_change_is_not_hidden_by_a_user_diff_configuration(tmp_path: Path) -> None:
+    """diff.ignoreSubmodules=all must not suppress a committed submodule pointer change."""
+    repo, consumer, _harness = _repo_with(tmp_path, "scripts/tool.py")
+    consumer = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{'a' * 40},src/orama/vendored")
+    _git(repo, "commit", "-qm", "gitlink")  # no `add -A`: the gitlink has no work-tree entry
+    harness = _git(repo, "rev-parse", "HEAD")
+    paths = guard.changed_paths(str(repo), consumer, harness)
+    assert paths == ["src/orama/vendored"]
+    assert not guard.permitted(guard.classify(paths))
+
+
+def test_unusual_allowed_filenames_are_read_canonically(tmp_path: Path) -> None:
+    """Quotes, spaces and non-ASCII names under allowed prefixes are allowed, never misparsed."""
+    repo, consumer, _harness = _repo_with(tmp_path, "scripts/tool.py")
+    consumer = _git(repo, "rev-parse", "HEAD")
+    names = ['scripts/with space.py', 'scripts/quote"d.py', "scripts/caf\u00e9.py", "src/tests/tab\tname.py"]
+    for name in names:
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("z = 3\n")
+    harness = _commit_all(repo, "unusual names")
+    paths = guard.changed_paths(str(repo), consumer, harness)
+    assert sorted(paths) == sorted(names)
+    result = guard.classify(paths)
+    assert guard.permitted(result) and sorted(result["allowed"]) == sorted(names)
+
+
+def test_a_newline_in_a_runtime_filename_is_still_refused(tmp_path: Path) -> None:
+    """A path crafted to split across lines cannot launder a forbidden change."""
+    repo, consumer, _harness = _repo_with(tmp_path, "scripts/tool.py")
+    consumer = _git(repo, "rev-parse", "HEAD")
+    nasty = "src/orama/bad\nscripts/looks_allowed.py"
+    target = repo / nasty
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("w = 1\n")
+    harness = _commit_all(repo, "newline name")
+    paths = guard.changed_paths(str(repo), consumer, harness)
+    assert paths == [nasty]
+    assert not guard.permitted(guard.classify(paths))

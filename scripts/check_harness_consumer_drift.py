@@ -6,7 +6,9 @@ Qualification tests the consumer at C using the harness at H. That is only sound
 ``git diff C..H`` touches nothing the consumer's runtime depends on. Allowed paths are the
 requirements, scripts, workflows and tests. Anything under ``src/orama/``, ``pyproject.toml`` or
 any path not listed is refused, which forces C to be re-selected and the freeze recomputed.
-Prints a JSON verdict (C, H, the classified paths). Exit 0 allowed, 1 refused, 2 usage or git error.
+Compares COMMITTED C and H only; it says nothing about checkout cleanliness, so the final runner
+must also check staged and untracked contamination. Prints a JSON verdict (C, H, the classified
+paths). Exit 0 allowed, 1 refused, 2 usage or git error.
 """
 from __future__ import annotations
 
@@ -39,14 +41,21 @@ def permitted(classified: dict[str, list[str]]) -> bool:
 
 
 def changed_paths(repo: str, consumer: str, harness: str) -> list[str]:
-    """Return the paths that differ between two commits (renames reported as both sides)."""
+    """Return the canonical changed-path inventory between two commits.
+
+    The inventory must not depend on local presentation or configuration: NUL-delimited names
+    (no quoting, no newline splitting), submodule changes never ignored even when the user's
+    ``diff.ignoreSubmodules`` says otherwise, no rename folding, no external diff or textconv.
+    """
     done = subprocess.run(
-        ["git", "-C", repo, "diff", "--name-only", "--no-renames", f"{consumer}..{harness}"],
-        capture_output=True, text=True, check=False,
+        ["git", "-C", repo, "-c", "diff.ignoreSubmodules=none", "-c", "diff.renames=false",
+         "-c", "core.quotePath=false", "diff", "--name-only", "-z", "--no-renames",
+         "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", f"{consumer}..{harness}"],
+        capture_output=True, check=False,
     )
     if done.returncode != 0:
-        raise RuntimeError(f"git diff failed: {done.stderr.strip()[:200]}")
-    return [line for line in done.stdout.splitlines() if line]
+        raise RuntimeError(f"git diff failed: {done.stderr.decode('utf-8', 'replace').strip()[:200]}")
+    return [name.decode("utf-8", "surrogateescape") for name in done.stdout.split(b"\0") if name]
 
 
 def main(argv: Sequence[str]) -> int:
