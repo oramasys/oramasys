@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(
     reason="needs POSIX SIGKILL and signal.pause",
 )
 
-SRC_DIR = str(Path(__file__).resolve().parents[1])
+SRC_DIR = str(Path(__file__).resolve().parents[2])
 DEADLINE_SECONDS = 15.0
 
 CHILD = textwrap.dedent(
