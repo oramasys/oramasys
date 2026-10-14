@@ -48,14 +48,25 @@ class AgateAdapter:
     ``observed_at``/``collector`` identity to them) supplies both through
     these injected callables. See ``agate.evidence.FitEvidence``.
 
-    ``fit_validity`` is an evidence-freshness window, not an authorization
-    claim: a fit verdict is a pure function of policy + the hardware observed
-    at assessment time, so it has no revocation concept of its own (see
-    ``is_current`` below) -- but ``admit_artifact()`` requires every allowed
-    owner decision to carry a real expiry so a stale assessment cannot be
-    reused indefinitely across a long-lived admission decision. Re-admission
-    on an actual hardware or policy change is a revalidation trigger
-    (contract §4), handled by the admission layer re-calling
+    ``fit_validity`` is how long a fit DECISION may be relied on after it was
+    made; it is not an authorization claim and it says nothing about how old
+    the measurement was. A fit verdict is a pure function of policy + the
+    hardware observed at assessment time, so it has no revocation concept of
+    its own (see ``is_current`` below) -- but ``admit_artifact()`` requires
+    every allowed owner decision to carry a real expiry so a stale assessment
+    cannot be reused indefinitely across a long-lived admission decision.
+
+    ``max_observation_age`` is the freshness of the MEASUREMENT: observed
+    evidence older than this is refused (``evidence_stale``) and evidence
+    stamped ahead of this clock beyond a small skew is refused
+    (``evidence_future_dated``) before anything is assessed. A decision's
+    expiry is also capped by ``observed_at + max_observation_age`` so a
+    decision can never outlive the measurement it rests on. Agate binds the
+    timestamp to the observation but does not judge its age; admission policy
+    about age belongs here, with the layer that makes the admission claim.
+
+    Re-admission on an actual hardware or policy change is a revalidation
+    trigger (contract §4), handled by the admission layer re-calling
     ``admit_artifact()``, not by this expiry alone.
     """
 
@@ -65,19 +76,56 @@ class AgateAdapter:
     evidence_provider: Callable[[AdmissionContext, Any], Any]
     clock: Clock = field(default=lambda: datetime.now(UTC))
     fit_validity: timedelta = field(default_factory=lambda: timedelta(minutes=5))
+    max_observation_age: timedelta = field(default_factory=lambda: timedelta(minutes=5))
+
+    # Collector clocks are not ours: tolerate this much skew before calling evidence future-dated.
+    _FUTURE_SKEW = timedelta(seconds=60)
 
     def assess(self, context: AdmissionContext) -> OwnerDecision:
-        """Map the real fit verdict and evidence class onto an OwnerDecision."""
+        """Map the real fit verdict and evidence class onto an OwnerDecision.
+
+        Observed evidence that is stale or future-dated is refused before it is assessed.
+        """
         observation = self.observation_provider(context)
         evidence = self.evidence_provider(context, observation)
+        now = self.clock()
+        observed_at = (
+            getattr(evidence, "observed_at", None)
+            if getattr(evidence, "classification", None) == "observed"
+            else None
+        )
+        if observed_at is not None:
+            age = now - observed_at
+            if age < -self._FUTURE_SKEW:
+                return self._refusal(context, evidence, "evidence_future_dated")
+            if age > self.max_observation_age:
+                return self._refusal(context, evidence, "evidence_stale")
         decision = self.assess_fit(self.policy, context.model, observation, evidence)
+        expires_at: datetime | None = None
+        if decision.feasible:
+            expires_at = now + self.fit_validity
+            if observed_at is not None:
+                expires_at = min(expires_at, observed_at + self.max_observation_age)
         return OwnerDecision(
             owner="agate",
             allowed=decision.feasible,
             reason_code=decision.reason_code,
             decision_ref=f"agate:{context.run_id}:{context.model}",
-            expires_at=self.clock() + self.fit_validity if decision.feasible else None,
+            expires_at=expires_at,
             evidence_class=decision.evidence_class,
+            overridable=False,
+        )
+
+    @staticmethod
+    def _refusal(context: AdmissionContext, evidence: Any, reason_code: str) -> OwnerDecision:
+        """A non-overridable refusal that never reached Agate's fit assessment."""
+        return OwnerDecision(
+            owner="agate",
+            allowed=False,
+            reason_code=reason_code,
+            decision_ref=f"agate:{context.run_id}:{context.model}",
+            expires_at=None,
+            evidence_class=getattr(evidence, "classification", "derived"),
             overridable=False,
         )
 
