@@ -214,3 +214,138 @@ def test_validation_does_not_mutate_its_input() -> None:
     before = copy.deepcopy(r)
     validate_receipt(r, mandatory_scenarios=MANDATORY)
     assert r == before
+
+
+def _codes(r: dict) -> list[str]:
+    """Validate against the mandatory list and return the codes."""
+    return validate_receipt(r, mandatory_scenarios=MANDATORY)
+
+
+def _prob(**over: object) -> dict:
+    """A well-formed calibrated probability mapping with overrides."""
+    base = {"value": 0.02, "estimator_version": "e1", "calibration_method": "holdout",
+            "sample_count": 400, "uncertainty": [0.01, 0.04]}
+    base.update(over)
+    return base
+
+
+def test_probability_calibration_fields_are_type_checked() -> None:
+    """Bad sample counts, uncertainties, blank strings and non-finite values stay uncalibrated."""
+    nan = float("nan")
+    inf = float("inf")
+    bad = [
+        {"sample_count": False}, {"sample_count": 0}, {"sample_count": nan},
+        {"sample_count": -3}, {"sample_count": 2.5}, {"sample_count": "400"},
+        {"uncertainty": False}, {"uncertainty": nan}, {"uncertainty": "wide"},
+        {"uncertainty": [0.1]}, {"uncertainty": [0.1, 0.2, 0.3]}, {"uncertainty": [0.5, 0.1]},
+        {"uncertainty": [nan, 0.1]}, {"uncertainty": ["a", "b"]}, {"uncertainty": 1.5},
+        {"uncertainty": [True, 1]},
+        {"estimator_version": "  "}, {"calibration_method": ""}, {"estimator_version": 3},
+        {"value": nan}, {"value": inf}, {"value": "0.02"},
+    ]
+    for over in bad:
+        r = good()
+        r["probability"] = _prob(**over)
+        assert "probability.uncalibrated" in _codes(r), over
+    r = good()
+    r["probability"] = _prob(uncertainty=0.05)
+    assert _codes(r) == []
+
+
+def test_authority_claims_are_found_recursively_by_key_name() -> None:
+    """Any authoriz* key, or a named authority key, with a truthy value is a claim."""
+    variants = [
+        lambda r: r.update(authorizes_effect=True),
+        lambda r: r.update(probability=_prob(authorizes=True)),
+        lambda r: r.update(meta={"inner": [{"may_dispatch": 1}]}),
+        lambda r: r.update(Gate_Override="yes"),
+        lambda r: r.update(approves=True),
+        lambda r: r.update(authority=True),
+        lambda r: r.update(Authorization_Level=3),
+    ]
+    for mutate in variants:
+        r = good()
+        mutate(r)
+        assert "probability.authorizes" in _codes(r)
+    r = good()
+    r["authorizes_effect"] = False
+    r["meta"] = {"authority": None}
+    assert "probability.authorizes" not in _codes(r)
+
+
+def test_independence_is_compared_on_normalized_lineages() -> None:
+    """Case/whitespace variants collapse, blanks are ignored, bad claims overclaim."""
+    r = good()
+    r["evidence_lineages"] = ["Source-A", " source-a ", "SOURCE-A", "", "   "]
+    r["independent_witnesses"] = 2
+    assert "independence.overclaimed" in _codes(r)
+    r["independent_witnesses"] = 1
+    assert "independence.overclaimed" not in _codes(r)
+    for claim in (-1, 1.0, "2", True):
+        r["independent_witnesses"] = claim
+        assert "independence.overclaimed" in _codes(r), claim
+
+
+def test_blank_strings_count_as_missing() -> None:
+    """Whitespace-only values never satisfy a required string."""
+    r = good()
+    r["exposed_count"] = 0
+    r["zero_exposure_reason"] = "   "
+    assert "denominator.missing" in _codes(r)
+    r = good()
+    r["interaction_ids"] = ["  "]
+    r["trace_digest"] = "  "
+    assert "trace.missing" in _codes(r)
+    r = good()
+    r["interaction_ids"] = ["ok", ""]
+    assert "trace.missing" in _codes(r)
+    r = good()
+    r["manifest_sha256"] = "   "
+    assert "manifest.digest_missing" in _codes(r)
+    r = good()
+    r["population_kind"] = "development_agents"
+    r["correlation_groups"] = ["  "]
+    assert "correlation.missing" in _codes(r)
+    r = good()
+    r["scenario_id"] = "  "
+    assert "scenario.unknown" in _codes(r)
+
+
+def test_manifest_digest_must_be_lowercase_sha256_hex() -> None:
+    """A present digest of the wrong shape is not a digest."""
+    for bad in ("abc", "A" * 64, "g" * 64, "a" * 63, 7):
+        r = good()
+        r["manifest_sha256"] = bad
+        assert "manifest.digest_missing" in _codes(r), bad
+
+
+def test_exposed_cannot_exceed_total_and_field_types_are_checked() -> None:
+    """Denominator consistency, gates_weakened shape and non-str scenario ids."""
+    r = good()
+    r["exposed_count"] = 4
+    assert "denominator.inconsistent" in _codes(r)
+    r = good()
+    r["gates_weakened"] = "no"
+    codes = _codes(r)
+    assert "receipt.malformed_field" in codes
+    r["gates_weakened"] = {"a": 1}
+    assert "receipt.malformed_field" in _codes(r)
+    r["gates_weakened"] = ["ok", "  "]
+    assert "receipt.malformed_field" in _codes(r)
+    r["gates_weakened"] = []
+    assert _codes(r) == []
+    for sid in (["POP-CASCADE-1"], {"a": 1}, 5):
+        r = good()
+        r["scenario_id"] = sid
+        assert "scenario.unknown" in _codes(r)
+        validate_set([r], mandatory_scenarios=MANDATORY)
+
+
+def test_new_rules_do_not_mutate_input() -> None:
+    """Purity holds for nested authority scanning too."""
+    r = good()
+    r["meta"] = {"x": [{"authorizes": False}]}
+    r["probability"] = _prob()
+    before = copy.deepcopy(r)
+    _codes(r)
+    assert r == before

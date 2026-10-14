@@ -1,8 +1,8 @@
 """Interaction-risk assessment receipt validator (stdlib only, not wired anywhere).
 
 Encodes the measurement rules of the assessment contract (S-A1 section 18.3/18.4) as pure functions so a
-receipt can be judged structurally complete or incomplete mechanically. The assessment frame is layered
-threat coverage; impact-ranked attack paths; interaction-risk assessment (six modes + governance latency).
+receipt can be judged structurally complete or incomplete mechanically. The assessment frame is
+interaction-risk assessment (six modes + governance latency).
 
 Scope limits, stated once and binding:
   * It judges STRUCTURE and honesty of reporting only.
@@ -17,6 +17,8 @@ Rules (problem codes):
   denominator.missing       exposed count absent, or zero without a stated reason
   counts.missing            accepted/rejected/pending/unknown and the total must be present (unknown is never omitted)
   counts.inconsistent       the four counts do not sum to the interaction total
+  denominator.inconsistent  exposed count exceeds the interaction total
+  receipt.malformed_field   a field has the wrong container type or holds blank entries
   probability.uncalibrated  a probability needs estimator version, calibration method, sample count, uncertainty
   probability.authorizes    a probability (or any soft risk value) claims authority over a gate
   independence.overclaimed  independent witnesses claimed exceed distinct evidence lineages
@@ -26,6 +28,8 @@ Rules (problem codes):
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -46,12 +50,59 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _denominator_problem(receipt: Mapping[str, Any]) -> bool:
-    """Return True when the exposed count is absent, invalid, or zero without a reason."""
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_AUTHORITY_NAMES = frozenset({"authority", "may_dispatch", "gate_override", "approves"})
+
+
+def _nonblank(value: Any) -> bool:
+    """Return True for a string with at least one non-whitespace character."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _finite(value: Any) -> bool:
+    """Return True for a real, finite number (booleans are not numbers here)."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _nonblank_list(value: Any) -> bool:
+    """Return True for a non-empty list/tuple whose entries are all non-blank strings."""
+    return isinstance(value, (list, tuple)) and bool(value) and all(_nonblank(x) for x in value)
+
+
+def _is_authority_key(key: Any) -> bool:
+    """Return True when a key name asserts authority over a gate or dispatch."""
+    name = str(key).strip().lower()
+    return "authoriz" in name or name in _AUTHORITY_NAMES
+
+
+def _claims_authority(node: Any) -> bool:
+    """Return True when any nested mapping key claims authority with a truthy value."""
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            if _is_authority_key(key) and value:
+                return True
+            if _claims_authority(value):
+                return True
+    elif isinstance(node, (list, tuple)):
+        return any(_claims_authority(item) for item in node)
+    return False
+
+
+def _denominator_problems(receipt: Mapping[str, Any]) -> list[str]:
+    """Return denominator.* codes: absent/invalid/unexplained zero, or exceeding the total."""
     exposed = receipt.get("exposed_count")
-    if not isinstance(exposed, int) or isinstance(exposed, bool) or exposed < 0:
-        return True
-    return exposed == 0 and not receipt.get("zero_exposure_reason")
+    if not _is_int(exposed) or exposed < 0:
+        return ["denominator.missing"]
+    if exposed == 0 and not _nonblank(receipt.get("zero_exposure_reason")):
+        return ["denominator.missing"]
+    total = receipt.get("interaction_total")
+    if _is_int(total) and exposed > total:
+        return ["denominator.inconsistent"]
+    return []
 
 
 def _count_problems(receipt: Mapping[str, Any]) -> list[str]:
@@ -62,26 +113,75 @@ def _count_problems(receipt: Mapping[str, Any]) -> list[str]:
         not _is_int(counts.get(k)) or counts[k] < 0 for k in COUNT_KEYS
     ):
         return ["counts.missing"]
-    if not isinstance(total, int) or isinstance(total, bool):
+    if not _is_int(total):
         return ["counts.missing"]
     if sum(counts[k] for k in COUNT_KEYS) != total:
         return ["counts.inconsistent"]
     return []
 
 
+def _uncertainty_ok(value: Any) -> bool:
+    """Return True for a finite scalar in [0, 1] or a finite (lo, hi) pair with lo <= hi."""
+    if _finite(value):
+        return 0 <= value <= 1
+    if isinstance(value, (list, tuple)) and len(value) == 2 and all(_finite(x) for x in value):
+        return value[0] <= value[1]
+    return False
+
+
+def _calibrated(probability: Any) -> bool:
+    """Return True when a probability mapping carries a complete, well-typed calibration."""
+    if not isinstance(probability, Mapping):
+        return False
+    value = probability.get("value")
+    return (
+        _nonblank(probability.get("estimator_version"))
+        and _nonblank(probability.get("calibration_method"))
+        and _is_int(probability.get("sample_count"))
+        and probability["sample_count"] > 0
+        and _uncertainty_ok(probability.get("uncertainty"))
+        and (value is None or _finite(value))
+    )
+
+
 def _probability_problems(receipt: Mapping[str, Any]) -> list[str]:
     """Return probability.* problem codes; an absent probability is fine (unknown)."""
     problems: list[str] = []
     probability = receipt.get("probability")
-    if probability is not None:
-        if not isinstance(probability, Mapping) or any(
-            probability.get(k) in (None, "") for k in PROB_REQUIRED
-        ):
-            problems.append("probability.uncalibrated")
-        if isinstance(probability, Mapping) and probability.get("authorizes_dispatch"):
-            problems.append("probability.authorizes")
-    if receipt.get("risk_authorizes_dispatch"):
+    if probability is not None and not _calibrated(probability):
+        problems.append("probability.uncalibrated")
+    if _claims_authority(receipt):
         problems.append("probability.authorizes")
+    return problems
+
+
+def _independence_problems(receipt: Mapping[str, Any]) -> list[str]:
+    """Return independence.overclaimed when witnesses exceed normalized distinct lineages."""
+    claimed = receipt.get("independent_witnesses")
+    if claimed is None:
+        return []
+    lineages = receipt.get("evidence_lineages")
+    items = lineages if isinstance(lineages, (list, tuple)) else []
+    distinct = {x.strip().casefold() for x in items if _nonblank(x)}
+    if not _is_int(claimed) or claimed < 0 or claimed > len(distinct):
+        return ["independence.overclaimed"]
+    return []
+
+
+def _governance_problems(receipt: Mapping[str, Any]) -> list[str]:
+    """Return governance.weakened / receipt.malformed_field for gates_weakened."""
+    gates = receipt.get("gates_weakened")
+    if gates is None or gates == []:
+        return []
+    if isinstance(gates, str):
+        return ["receipt.malformed_field", "governance.weakened"] if gates.strip() else [
+            "receipt.malformed_field"
+        ]
+    if not isinstance(gates, (list, tuple)):
+        return ["receipt.malformed_field"]
+    problems = ["governance.weakened"] if gates else []
+    if not all(_nonblank(x) for x in gates):
+        problems.insert(0, "receipt.malformed_field")
     return problems
 
 
@@ -95,30 +195,32 @@ def validate_receipt(
 
     ``complete=False`` allows a pre-freeze exploratory receipt to omit the manifest digest.
     The result is a structural judgement only; it is never a risk value or an authorization.
+    The input is never mutated.
     """
     problems: list[str] = []
-    if mandatory_scenarios is not None and receipt.get("scenario_id") not in mandatory_scenarios:
+    sid = receipt.get("scenario_id")
+    if not _nonblank(sid) or (mandatory_scenarios is not None and sid not in mandatory_scenarios):
         problems.append("scenario.unknown")
-    if complete and not receipt.get("manifest_sha256"):
+    digest = receipt.get("manifest_sha256")
+    if digest is None:
+        digest_bad = complete
+    else:
+        digest_bad = not (isinstance(digest, str) and _SHA256_RE.fullmatch(digest))
+    if digest_bad:
         problems.append("manifest.digest_missing")
-    if not receipt.get("interaction_ids") and not receipt.get("trace_digest"):
+    if not _nonblank_list(receipt.get("interaction_ids")) and not _nonblank(
+        receipt.get("trace_digest")
+    ):
         problems.append("trace.missing")
-    if _denominator_problem(receipt):
-        problems.append("denominator.missing")
+    problems.extend(_denominator_problems(receipt))
     problems.extend(_count_problems(receipt))
     problems.extend(_probability_problems(receipt))
-
-    lineages = receipt.get("evidence_lineages")
-    claimed = receipt.get("independent_witnesses")
-    if claimed is not None:
-        distinct = len({str(x) for x in lineages}) if isinstance(lineages, (list, tuple)) else 0
-        if not _is_int(claimed) or claimed > distinct:
-            problems.append("independence.overclaimed")
-
-    if receipt.get("population_kind") == "development_agents" and not receipt.get("correlation_groups"):
+    problems.extend(_independence_problems(receipt))
+    if receipt.get("population_kind") == "development_agents" and not _nonblank_list(
+        receipt.get("correlation_groups")
+    ):
         problems.append("correlation.missing")
-    if receipt.get("gates_weakened"):
-        problems.append("governance.weakened")
+    problems.extend(_governance_problems(receipt))
     return problems
 
 
