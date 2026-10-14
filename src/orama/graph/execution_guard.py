@@ -356,11 +356,18 @@ class StepLedger:
         """Open an immediate write transaction guarded by the single-writer lock."""
         return _Immediate(self._db, self._lock)
 
-    def open_lease(self, run_id: str, *, max_steps: int) -> int:
+    def open_lease(
+        self, run_id: str, *, max_steps: int, expected_epoch: int | None = None
+    ) -> int:
         """Take (or take over) the lease; returns the new epoch, fencing older holders.
 
         Steps already used stay charged across a take-over: a new holder never gets a
         fresh allowance for the same run.
+
+        ``expected_epoch`` makes the take-over a compare-and-set: it succeeds only if the
+        current epoch is exactly that value, otherwise ``LeaseFenced`` is raised and nothing
+        changes. It prevents a stale snapshot from overwriting a newer epoch; it does not lock the
+        full recovery sequence, so a later takeover can fence an earlier holder before it finishes.
         """
         if (
             isinstance(max_steps, bool)
@@ -372,6 +379,8 @@ class StepLedger:
         with self._tx() as db:
             self._assert_run_not_terminal(db, run_id)
             row = db.execute("SELECT epoch, used FROM leases WHERE run_id = ?", (run_id,)).fetchone()
+            if expected_epoch is not None and (row is None or int(row[0]) != expected_epoch):
+                raise LeaseFenced(run_id)
             if row is None:
                 db.execute(
                     "INSERT INTO leases (run_id, epoch, max_steps, used) VALUES (?, 1, ?, 0)",
@@ -492,6 +501,17 @@ class StepLedger:
             0 if projection is None else int(projection[2]),
             cost_basis=self.LEGACY_COST_BASIS if limits is None else str(limits[0]),
         )
+
+    def lease_snapshot(self, run_id: str) -> tuple[int, int] | None:
+        """Return ``(current epoch, configured max_steps)`` or None when the run has no lease.
+
+        Read-only. It exists so takeover can decide whether a run was ever started WITHOUT calling
+        ``open_lease``, which would create a lease for any id it is given.
+        """
+        row = self._db.execute(
+            "SELECT epoch, max_steps FROM leases WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return None if row is None else (int(row[0]), int(row[1]))
 
     def events(self, run_id: str) -> tuple[AccountingEvent, ...]:
         """Return immutable schema-v2 accounting events in durable insertion order."""
