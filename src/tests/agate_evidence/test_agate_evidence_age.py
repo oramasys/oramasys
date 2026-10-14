@@ -14,15 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
-# Measured fit (agate.fit / agate.evidence) does not exist at the production Agate pin: this is a
-# candidate-only capability band, so the module skips there instead of erroring at collection.
-pytest.importorskip("agate", reason="real Agate not installed")
-pytest.importorskip("agate.evidence", reason="measured fit needs the candidate Agate (absent at the pin)")
-from agate import HardwareObservation, load_policy, load_profile_store  # noqa: E402
-from agate.evidence import FitEvidence  # noqa: E402
-from agate.fit import assess_fit  # noqa: E402
+# Measured fit (agate.fit / agate.evidence) is candidate-only: conftest.py collects this package
+# only where Agate provides it, so these imports are unconditional.
+from agate import HardwareObservation, load_policy, load_profile_store
+from agate.evidence import FitEvidence
+from agate.fit import assess_fit
 
-from orama.graph.adapters import AgateAdapter  # noqa: E402
+from orama.graph.adapters import AgateAdapter
 
 NOW = datetime(2026, 10, 14, 3, 0, tzinfo=UTC)
 FIVE = timedelta(minutes=5)
