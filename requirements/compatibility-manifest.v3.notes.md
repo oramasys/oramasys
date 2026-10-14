@@ -6,7 +6,7 @@ Status: exploratory (no digest has been frozen; no Linux run). The coordinator r
 The digest is NOT stored inside the manifest (that would be circular, and the validator rejects
 unknown top-level keys). `canonical_digest` = sha256 of canonical JSON (UTF-8, sorted keys, compact).
 The frozen value is supplied externally as `expected_digest` (validator) or
-`scripts/compat_manifest_digest.py <file> --expected-digest <hex>`. Only schema 3 may be digest-bound.
+`scripts/compat_manifest_digest.py <file> --producer-ref <workflow producer sha> --expected-digest <hex>`. Only schema 3 may be digest-bound.
 Digest of the file as committed in this lane: recorded in the lane report, not here (any edit changes it).
 
 ## Transcribed inputs (format-checked only unless stated)

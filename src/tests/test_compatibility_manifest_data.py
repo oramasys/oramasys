@@ -36,6 +36,8 @@ def check(manifest: dict, **kw) -> None:
 def run_script(*args: str) -> subprocess.CompletedProcess:
     """Run the digest script in a subprocess and capture its output."""
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    if "--producer-ref" not in args and args and not args[0].startswith("-"):
+        args = (*args, "--producer-ref", next(iter({r for v in producer_refs().values() for r in v})))
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True,
                           text=True, check=False, cwd=ROOT, env=env)
 
@@ -196,6 +198,20 @@ def test_script_exit_code_for_invalid_manifest(tmp_path: Path) -> None:
     result = run_script(str(path), "--allow-unbound")
     assert result.returncode == 1
     assert "manifest-invalid" in result.stderr
+
+
+def test_script_requires_an_external_producer_ref() -> None:
+    """Without --producer-ref the registry ref would be compared with itself."""
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    result = subprocess.run([sys.executable, str(SCRIPT), str(DATA), "--allow-unbound"],
+                            capture_output=True, text=True, check=False, cwd=ROOT, env=env)
+    assert result.returncode == 1
+    assert "--producer-ref is required" in result.stderr
+
+
+def test_script_refuses_a_producer_ref_that_differs_from_the_registry() -> None:
+    result = run_script(str(DATA), "--allow-unbound", "--producer-ref", "0" * 40)
+    assert result.returncode == 1
 
 
 def test_script_usage_error_is_exit_2() -> None:

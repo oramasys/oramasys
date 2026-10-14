@@ -1,7 +1,10 @@
 """Validate a schema-3 compatibility manifest and print its canonical sha256 digest.
 
-Usage: compat_manifest_digest.py <manifest.json> [--expected-digest HEX]
-           [--producer-ref SHA] [--consumer-sha SHA] [--allow-unbound]
+Usage: compat_manifest_digest.py <manifest.json> --producer-ref SHA
+           [--expected-digest HEX] [--consumer-sha SHA] [--allow-unbound]
+
+--producer-ref is the workflow's own producer SHA; the manifest's registry ref is
+compared against it, so a manifest can never vouch for its own producer.
 
 Exit 0 and print the digest on success; exit 1 and print the stable ManifestError code
 on a refusal; exit 2 on a usage or read error; exit 3 when the digest was printed but
@@ -114,7 +117,9 @@ def main(argv: list[str]) -> int:
         if not isinstance(profiles, dict) or not isinstance(registry, dict):
             raise ManifestError("schema-3 registry data must be objects")
         pins = dict(profiles)
-        ref = options["--producer-ref"] or registry.get("ref")
+        ref = options["--producer-ref"]
+        if ref is None:
+            raise ManifestError("--producer-ref is required to bind the registry ref")
         validate_manifest(manifest, core_pins=pins, lane_files=lane_files(),
                           producer_ref=ref, expected_digest=expected,
                           consumer_sha=options["--consumer-sha"])
