@@ -2,6 +2,8 @@
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from orama.api.authz import authenticated_control_plane_principal, install_authz
@@ -31,19 +33,48 @@ _log = logging.getLogger(__name__)
 # 409 is reserved for definitive ledger answers, i.e. the consumption refusals.
 
 
+GRANT_CAPABILITY_STATES = ("disabled", "ready", "unavailable")
+
+
 def create_app(
     *,
     runner: GraphRunner | None = None,
     compiled_graph: object | None = None,
     adjustment_consumer: AdjustmentGrantConsumer | None = None,
+    grant_capability: str | None = None,
+    grant_cleanup: Callable[[], None] | None = None,
 ) -> FastAPI:
     """Build the API with an explicit graph runner; absent admission refuses work.
 
     ``adjustment_consumer`` is the only way grants can be spent. Without one the
     adjustment route refuses every request, so an unwired deployment is inert by
     construction rather than by omission.
+
+    ``grant_capability`` is the non-sensitive composition state reported by
+    ``/health``. Only ``ready`` carries a consumer. ``grant_cleanup`` belongs to
+    the composition root that opened a managed verifier; it releases retained
+    read resources at shutdown and does not expose issuer operations to the API.
     """
-    app = FastAPI(title="oramasys", version="2.0.0-alpha.1")
+    state = grant_capability if grant_capability is not None else (
+        "ready" if adjustment_consumer is not None else "disabled"
+    )
+    if state not in GRANT_CAPABILITY_STATES:
+        raise ValueError(f"unknown grant capability state {state!r}")
+    if (state == "ready") != (adjustment_consumer is not None):
+        raise ValueError("grant capability 'ready' requires exactly a wired consumer")
+    if grant_cleanup is not None and state != "ready":
+        raise ValueError("grant cleanup requires a ready capability")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        """Release the composition-owned verifier after serving has stopped."""
+        try:
+            yield
+        finally:
+            if grant_cleanup is not None:
+                await asyncio.to_thread(grant_cleanup)
+
+    app = FastAPI(title="oramasys", version="2.0.0-alpha.1", lifespan=lifespan)
     install_authz(app)
     active_runner = runner or UnconfiguredGraphRunner()
     active_graph = graph if compiled_graph is None else compiled_graph
@@ -111,8 +142,8 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict:
-        """Report process availability without revealing admission configuration."""
-        return {"status": "ok", "version": "2.0.0-alpha.1"}
+        """Report process availability and non-sensitive grant composition state."""
+        return {"status": "ok", "version": "2.0.0-alpha.1", "grants": state}
 
     return app
 

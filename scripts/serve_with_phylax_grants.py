@@ -1,65 +1,91 @@
-"""Composition root: serve Oramasys with Phylax's grant verifier injected.
+"""Composition root: serve Oramasys with Phylax's managed verifier injected.
 
 This is the one place that imports both packages. Neither library may import the
-other: Oramasys defines the verifier port and carries no cryptography, Phylax
-issues and verifies and never sees a balance. A process that needs adjustments
-runs this entry point (or one shaped like it); a process that does not run
-``orama.api.server`` as before and every grant stays denied.
+other: Oramasys defines the verifier port and carries no cryptography, while
+Phylax owns issuance and verification. Grant-backed serving is off unless the
+operator requests the exact ``enabled`` value below. This process opens only a
+read-only verifier and owns only its shutdown callback; it never opens an
+issuer authority or falls back to privileged operations.
 
-Configuration names PATHS and FILE NAMES only. Secrets are read from private
-files by Phylax's ``FileSeedProvider`` and never from the environment:
+Configuration names paths and labels only:
 
+    ORAMA_GRANT_SERVING       exact "enabled" to request grant-backed serving
     ORAMA_LEDGER_PATH         SQLite ledger shared with the run controller
-    PHYLAX_STATE_DIR          durable Phylax stores (created 0700)
-    PHYLAX_SEED_ROOT          0700 directory of 0600 hex seed files
-    PHYLAX_KEY_ID             active issuer key id
-    PHYLAX_SEED_REF           file name of the issuer seed inside SEED_ROOT
-    PHYLAX_P5_SECRET_REF      file name of the P5 secret inside SEED_ROOT
+    PHYLAX_STATE_DIR          existing private Phylax verifier state directory
     PHYLAX_VERIFIER_ID        optional label recorded in every receipt
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
 from orama.api.authz import resolve_bind_host
 from orama.api.server import create_app
 from orama.graph.execution_guard import StepLedger
-from orama.graph.grant_verifier import AdjustmentGrantConsumer
-from phylax import GrantAuthorityConfig, open_grant_authority
+from orama.graph.grant_verifier import AdjustmentGrantConsumer, AdjustmentGrantVerifier
 
-_REQUIRED = (
+_log = logging.getLogger("orama.serve")
+
+ENABLE_VARIABLE = "ORAMA_GRANT_SERVING"
+ENABLED = "enabled"
+_REQUIRED_WHEN_ENABLED = (
     "ORAMA_LEDGER_PATH",
     "PHYLAX_STATE_DIR",
-    "PHYLAX_SEED_ROOT",
-    "PHYLAX_KEY_ID",
-    "PHYLAX_SEED_REF",
-    "PHYLAX_P5_SECRET_REF",
 )
+ManagedVerifier = tuple[AdjustmentGrantVerifier, Callable[[], None]]
+VerifierOpener = Callable[[Mapping[str, str]], ManagedVerifier]
 
 
-def build_app(environ: Mapping[str, str]) -> FastAPI:
-    """Build the API with the Phylax verifier injected; refuse on missing config."""
-    missing = [name for name in _REQUIRED if not environ.get(name, "").strip()]
-    if missing:
-        raise SystemExit(f"missing configuration: {', '.join(missing)}")
-    authority = open_grant_authority(
-        GrantAuthorityConfig(
+def open_phylax_verifier(environ: Mapping[str, str]) -> ManagedVerifier:
+    """Open Phylax's read-only verifier and return its explicit close callback."""
+    from phylax import GrantVerifierConfig, open_grant_verifier
+
+    verifier: Any = open_grant_verifier(
+        GrantVerifierConfig(
             state_dir=Path(environ["PHYLAX_STATE_DIR"]),
-            seed_root=Path(environ["PHYLAX_SEED_ROOT"]),
-            key_id=environ["PHYLAX_KEY_ID"],
-            seed_ref=environ["PHYLAX_SEED_REF"],
-            p5_secret_ref=environ["PHYLAX_P5_SECRET_REF"],
             verifier_id=environ.get("PHYLAX_VERIFIER_ID", "phylax-primary"),
         )
     )
+    close = getattr(verifier, "close", None)
+    if not callable(close):
+        raise RuntimeError("Phylax verifier does not expose lifecycle cleanup")
+    return verifier, close
+
+
+def close_resources(verifier_close: Callable[[], None], ledger: StepLedger) -> None:
+    """Close verifier and ledger even when verifier shutdown reports a failure."""
+    try:
+        verifier_close()
+    finally:
+        ledger.close()
+
+
+def build_app(
+    environ: Mapping[str, str], *, open_verifier: VerifierOpener = open_phylax_verifier
+) -> FastAPI:
+    """Build a disabled, ready or unavailable grant capability without fallback."""
+    if environ.get(ENABLE_VARIABLE) != ENABLED:
+        return create_app(grant_capability="disabled")
+    missing = [name for name in _REQUIRED_WHEN_ENABLED if not environ.get(name, "").strip()]
+    if missing:
+        raise SystemExit(f"missing configuration: {', '.join(missing)}")
+    try:
+        verifier, close = open_verifier(environ)
+    except Exception as error:  # noqa: BLE001 - public state is only unavailable
+        _log.warning("grant verifier unavailable", extra={"reason": type(error).__name__})
+        return create_app(grant_capability="unavailable")
     ledger = StepLedger(Path(environ["ORAMA_LEDGER_PATH"]))
-    consumer = AdjustmentGrantConsumer(ledger, authority.verifier_adapter())
-    return create_app(adjustment_consumer=consumer)
+    return create_app(
+        adjustment_consumer=AdjustmentGrantConsumer(ledger, verifier),
+        grant_capability="ready",
+        grant_cleanup=lambda: close_resources(close, ledger),
+    )
 
 
 def main() -> None:
