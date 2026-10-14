@@ -180,7 +180,8 @@ def _check_producers(manifest: Mapping[str, Any], core_pins: Mapping[str, str]) 
         required = {"candidate", "declared_dependency"}
         _need(isinstance(entry, Mapping) and required <= set(entry) <= allowed,
               f"producer {role}: unexpected keys")
-        _need(_full_sha(entry["candidate"]), f"producer {role}: candidate must be a full SHA")
+        _need(_full_sha(entry["candidate"]) and entry["candidate"] != ZERO_SHA,
+              f"producer {role}: candidate must be a real full SHA")
         _need(entry["declared_dependency"] is (role != COMPOSITION_ROLE),
               f"producer {role}: declared_dependency is wrong for its role")
         _check_pin(role, entry, core_pins)
@@ -216,9 +217,15 @@ def _check_v3_extras(manifest: Mapping[str, Any]) -> None:
               f"{name} must be a non-empty mapping")
     for name in ("required_capabilities", "disabled_capabilities"):
         value = manifest[name]
-        _need(isinstance(value, list) and bool(value) and len(set(value)) == len(value)
+        _need(isinstance(value, list) and bool(value)
               and all(isinstance(v, str) and v for v in value),
               f"{name} must be a non-empty list of unique strings")
+        _need(len(set(value)) == len(value),
+              f"{name} must be a non-empty list of unique strings")
+    profiles = manifest["registry_profiles"]
+    _need(isinstance(profiles, Mapping) and set(profiles) == set(PROFILES)
+          and all(_full_sha(value) for value in profiles.values()),
+          "registry_profiles must map every profile to a full SHA")
 
 
 def _validate_v3(
@@ -232,9 +239,9 @@ def _validate_v3(
     _need(set(manifest) == TOP_KEYS_V3, f"manifest keys must be exactly {sorted(TOP_KEYS_V3)}")
     _check_registry(manifest, producer_ref)
     _check_v3_extras(manifest)
-    candidates = _check_producers(manifest, core_pins)
     _need(manifest["registry_profiles"] == {p: core_pins[p] for p in PROFILES},
           "registry_profiles differ from the registry core pins")
+    candidates = _check_producers(manifest, core_pins)
     cells = manifest["cells"]
     _need(isinstance(cells, list), "cells must be a list")
     seen: set[tuple[str, str]] = set()

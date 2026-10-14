@@ -172,6 +172,22 @@ def test_script_exit_code_for_unknown_schema(tmp_path: Path) -> None:
     assert "manifest-schema-unknown" in result.stderr
 
 
+def test_script_checks_schema_before_reading_v3_fields(tmp_path: Path) -> None:
+    path = tmp_path / "unknown-schema.json"
+    path.write_text('{"schema": 9}', encoding="utf-8")
+    result = run_script(str(path), "--allow-unbound")
+    assert result.returncode == 1
+    assert "manifest-schema-unknown" in result.stderr
+    assert "unreadable manifest" not in result.stderr
+
+
+@pytest.mark.parametrize("option", ["--expected-digest", "--producer-ref", "--consumer-sha"])
+def test_script_rejects_option_as_missing_value(tmp_path: Path, option: str) -> None:
+    result = run_script(str(DATA), option, "--allow-unbound")
+    assert result.returncode == 2
+    assert "Usage:" in result.stderr
+
+
 def test_script_exit_code_for_invalid_manifest(tmp_path: Path) -> None:
     bad = load()
     bad["cells"] = bad["cells"][:-1]

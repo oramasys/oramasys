@@ -149,6 +149,7 @@ def test_canonical_digest_is_key_order_independent_and_content_sensitive() -> No
     ("candidate set missing role", lambda m: m["cells"][-1]["candidate_set"].pop("grant-authority")),
     ("candidate set extra role", lambda m: m["cells"][-1]["candidate_set"].update(x="1" * 40)),
     ("short candidate", lambda m: m["producers"]["endpoint-policy"].update(candidate="abc")),
+    ("zero candidate", lambda m: m["producers"]["endpoint-policy"].update(candidate="0" * 40)),
     ("composition declared as dependency", lambda m: m["producers"]["grant-authority"].update(
         declared_dependency=True)),
     ("composition with production pin", lambda m: m["producers"]["grant-authority"].update(
@@ -171,6 +172,9 @@ def test_canonical_digest_is_key_order_independent_and_content_sensitive() -> No
     ("contract ids incomplete", lambda m: m["contract_ids"].pop()),
     ("contract ids duplicated", lambda m: m["contract_ids"].append("COLLAB-HANDOFF-1")),
     ("empty disabled capabilities", lambda m: m.update(disabled_capabilities=[])),
+    ("unhashable required capability", lambda m: m.update(required_capabilities=[["nested"]])),
+    ("unhashable disabled capability", lambda m: m.update(disabled_capabilities=[{"nested": 1}])),
+    ("malformed registry profiles", lambda m: m.update(registry_profiles=[])),
     ("wrong producer repository", lambda m: m["producer_registry"].update(repository="x/y")),
 ])
 def test_schema3_rejects(name: str, change) -> None:
@@ -238,6 +242,16 @@ def test_workflow_rejects_unknown_schema() -> None:
     with pytest.raises(ManifestError) as info:
         validate_workflow(manifest, "")
     assert info.value.code == "manifest-schema-unknown"
+
+
+def test_workflow_rejects_unhashable_capabilities_as_manifest_error() -> None:
+    for field, value in (("required_capabilities", [["nested"]]),
+                         ("disabled_capabilities", [{"nested": 1}])):
+        manifest = v3()
+        manifest[field] = value
+        with pytest.raises(ManifestError) as info:
+            check3(manifest)
+        assert info.value.code == "manifest-invalid"
 
 
 def test_result_gate_allows_no_skips_for_final_producers_cells() -> None:

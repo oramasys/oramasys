@@ -17,7 +17,15 @@ import json
 import sys
 from pathlib import Path
 
-from orama.compat.manifest import ManifestError, canonical_digest, validate_manifest
+from orama.compat.manifest import (
+    CODE_SCHEMA_MISMATCH,
+    CODE_SCHEMA_UNKNOWN,
+    SCHEMA_V3,
+    SUPPORTED_SCHEMAS,
+    ManifestError,
+    canonical_digest,
+    validate_manifest,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 LANE_FILES = {
@@ -51,7 +59,7 @@ def parse_args(argv: list[str]) -> tuple[str, dict[str, str | None], bool] | Non
         if item == "--allow-unbound":
             allow_unbound = True
         elif item in options:
-            if not args:
+            if not args or args[0].startswith("--"):
                 return None
             options[item] = args.pop(0)
         else:
@@ -92,8 +100,21 @@ def main(argv: list[str]) -> int:
     expected = options["--expected-digest"]
     try:
         manifest = load_manifest(path)
-        pins = dict(manifest.get("registry_profiles", {}))
-        ref = options["--producer-ref"] or manifest["producer_registry"]["ref"]
+        if not isinstance(manifest, dict):
+            raise ManifestError("manifest root must be an object")
+        schema = manifest.get("schema")
+        if type(schema) is not int:
+            raise ManifestError("manifest schema must be an integer")
+        if schema not in SUPPORTED_SCHEMAS:
+            raise ManifestError("unsupported manifest schema", CODE_SCHEMA_UNKNOWN)
+        if schema != SCHEMA_V3:
+            raise ManifestError("digest command requires schema 3", CODE_SCHEMA_MISMATCH)
+        profiles = manifest.get("registry_profiles")
+        registry = manifest.get("producer_registry")
+        if not isinstance(profiles, dict) or not isinstance(registry, dict):
+            raise ManifestError("schema-3 registry data must be objects")
+        pins = dict(profiles)
+        ref = options["--producer-ref"] or registry.get("ref")
         validate_manifest(manifest, core_pins=pins, lane_files=lane_files(),
                           producer_ref=ref, expected_digest=expected,
                           consumer_sha=options["--consumer-sha"])
