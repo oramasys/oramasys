@@ -108,6 +108,13 @@ class AgateAdapter:
             if age >= self.max_observation_age:
                 return self._refusal(context, evidence, "evidence_stale")
         decision = self.assess_fit(self.policy, context.model, observation, evidence)
+        now = self.clock()
+        if (
+            decision.feasible
+            and observed_at is not None
+            and now - observed_at >= self.max_observation_age
+        ):
+            return self._refusal(context, evidence, "evidence_stale")
         expires_at: datetime | None = None
         if decision.feasible:
             expires_at = now + self.fit_validity

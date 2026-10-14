@@ -117,6 +117,38 @@ def test_the_age_limit_is_exclusive_so_no_decision_is_dead_on_arrival() -> None:
     assert just_under.allowed is True and just_under.expires_at == NOW + timedelta(seconds=1)
 
 
+def test_a_fit_that_crosses_the_freshness_deadline_is_refused() -> None:
+    """A slow assessment must not return an allowed decision that has already expired."""
+    model, profile_id = _model_and_profile()
+    observation = _observation(profile_id)
+    measured_at = NOW - FIVE + timedelta(milliseconds=1)
+    current_time = NOW
+
+    def clock() -> datetime:
+        return current_time
+
+    def assess_after_deadline(*args: object) -> object:
+        nonlocal current_time
+        current_time += timedelta(milliseconds=2)
+        return assess_fit(*args)
+
+    adapter = AgateAdapter(
+        policy=load_policy(),
+        assess_fit=assess_after_deadline,
+        observation_provider=lambda _context: observation,
+        evidence_provider=lambda _context, obs: FitEvidence.observed(
+            obs, collector="local-hardware-collector", clock=lambda: measured_at
+        ),
+        clock=clock,
+    )
+
+    decision = adapter.assess(SimpleNamespace(run_id="run-1", model=model))
+
+    assert decision.allowed is False
+    assert decision.reason_code == "evidence_stale"
+    assert decision.expires_at is None
+
+
 @pytest.mark.parametrize("field", ["max_observation_age", "fit_validity"])
 def test_a_non_positive_window_is_refused_at_construction(field: str) -> None:
     """A zero or negative window would produce already-expired allows."""
