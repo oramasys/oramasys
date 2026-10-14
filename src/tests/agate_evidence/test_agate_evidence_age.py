@@ -108,13 +108,20 @@ def test_a_decision_never_outlives_its_measurement_even_with_a_long_validity() -
     assert decision.expires_at == NOW + timedelta(minutes=9)
 
 
-def test_the_age_limit_is_inclusive_and_one_second_over_is_stale() -> None:
-    """Boundary: exactly the limit is fresh; one second more is stale."""
+def test_the_age_limit_is_exclusive_so_no_decision_is_dead_on_arrival() -> None:
+    """Exactly at the limit is stale (its expiry would equal now); one second under is fresh."""
     at_limit = _assess(measured_at=NOW - FIVE)
-    over = _assess(measured_at=NOW - FIVE - timedelta(seconds=1))
+    just_under = _assess(measured_at=NOW - FIVE + timedelta(seconds=1))
 
-    assert at_limit.allowed is True and at_limit.expires_at == NOW
-    assert over.allowed is False and over.reason_code == "evidence_stale"
+    assert at_limit.allowed is False and at_limit.reason_code == "evidence_stale"
+    assert just_under.allowed is True and just_under.expires_at == NOW + timedelta(seconds=1)
+
+
+@pytest.mark.parametrize("field", ["max_observation_age", "fit_validity"])
+def test_a_non_positive_window_is_refused_at_construction(field: str) -> None:
+    """A zero or negative window would produce already-expired allows."""
+    with pytest.raises(ValueError):
+        _assess(measured_at=NOW, **{field: timedelta(0)})
 
 
 def test_a_future_dated_measurement_is_refused() -> None:

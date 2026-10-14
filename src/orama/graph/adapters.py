@@ -81,6 +81,13 @@ class AgateAdapter:
     # Collector clocks are not ours: tolerate this much skew before calling evidence future-dated.
     _FUTURE_SKEW = timedelta(seconds=60)
 
+    def __post_init__(self) -> None:
+        """Refuse non-positive windows: they would yield decisions that are dead on arrival."""
+        if self.max_observation_age <= timedelta(0):
+            raise ValueError("max_observation_age must be positive")
+        if self.fit_validity <= timedelta(0):
+            raise ValueError("fit_validity must be positive")
+
     def assess(self, context: AdmissionContext) -> OwnerDecision:
         """Map the real fit verdict and evidence class onto an OwnerDecision.
 
@@ -98,7 +105,7 @@ class AgateAdapter:
             age = now - observed_at
             if age < -self._FUTURE_SKEW:
                 return self._refusal(context, evidence, "evidence_future_dated")
-            if age > self.max_observation_age:
+            if age >= self.max_observation_age:
                 return self._refusal(context, evidence, "evidence_stale")
         decision = self.assess_fit(self.policy, context.model, observation, evidence)
         expires_at: datetime | None = None
