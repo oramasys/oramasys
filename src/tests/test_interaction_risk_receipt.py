@@ -349,3 +349,42 @@ def test_new_rules_do_not_mutate_input() -> None:
     before = copy.deepcopy(r)
     _codes(r)
     assert r == before
+
+
+def test_the_frozen_scenario_list_is_the_default() -> None:
+    """Omitting the list must not fail open: an invented id is still rejected."""
+    r = good()
+    r["scenario_id"] = "POP-INVENTED-9"
+    assert "scenario.unknown" in validate_receipt(r)
+    r["scenario_id"] = "POP-CASCADE-1"
+    assert validate_receipt(r) == []
+
+
+def test_probabilities_and_their_intervals_must_lie_in_the_unit_interval() -> None:
+    """A value or interval bound outside [0, 1] is not a calibrated probability."""
+    for over in (
+        {"value": -0.2}, {"value": 5}, {"value": 1.0000001},
+        {"uncertainty": [-0.1, 0.2]}, {"uncertainty": [0.1, 1.5]},
+    ):
+        r = good()
+        r["probability"] = _prob(**over)
+        assert "probability.uncalibrated" in _codes(r), over
+    for over in ({"value": 0}, {"value": 1}, {"value": 0.02}, {"uncertainty": [0, 1]}):
+        r = good()
+        r["probability"] = _prob(**over)
+        assert _codes(r) == [], over
+
+
+def test_population_kind_must_be_present_and_supported() -> None:
+    """A missing or misspelled population must not silently skip its population checks."""
+    r = good()
+    del r["population_kind"]
+    assert "receipt.malformed_field" in _codes(r)
+    for bad in ("development-agent", "", "  ", None, 7, ["development_agents"]):
+        r = good()
+        r["population_kind"] = bad
+        assert "receipt.malformed_field" in _codes(r), bad
+    r = good()
+    r["population_kind"] = "development_agents"
+    r["correlation_groups"] = ["same-source"]
+    assert _codes(r) == []

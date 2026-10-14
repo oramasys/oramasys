@@ -18,7 +18,8 @@ Rules (problem codes):
   counts.missing            accepted/rejected/pending/unknown and the total must be present (unknown is never omitted)
   counts.inconsistent       the four counts do not sum to the interaction total
   denominator.inconsistent  exposed count exceeds the interaction total
-  receipt.malformed_field   a field has the wrong container type or holds blank entries
+  receipt.malformed_field   a field has the wrong container type or holds blank entries, or population_kind
+                            is missing or not a supported population
   probability.uncalibrated  a probability needs estimator version, calibration method, sample count, uncertainty
   probability.authorizes    a probability (or any soft risk value) claims authority over a gate
   independence.overclaimed  independent witnesses claimed exceed distinct evidence lineages
@@ -41,6 +42,7 @@ MANDATORY_SCENARIOS: tuple[str, ...] = (
     "POP-CAPABILITY-1",
     "POP-MOTIVE-1",
 )
+POPULATION_KINDS: tuple[str, ...] = ("development_agents", "runtime_workers")
 COUNT_KEYS = ("accepted", "rejected", "pending", "unknown")
 PROB_REQUIRED = ("estimator_version", "calibration_method", "sample_count", "uncertainty")
 
@@ -66,6 +68,11 @@ def _finite(value: Any) -> bool:
         and not isinstance(value, bool)
         and math.isfinite(value)
     )
+
+
+def _unit_interval(value: Any) -> bool:
+    """Return True for a finite number in [0, 1], the only range a probability may take."""
+    return _finite(value) and 0 <= value <= 1
 
 
 def _nonblank_list(value: Any) -> bool:
@@ -121,10 +128,10 @@ def _count_problems(receipt: Mapping[str, Any]) -> list[str]:
 
 
 def _uncertainty_ok(value: Any) -> bool:
-    """Return True for a finite scalar in [0, 1] or a finite (lo, hi) pair with lo <= hi."""
+    """Return True for a scalar in [0, 1] or an ordered (lo, hi) pair inside [0, 1]."""
     if _finite(value):
-        return 0 <= value <= 1
-    if isinstance(value, (list, tuple)) and len(value) == 2 and all(_finite(x) for x in value):
+        return _unit_interval(value)
+    if isinstance(value, (list, tuple)) and len(value) == 2 and all(_unit_interval(x) for x in value):
         return value[0] <= value[1]
     return False
 
@@ -140,7 +147,7 @@ def _calibrated(probability: Any) -> bool:
         and _is_int(probability.get("sample_count"))
         and probability["sample_count"] > 0
         and _uncertainty_ok(probability.get("uncertainty"))
-        and (value is None or _finite(value))
+        and (value is None or _unit_interval(value))
     )
 
 
@@ -198,8 +205,9 @@ def validate_receipt(
     The input is never mutated.
     """
     problems: list[str] = []
+    scenarios = MANDATORY_SCENARIOS if mandatory_scenarios is None else mandatory_scenarios
     sid = receipt.get("scenario_id")
-    if not _nonblank(sid) or (mandatory_scenarios is not None and sid not in mandatory_scenarios):
+    if not _nonblank(sid) or sid not in scenarios:
         problems.append("scenario.unknown")
     digest = receipt.get("manifest_sha256")
     if digest is None:
@@ -216,7 +224,10 @@ def validate_receipt(
     problems.extend(_count_problems(receipt))
     problems.extend(_probability_problems(receipt))
     problems.extend(_independence_problems(receipt))
-    if receipt.get("population_kind") == "development_agents" and not _nonblank_list(
+    population = receipt.get("population_kind")
+    if not _nonblank(population) or population not in POPULATION_KINDS:
+        problems.append("receipt.malformed_field")
+    elif population == "development_agents" and not _nonblank_list(
         receipt.get("correlation_groups")
     ):
         problems.append("correlation.missing")
