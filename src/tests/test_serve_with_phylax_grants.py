@@ -226,3 +226,122 @@ def test_composition_uses_no_issuer_import_or_secret_configuration_symbol() -> N
     }
     assert {"GrantAuthorityConfig", "open_grant_authority"}.isdisjoint(imported)
     assert not {"PHYLAX_SEED_ROOT", "PHYLAX_KEY_ID", "PHYLAX_SEED_REF", "PHYLAX_P5_SECRET_REF"} & literals
+
+
+def _enabled_environ(serving_module: ModuleType, tmp_path: Path) -> dict[str, str]:
+    """Return a complete enabled configuration pointing at temporary paths."""
+    return {
+        serving_module.ENABLE_VARIABLE: serving_module.ENABLED,
+        "ORAMA_LEDGER_PATH": str(tmp_path / "ledger.sqlite3"),
+        "PHYLAX_STATE_DIR": str(tmp_path / "phylax-state"),
+    }
+
+
+async def test_a_ledger_open_failure_closes_the_verifier_and_is_unavailable(
+    serving_module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The verifier must not leak, and the capability must not crash startup."""
+    closed = 0
+
+    def close() -> None:
+        nonlocal closed
+        closed += 1
+
+    def broken_ledger(_path: Path) -> None:
+        raise OSError("ledger path is unusable")
+
+    monkeypatch.setattr(serving_module, "StepLedger", broken_ledger)
+    app = serving_module.build_app(
+        _enabled_environ(serving_module, tmp_path),
+        open_verifier=lambda _environ: (StubVerifier(), close),
+    )
+    assert (await health(app))["grants"] == "unavailable"
+    assert closed == 1
+    response = await adjustment(app, "{}")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+
+
+async def test_a_failing_verifier_cleanup_still_closes_the_ledger_through_the_app(
+    serving_module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Shutdown errors surface, and the composition-created ledger is released regardless."""
+    created: list[StepLedger] = []
+
+    def tracking_ledger(path: Path) -> StepLedger:
+        created.append(StepLedger(path))
+        return created[-1]
+
+    def fail() -> None:
+        raise RuntimeError("verifier shutdown failed")
+
+    monkeypatch.setattr(serving_module, "StepLedger", tracking_ledger)
+    app = serving_module.build_app(
+        _enabled_environ(serving_module, tmp_path),
+        open_verifier=lambda _environ: (StubVerifier(), fail),
+    )
+    with pytest.raises(RuntimeError, match="verifier shutdown failed"):
+        async with app.router.lifespan_context(app):
+            pass
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0]._db.execute("SELECT 1")
+
+
+def test_the_default_opener_builds_only_a_verifier_config_and_needs_lifecycle_cleanup(
+    serving_module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The real opener passes state_dir and verifier_id only, and refuses a verifier with no close."""
+    seen: dict[str, Any] = {}
+
+    class FakeConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            seen["config"] = kwargs
+
+    class WithClose:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    class WithoutClose:
+        pass
+
+    module = ModuleType("phylax")
+    module.GrantVerifierConfig = FakeConfig  # type: ignore[attr-defined]
+    module.open_grant_verifier = lambda config: seen.setdefault("verifier", WithClose())  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "phylax", module)
+
+    environ = {"PHYLAX_STATE_DIR": str(tmp_path / "state"), "PHYLAX_VERIFIER_ID": "consumer-7"}
+    verifier, close = serving_module.open_phylax_verifier(environ)
+    assert set(seen["config"]) == {"state_dir", "verifier_id"}
+    assert seen["config"]["verifier_id"] == "consumer-7"
+    close()
+    assert verifier.closed == 1
+
+    module.open_grant_verifier = lambda config: WithoutClose()  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="lifecycle cleanup"):
+        serving_module.open_phylax_verifier(environ)
+
+
+def test_the_composition_never_names_issuer_authority_in_code() -> None:
+    """No import, name or attribute in the script refers to the issuer side."""
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    forbidden = {
+        "open_grant_authority", "GrantAuthorityConfig", "FileSeedProvider", "verifier_adapter",
+    }
+    used = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    } | {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    } | {
+        alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert forbidden.isdisjoint(used)
+    bare = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "phylax" for a in node.names)
+    ]
+    assert bare == [], "import the verifier names explicitly, never the whole package"

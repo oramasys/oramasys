@@ -66,6 +66,14 @@ def close_resources(verifier_close: Callable[[], None], ledger: StepLedger) -> N
         ledger.close()
 
 
+def _release_verifier(close: Callable[[], None]) -> None:
+    """Close a verifier that was opened but will not be wired; never raise from startup."""
+    try:
+        close()
+    except Exception as error:  # noqa: BLE001 - cleanup of an unused resource
+        _log.warning("verifier cleanup failed", extra={"reason": type(error).__name__})
+
+
 def build_app(
     environ: Mapping[str, str], *, open_verifier: VerifierOpener = open_phylax_verifier
 ) -> FastAPI:
@@ -80,7 +88,12 @@ def build_app(
     except Exception as error:  # noqa: BLE001 - public state is only unavailable
         _log.warning("grant verifier unavailable", extra={"reason": type(error).__name__})
         return create_app(grant_capability="unavailable")
-    ledger = StepLedger(Path(environ["ORAMA_LEDGER_PATH"]))
+    try:
+        ledger = StepLedger(Path(environ["ORAMA_LEDGER_PATH"]))
+    except Exception as error:  # noqa: BLE001 - a ledger that cannot open is "unavailable"
+        _log.warning("grant ledger unavailable", extra={"reason": type(error).__name__})
+        _release_verifier(close)
+        return create_app(grant_capability="unavailable")
     return create_app(
         adjustment_consumer=AdjustmentGrantConsumer(ledger, verifier),
         grant_capability="ready",
