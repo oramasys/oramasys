@@ -3,6 +3,7 @@
 This command produces machine-checkable fixture evidence only.  It never measures a
 live population, calculates a probability, approves a gate, or qualifies M1.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,7 +34,9 @@ def _write_trace(destination: Path, payload: dict[str, Any]) -> str:
     """Create one immutable trace file and return its content digest."""
     if destination.exists() or destination.is_symlink():
         raise FileExistsError("trace destination already exists")
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
     with destination.open("xb") as stream:
         stream.write(encoded)
         stream.flush()
@@ -68,16 +71,20 @@ def run(manifest_digest: str, coverage_digest: str, trace_dir: Path) -> dict[str
             "interaction_total": 1,
         }
         receipts.append(receipt)
-        scenarios.append({
-            "scenario_id": scenario_id,
-            "passed": True,
-            "denominator": 1,
-            "blocked": 1,
-            "unknowns": 0,
-            "trace_digest": trace_digest,
-            "limitations": [_LIMITATION],
-        })
-    report = validate_set(receipts, mandatory_scenarios=MANDATORY_SCENARIOS, complete=True)
+        scenarios.append(
+            {
+                "scenario_id": scenario_id,
+                "passed": True,
+                "denominator": 1,
+                "blocked": 1,
+                "unknowns": 0,
+                "trace_digest": trace_digest,
+                "limitations": [_LIMITATION],
+            }
+        )
+    report = validate_set(
+        receipts, mandatory_scenarios=MANDATORY_SCENARIOS, complete=True
+    )
     if any(report.values()):
         raise ValueError("synthetic receipt validation failed")
     return {
@@ -105,7 +112,9 @@ def main(argv: list[str] | None = None) -> int:
         if output.exists() or output.is_symlink():
             raise FileExistsError("output already exists")
         result = run(args.manifest_digest, args.coverage_digest, Path(args.trace_dir))
-        output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        output.write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         return 0
     except (OSError, ValueError, TypeError):
         print("scenario-evidence-refused", file=sys.stderr)

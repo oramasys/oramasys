@@ -1,4 +1,5 @@
 """Build identities are bound to clean source and compared without path disclosure."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -10,7 +11,9 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location("build_provenance", ROOT / "scripts/build_provenance.py")
+spec = importlib.util.spec_from_file_location(
+    "build_provenance", ROOT / "scripts/build_provenance.py"
+)
 assert spec and spec.loader
 tool = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = tool
@@ -46,11 +49,20 @@ def record(source):
 def test_record_has_only_source_and_build_identities(source):
     result = record(source)
     repo, commit, _, _ = source
-    assert set(result) == {"schema", "source_commit", "source_tree", "build_inputs",
-                           "source_date_epoch", "sdist_sha256", "wheel_sha256"}
+    assert set(result) == {
+        "schema",
+        "source_commit",
+        "source_tree",
+        "build_inputs",
+        "source_date_epoch",
+        "sdist_sha256",
+        "wheel_sha256",
+    }
     assert result["schema"] == 1 and result["source_commit"] == commit
     assert result["source_tree"] == git(repo, "rev-parse", "HEAD^{tree}")
-    assert result["source_date_epoch"] == int(git(repo, "show", "-s", "--format=%ct", "HEAD"))
+    assert result["source_date_epoch"] == int(
+        git(repo, "show", "-s", "--format=%ct", "HEAD")
+    )
     assert result["build_inputs"]["python_version"]
     assert str(repo.parent) not in json.dumps(result)
     assert "source.whl" not in json.dumps(result)
@@ -93,8 +105,17 @@ def test_artifacts_must_be_outside_source_and_distinct(source):
         tool.record(source[0], source[1], source[2], source[2])
 
 
-@pytest.mark.parametrize("field", ["source_commit", "source_tree", "source_date_epoch",
-                                  "build_inputs", "sdist_sha256", "wheel_sha256"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_commit",
+        "source_tree",
+        "source_date_epoch",
+        "build_inputs",
+        "sdist_sha256",
+        "wheel_sha256",
+    ],
+)
 def test_each_identity_mismatch_never_qualifies(source, tmp_path, capsys, field):
     first = record(source)
     second = json.loads(json.dumps(first))
@@ -105,7 +126,8 @@ def test_each_identity_mismatch_never_qualifies(source, tmp_path, capsys, field)
     else:
         second[field] = "0" * len(second[field])
     a, b = tmp_path / "private-first.json", tmp_path / "private-second.json"
-    a.write_text(json.dumps(first)); b.write_text(json.dumps(second))
+    a.write_text(json.dumps(first))
+    b.write_text(json.dumps(second))
     assert tool.main(["compare", str(a), str(b)]) == 1
     report = capsys.readouterr()
     assert json.loads(report.out)["reproducible"] is False
@@ -116,13 +138,31 @@ def test_each_identity_mismatch_never_qualifies(source, tmp_path, capsys, field)
 def test_cli_record_and_identical_compare(source, tmp_path, capsys):
     repo, commit, sdist, wheel = source
     output = tmp_path / "provenance.json"
-    assert tool.main(["record", "--source-repo", str(repo), "--source-commit", commit,
-                      "--sdist", str(sdist), "--wheel", str(wheel), "--output", str(output)]) == 0
+    assert (
+        tool.main(
+            [
+                "record",
+                "--source-repo",
+                str(repo),
+                "--source-commit",
+                commit,
+                "--sdist",
+                str(sdist),
+                "--wheel",
+                str(wheel),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
     assert tool.main(["compare", str(output), str(output)]) == 0
     assert json.loads(capsys.readouterr().out)["reproducible"] is True
 
 
-@pytest.mark.parametrize("raw", ['{}', '{"schema":1,"schema":1}', '[]', '{"schema":NaN}'])
+@pytest.mark.parametrize(
+    "raw", ["{}", '{"schema":1,"schema":1}', "[]", '{"schema":NaN}']
+)
 def test_invalid_records_exit_two_without_private_paths(tmp_path, capsys, raw):
     path = tmp_path / "private-record.json"
     path.write_text(raw)
@@ -131,20 +171,40 @@ def test_invalid_records_exit_two_without_private_paths(tmp_path, capsys, raw):
 
 
 def test_missing_record_and_missing_artifact_are_sanitized(source, tmp_path, capsys):
-    assert tool.main(["compare", str(tmp_path / "missing"), str(tmp_path / "missing")]) == 2
+    assert (
+        tool.main(["compare", str(tmp_path / "missing"), str(tmp_path / "missing")])
+        == 2
+    )
     repo, commit, sdist, _ = source
-    assert tool.main(["record", "--source-repo", str(repo), "--source-commit", commit,
-                      "--sdist", str(sdist), "--wheel", str(tmp_path / "missing"),
-                      "--output", str(tmp_path / "result")]) == 2
+    assert (
+        tool.main(
+            [
+                "record",
+                "--source-repo",
+                str(repo),
+                "--source-commit",
+                commit,
+                "--sdist",
+                str(sdist),
+                "--wheel",
+                str(tmp_path / "missing"),
+                "--output",
+                str(tmp_path / "result"),
+            ]
+        )
+        == 2
+    )
     assert str(tmp_path) not in capsys.readouterr().err
 
 
 def test_source_changed_while_hashing_is_refused(source, monkeypatch):
     original = tool._hash
+
     def changing_hash(path):
         result = original(path)
         (source[0] / "module.py").write_text("VALUE = 999\n")
         return result
+
     monkeypatch.setattr(tool, "_hash", changing_hash)
     with pytest.raises(tool.ProvenanceError):
         record(source)
@@ -156,7 +216,9 @@ def test_git_environment_cannot_redirect_source(source, monkeypatch):
 
 
 def test_private_version_is_refused(source, monkeypatch):
-    monkeypatch.setattr(tool.metadata, "version", lambda name: "1.0+/private/build/path")
+    monkeypatch.setattr(
+        tool.metadata, "version", lambda name: "1.0+/private/build/path"
+    )
     with pytest.raises(tool.ProvenanceError):
         record(source)
 
@@ -171,6 +233,22 @@ def test_invalid_build_epoch_is_refused(source, monkeypatch, epoch):
 def test_output_cannot_overwrite_artifact_or_enter_checkout(source):
     repo, commit, sdist, wheel = source
     for output in (wheel, repo / "result.json"):
-        assert tool.main(["record", "--source-repo", str(repo), "--source-commit", commit,
-                          "--sdist", str(sdist), "--wheel", str(wheel), "--output", str(output)]) == 2
+        assert (
+            tool.main(
+                [
+                    "record",
+                    "--source-repo",
+                    str(repo),
+                    "--source-commit",
+                    commit,
+                    "--sdist",
+                    str(sdist),
+                    "--wheel",
+                    str(wheel),
+                    "--output",
+                    str(output),
+                ]
+            )
+            == 2
+        )
     assert wheel.read_bytes() == b"synthetic wheel"

@@ -3,6 +3,7 @@
 Consumer verification requires both a wheel and its source/digest provenance. This is
 installation identity evidence, not a pip-check result or producer archive provenance.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -17,7 +18,9 @@ import sys
 import sysconfig
 
 # Explicit sibling loading also works under python -I, which excludes the script directory.
-_spec = importlib.util.spec_from_file_location("_final_set_plan", Path(__file__).with_name("final_set_install_plan.py"))
+_spec = importlib.util.spec_from_file_location(
+    "_final_set_plan", Path(__file__).with_name("final_set_install_plan.py")
+)
 _plan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_plan)
 
@@ -28,7 +31,11 @@ def _inside(path, root):
 
 def _distribution(entry, getter):
     dist = getter(entry["distribution"])
-    normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+
+    def normalize(name: str) -> str:
+        """Compare distribution names using Python package normalization."""
+        return re.sub(r"[-_.]+", "-", name).lower()
+
     if normalize(dist.metadata.get("Name", "")) != normalize(entry["distribution"]):
         raise ValueError("distribution name mismatch")
     text = dist.read_text("direct_url.json")
@@ -59,8 +66,17 @@ def _verify_import(entry, dist, importer, roots):
             raise ValueError("package search path outside installed site-packages")
 
 
-def verify_identity(plan, consumer_wheel=None, consumer_provenance=None, *,
-                    distribution_getter=None, importer=None, site_roots=None, cwd=None, isolated=None):
+def verify_identity(
+    plan,
+    consumer_wheel=None,
+    consumer_provenance=None,
+    *,
+    distribution_getter=None,
+    importer=None,
+    site_roots=None,
+    cwd=None,
+    isolated=None,
+):
     _plan.validate_structure(plan)
     if not (sys.flags.isolated if isolated is None else isolated):
         raise ValueError("python -I required")
@@ -73,28 +89,51 @@ def verify_identity(plan, consumer_wheel=None, consumer_provenance=None, *,
     provenance = _plan.load_json(consumer_provenance)
     with wheel.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if not isinstance(provenance, dict) or provenance.get("source_commit") != plan["consumer"]["commit"] or provenance.get("wheel_sha256") != digest:
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("source_commit") != plan["consumer"]["commit"]
+        or provenance.get("wheel_sha256") != digest
+    ):
         raise ValueError("consumer source or wheel digest mismatch")
     getter = distribution_getter or importlib.metadata.distribution
     importer = importer or importlib.import_module
-    roots = {Path(root).resolve() for root in (site_roots if site_roots is not None else
-             [sysconfig.get_path("purelib"), sysconfig.get_path("platlib")])}
+    roots = {
+        Path(root).resolve()
+        for root in (
+            site_roots
+            if site_roots is not None
+            else [sysconfig.get_path("purelib"), sysconfig.get_path("platlib")]
+        )
+    }
     verified = {}
     for role, entry in plan["producers"].items():
         dist, direct = _distribution(entry, getter)
         vcs = direct.get("vcs_info")
-        if direct.get("url") != entry["url"] or "archive_info" in direct or not isinstance(vcs, dict):
+        if (
+            direct.get("url") != entry["url"]
+            or "archive_info" in direct
+            or not isinstance(vcs, dict)
+        ):
             raise ValueError("producer lacks matching VCS evidence")
         if vcs.get("vcs") != "git" or vcs.get("commit_id") != entry["commit"]:
             raise ValueError("producer VCS commit mismatch")
         if "requested_revision" in vcs and vcs["requested_revision"] != entry["commit"]:
             raise ValueError("producer was not requested at the exact commit")
         _verify_import(entry, dist, importer, roots)
-        verified[role] = {"distribution": entry["distribution"], "module": entry["module"], "commit": entry["commit"], "evidence": "vcs"}
+        verified[role] = {
+            "distribution": entry["distribution"],
+            "module": entry["module"],
+            "commit": entry["commit"],
+            "evidence": "vcs",
+        }
     consumer = plan["consumer"]
     dist, direct = _distribution(consumer, getter)
     archive = direct.get("archive_info")
-    if direct.get("url") != wheel.as_uri() or "vcs_info" in direct or not isinstance(archive, dict):
+    if (
+        direct.get("url") != wheel.as_uri()
+        or "vcs_info" in direct
+        or not isinstance(archive, dict)
+    ):
         raise ValueError("consumer is not installed from the supplied wheel")
     hashes = archive.get("hashes", {})
     if not isinstance(hashes, dict):
@@ -103,9 +142,18 @@ def verify_identity(plan, consumer_wheel=None, consumer_provenance=None, *,
     if evidence != digest:
         raise ValueError("installed consumer wheel digest mismatch")
     _verify_import(consumer, dist, importer, roots)
-    return {"schema": 1, "verified": True, "producers": verified,
-            "consumer": {"distribution": consumer["distribution"], "module": consumer["module"],
-                         "source_commit": consumer["commit"], "wheel_sha256": digest, "evidence": "built-wheel"}}
+    return {
+        "schema": 1,
+        "verified": True,
+        "producers": verified,
+        "consumer": {
+            "distribution": consumer["distribution"],
+            "module": consumer["module"],
+            "source_commit": consumer["commit"],
+            "wheel_sha256": digest,
+            "evidence": "built-wheel",
+        },
+    }
 
 
 def main(argv=None):
@@ -115,9 +163,19 @@ def main(argv=None):
     parser.add_argument("--consumer-provenance")
     args = parser.parse_args(argv)
     try:
-        result = verify_identity(_plan.load_json(args.plan), args.consumer_wheel, args.consumer_provenance)
+        result = verify_identity(
+            _plan.load_json(args.plan), args.consumer_wheel, args.consumer_provenance
+        )
     except Exception:
-        print(json.dumps({"schema": 1, "verified": False, "classification": "identity-verification-failed"}))
+        print(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "verified": False,
+                    "classification": "identity-verification-failed",
+                }
+            )
+        )
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0

@@ -1,4 +1,5 @@
 """Deterministic qualification scenarios are scoped evidence, never acceptance."""
+
 from __future__ import annotations
 
 import hashlib
@@ -32,7 +33,9 @@ def test_runner_emits_each_frozen_scenario_with_bound_trace(tmp_path: Path) -> N
     assert result["scope"] == "deterministic-synthetic"
     assert result["manifest_digest"] == manifest
     assert result["coverage_digest"] == coverage
-    assert {item["scenario_id"] for item in result["scenarios"]} == set(tool.MANDATORY_SCENARIOS)
+    assert {item["scenario_id"] for item in result["scenarios"]} == set(
+        tool.MANDATORY_SCENARIOS
+    )
     assert result["complete"] is True
     for item in result["scenarios"]:
         trace = tmp_path / f"{item['scenario_id']}.json"
@@ -55,7 +58,9 @@ def test_runner_refuses_existing_trace_destination(tmp_path: Path) -> None:
         _tool().run("a" * 64, "b" * 64, tmp_path)
 
 
-def test_output_is_json_serializable_without_probability_or_authority(tmp_path: Path) -> None:
+def test_output_is_json_serializable_without_probability_or_authority(
+    tmp_path: Path,
+) -> None:
     result = _tool().run("a" * 64, "b" * 64, tmp_path)
     encoded = json.dumps(result, sort_keys=True)
     assert "probability" not in encoded

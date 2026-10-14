@@ -1,4 +1,5 @@
 """The coverage packet is consistent with the manifest and the repository, and is digest-bound."""
+
 from __future__ import annotations
 
 import copy
@@ -21,7 +22,8 @@ MANIFEST_PATH = ROOT / "requirements" / "compatibility-manifest.v3.json"
 
 def _load() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "validate_coverage_packet", ROOT / "scripts" / "validate_coverage_packet.py")
+        "validate_coverage_packet", ROOT / "scripts" / "validate_coverage_packet.py"
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules["validate_coverage_packet"] = module
@@ -39,7 +41,9 @@ AGATE_SHA256 = "ce0eed94041e191398516958b240fb3bb838255c3644eb63bec55508e7051edc
 
 def _partitioned_packet() -> dict:
     packet = copy.deepcopy(PACKET)
-    packet["required_modules"] = [m for m in packet["required_modules"] if m != HISTORICAL]
+    packet["required_modules"] = [
+        m for m in packet["required_modules"] if m != HISTORICAL
+    ]
     packet["historical_only_modules"] = [HISTORICAL]
     packet["required_setup_inputs"] = ["ORAMA_DOCS_V2_REGISTRY"]
     return packet
@@ -54,7 +58,9 @@ def evidence_repo(tmp_path: Path) -> Path:
 def test_trusted_fixture_bytes_and_exact_profile_ids() -> None:
     raw = (ROOT / AGATE_FIXTURE).read_bytes()
     assert hashlib.sha256(raw).hexdigest() == AGATE_SHA256
-    assert [p["profile_id"] for p in json.loads(raw)["profiles"]] == PACKET["agate_profiles"]
+    assert [p["profile_id"] for p in json.loads(raw)["profiles"]] == PACKET[
+        "agate_profiles"
+    ]
     assert PACKET["agate_profile_source"]["sha256"] == AGATE_SHA256
     assert tool.trusted_agate_profile_ids(ROOT) == PACKET["agate_profiles"]
     assert tool.discovered_historical_modules(ROOT) == [HISTORICAL]
@@ -62,21 +68,32 @@ def test_trusted_fixture_bytes_and_exact_profile_ids() -> None:
     assert _problems(_partitioned_packet()) == []
 
 
-@pytest.mark.parametrize("profiles", [
-    ["invented-a", "invented-b", "invented-c"],
-    ["mac-studio", "win-rtx3080", "invented-c"],
-    ["mac-studio", "win-rtx3080", "win-rtx3080"],
-])
-def test_same_cardinality_profile_substitutions_are_refused(profiles: list[str]) -> None:
+@pytest.mark.parametrize(
+    "profiles",
+    [
+        ["invented-a", "invented-b", "invented-c"],
+        ["mac-studio", "win-rtx3080", "invented-c"],
+        ["mac-studio", "win-rtx3080", "win-rtx3080"],
+    ],
+)
+def test_same_cardinality_profile_substitutions_are_refused(
+    profiles: list[str],
+) -> None:
     packet = _partitioned_packet()
     packet["agate_profiles"] = profiles
     assert any(p.startswith("agate_profiles") for p in _problems(packet))
 
 
-@pytest.mark.parametrize("key,value", [
-    ("repository", "not-agate"), ("path", "other.json"), ("commit", "0" * 40),
-    ("extra", "untrusted"), ("sha256", "0" * 64),
-])
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("repository", "not-agate"),
+        ("path", "other.json"),
+        ("commit", "0" * 40),
+        ("extra", "untrusted"),
+        ("sha256", "0" * 64),
+    ],
+)
 def test_profile_source_tuple_is_closed_and_exact(key: str, value: str) -> None:
     packet = _partitioned_packet()
     packet["agate_profile_source"][key] = value
@@ -95,12 +112,16 @@ def test_unreviewed_candidate_cannot_reanchor_the_profile_source() -> None:
     manifest = copy.deepcopy(MANIFEST)
     packet["agate_profile_source"]["commit"] = "0" * 40
     manifest["producers"]["hardware-eligibility"]["candidate"] = "0" * 40
-    assert any(p.startswith("agate_profile_source") for p in
-               tool.validate_packet(packet, manifest, ROOT))
+    assert any(
+        p.startswith("agate_profile_source")
+        for p in tool.validate_packet(packet, manifest, ROOT)
+    )
 
 
 @pytest.mark.parametrize("mutation", ["missing", "whitespace", "profile", "malformed"])
-def test_missing_or_changed_trusted_fixture_is_refused(evidence_repo: Path, mutation: str) -> None:
+def test_missing_or_changed_trusted_fixture_is_refused(
+    evidence_repo: Path, mutation: str
+) -> None:
     path = evidence_repo / AGATE_FIXTURE
     if mutation == "missing":
         path.unlink()
@@ -112,19 +133,31 @@ def test_missing_or_changed_trusted_fixture_is_refused(evidence_repo: Path, muta
         path.write_text(json.dumps(data))
     else:
         path.write_bytes(b"{")
-    assert any(p.startswith("agate profile fixture") for p in
-               tool.validate_packet(_partitioned_packet(), MANIFEST, evidence_repo))
+    assert any(
+        p.startswith("agate profile fixture")
+        for p in tool.validate_packet(_partitioned_packet(), MANIFEST, evidence_repo)
+    )
 
 
 def test_committed_partition_has_exact_historical_module() -> None:
     assert PACKET["historical_only_modules"] == [HISTORICAL]
     assert HISTORICAL not in PACKET["required_modules"]
     assert sorted(PACKET["required_modules"] + PACKET["historical_only_modules"]) == (
-        tool.discovered_modules(ROOT))
+        tool.discovered_modules(ROOT)
+    )
 
 
-@pytest.mark.parametrize("mutation", ["overlap", "required-duplicate", "historical-duplicate",
-                                      "missing", "wrong-historical", "non-list"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "overlap",
+        "required-duplicate",
+        "historical-duplicate",
+        "missing",
+        "wrong-historical",
+        "non-list",
+    ],
+)
 def test_module_partition_mutations_are_refused(mutation: str) -> None:
     packet = _partitioned_packet()
     if mutation == "overlap":
@@ -149,59 +182,104 @@ def test_new_nested_module_requires_explicit_partition(evidence_repo: Path) -> N
     path.parent.mkdir()
     path.write_text("def test_new(): pass\n")
     packet = _partitioned_packet()
-    assert any("modules" in p for p in tool.validate_packet(packet, MANIFEST, evidence_repo))
+    assert any(
+        "modules" in p for p in tool.validate_packet(packet, MANIFEST, evidence_repo)
+    )
     packet["required_modules"].append(relative)
     assert tool.validate_packet(packet, MANIFEST, evidence_repo) == []
 
 
-def test_historical_policy_is_read_literally_without_execution(evidence_repo: Path) -> None:
+def test_historical_policy_is_read_literally_without_execution(
+    evidence_repo: Path,
+) -> None:
     path = evidence_repo / "src/tests/core_gate/conftest.py"
-    path.write_text("raise RuntimeError('must not execute')\n"
-                    "_SEAM_ABSENT_ONLY = ['test_start_seam_absent.py']\n")
+    path.write_text(
+        "raise RuntimeError('must not execute')\n"
+        "_SEAM_ABSENT_ONLY = ['test_start_seam_absent.py']\n"
+    )
     assert tool.validate_packet(_partitioned_packet(), MANIFEST, evidence_repo) == []
 
 
-@pytest.mark.parametrize("policy", [
-    "_SEAM_ABSENT_ONLY = compute_modules()",
-    "_SEAM_ABSENT_ONLY = [None]",
-    "_SEAM_ABSENT_ONLY = ['../test_outside.py']",
-    "_SEAM_ABSENT_ONLY = ['test_start_seam_absent.py'] * 2",
-    "_SEAM_ABSENT_ONLY = []",
-    "# missing assignment",
-    "_SEAM_ABSENT_ONLY = [",
-])
-def test_malformed_historical_policy_fails_closed(evidence_repo: Path, policy: str) -> None:
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "_SEAM_ABSENT_ONLY = compute_modules()",
+        "_SEAM_ABSENT_ONLY = [None]",
+        "_SEAM_ABSENT_ONLY = ['../test_outside.py']",
+        "_SEAM_ABSENT_ONLY = ['test_start_seam_absent.py'] * 2",
+        "_SEAM_ABSENT_ONLY = []",
+        "# missing assignment",
+        "_SEAM_ABSENT_ONLY = [",
+    ],
+)
+def test_malformed_historical_policy_fails_closed(
+    evidence_repo: Path, policy: str
+) -> None:
     (evidence_repo / "src/tests/core_gate/conftest.py").write_text(policy)
-    assert any(p.startswith("historical_only_modules") for p in
-               tool.validate_packet(_partitioned_packet(), MANIFEST, evidence_repo))
+    assert any(
+        p.startswith("historical_only_modules")
+        for p in tool.validate_packet(_partitioned_packet(), MANIFEST, evidence_repo)
+    )
 
 
-@pytest.mark.parametrize("inputs", [[], ["ORAMA_REQUIRE_CORE_GATE"],
-                                   ["ORAMA_DOCS_V2_REGISTRY", "EXTRA"],
-                                   ["ORAMA_DOCS_V2_REGISTRY"] * 2, None])
+@pytest.mark.parametrize(
+    "inputs",
+    [
+        [],
+        ["ORAMA_REQUIRE_CORE_GATE"],
+        ["ORAMA_DOCS_V2_REGISTRY", "EXTRA"],
+        ["ORAMA_DOCS_V2_REGISTRY"] * 2,
+        None,
+    ],
+)
 def test_setup_inputs_are_exact_and_separate(inputs: object) -> None:
     packet = _partitioned_packet()
     packet["required_setup_inputs"] = inputs
     assert any(p.startswith("required_setup_inputs") for p in _problems(packet))
 
 
-@pytest.mark.parametrize("scenarios", [None, 1, "POP-CASCADE-1", {}, [],
-    [1, *PACKET["scenarios"][1:]], [None], [{}], [[]], [False], PACKET["scenarios"] * 2])
+@pytest.mark.parametrize(
+    "scenarios",
+    [
+        None,
+        1,
+        "POP-CASCADE-1",
+        {},
+        [],
+        [1, *PACKET["scenarios"][1:]],
+        [None],
+        [{}],
+        [[]],
+        [False],
+        PACKET["scenarios"] * 2,
+    ],
+)
 def test_malformed_scenarios_return_controlled_problems(scenarios: object) -> None:
     packet = _partitioned_packet()
     packet["scenarios"] = scenarios
     assert any(p.startswith("scenarios must equal") for p in _problems(packet))
 
 
-@pytest.mark.parametrize("key,value", [
-    ("packet_version", True), ("packet_version", False), ("packet_version", 1.0),
-    ("final_cell_skips_allowed", False), ("final_cell_skips_allowed", 0.0),
-])
-def test_packet_integer_fields_do_not_accept_booleans_or_floats(key: str, value: object) -> None:
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("packet_version", True),
+        ("packet_version", False),
+        ("packet_version", 1.0),
+        ("final_cell_skips_allowed", False),
+        ("final_cell_skips_allowed", 0.0),
+    ],
+)
+def test_packet_integer_fields_do_not_accept_booleans_or_floats(
+    key: str, value: object
+) -> None:
     packet = _partitioned_packet()
     packet[key] = value
-    expected = ("packet_version is not 1" if key == "packet_version"
-                else "final-producer cells must allow exactly zero skips")
+    expected = (
+        "packet_version is not 1"
+        if key == "packet_version"
+        else "final-producer cells must allow exactly zero skips"
+    )
     assert expected in _problems(packet)
 
 
@@ -210,15 +288,21 @@ def test_final_manifest_skip_policy_is_exact_integer_zero(value: object) -> None
     manifest = copy.deepcopy(MANIFEST)
     manifest["cells"][-1]["max_skipped"] = value
     assert "final-producer cells must allow exactly zero skips" in (
-        tool.validate_packet(_partitioned_packet(), manifest, ROOT))
+        tool.validate_packet(_partitioned_packet(), manifest, ROOT)
+    )
 
 
-def test_cli_malformed_scenarios_are_a_controlled_refusal(tmp_path: Path, capsys) -> None:
+def test_cli_malformed_scenarios_are_a_controlled_refusal(
+    tmp_path: Path, capsys
+) -> None:
     packet = _partitioned_packet()
     packet["scenarios"] = [1, *PACKET["scenarios"][1:]]
     path = tmp_path / "packet.json"
     path.write_text(json.dumps(packet))
-    assert tool.main(["validator", str(path), str(MANIFEST_PATH), "--repo", str(ROOT)]) == 1
+    assert (
+        tool.main(["validator", str(path), str(MANIFEST_PATH), "--repo", str(ROOT)])
+        == 1
+    )
     output = capsys.readouterr()
     assert output.out == ""
     assert "scenarios must equal" in output.err
@@ -229,7 +313,9 @@ def _problems(packet: object) -> list[str]:
     return tool.validate_packet(packet, MANIFEST, ROOT)
 
 
-def test_the_committed_packet_is_consistent_with_the_manifest_and_the_repository() -> None:
+def test_the_committed_packet_is_consistent_with_the_manifest_and_the_repository() -> (
+    None
+):
     """Profiles, scenarios, modules, gates, capabilities and skip policy all agree."""
     assert _problems(PACKET) == []
 
@@ -237,11 +323,15 @@ def test_the_committed_packet_is_consistent_with_the_manifest_and_the_repository
 def test_exactly_three_profiles_and_the_source_commit_is_the_agate_candidate() -> None:
     """The hardware profiles are those of the candidate Agate commit, and there are three."""
     assert PACKET["agate_profiles"] == ["mac-studio", "win-rtx3080", "win-rtx5080"]
-    assert PACKET["agate_profile_source"]["commit"] == (
-        MANIFEST["producers"]["hardware-eligibility"]["candidate"])
+    assert (
+        PACKET["agate_profile_source"]["commit"]
+        == (MANIFEST["producers"]["hardware-eligibility"]["candidate"])
+    )
     changed = copy.deepcopy(PACKET)
     changed["agate_profiles"] = changed["agate_profiles"][:2]
-    assert "agate_profiles must list exactly three distinct profile ids" in _problems(changed)
+    assert "agate_profiles must list exactly three distinct profile ids" in _problems(
+        changed
+    )
     changed = copy.deepcopy(PACKET)
     changed["agate_profile_source"]["commit"] = "0" * 40
     assert any(p.startswith("agate_profile_source") for p in _problems(changed))
@@ -249,7 +339,11 @@ def test_exactly_three_profiles_and_the_source_commit_is_the_agate_candidate() -
 
 def test_the_six_scenarios_are_exactly_the_frozen_mandatory_set() -> None:
     """A missing, extra or renamed scenario is refused."""
-    for mutate in (lambda s: s[:-1], lambda s: [*s, "POP-NEW-1"], lambda s: ["X", *s[1:]]):
+    for mutate in (
+        lambda s: s[:-1],
+        lambda s: [*s, "POP-NEW-1"],
+        lambda s: ["X", *s[1:]],
+    ):
         changed = copy.deepcopy(PACKET)
         changed["scenarios"] = mutate(changed["scenarios"])
         assert any(p.startswith("scenarios must equal") for p in _problems(changed))

@@ -89,7 +89,7 @@ jobs:
       - name: Install the exact candidate set and prove identities
         run: |
           python -m venv "$RUNNER_TEMP/qualification-venv"
-          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip install --disable-pip-version-check "consumer[dev]"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip install --disable-pip-version-check "./consumer[dev]"
           "$RUNNER_TEMP/qualification-venv/bin/python" -m pip install --disable-pip-version-check --force-reinstall --no-deps "$RUNNER_TEMP/dist-one/"*.whl
           python scripts/final_set_install_plan.py emit requirements/final-producers-install-plan.v1.json requirements/compatibility-manifest.v3.json > "$RUNNER_TEMP/producers.json"
           export QUALIFICATION_PYTHON="$RUNNER_TEMP/qualification-venv/bin/python"

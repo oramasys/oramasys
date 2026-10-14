@@ -5,6 +5,7 @@ It is intentionally allowed to add only the bundle root for test helpers; it nev
 adds a runtime source directory.  A selected consumer source tree may be supplied
 only through ``ORAMA_QUALIFICATION_SOURCE_ROOT`` for static-inspection tests.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,8 +64,15 @@ def run(bundle: Path, junit: Path, collection: Path) -> int:
     sys.path.insert(0, str(bundle))
     plugin = _Collected()
     arguments = [
-        "-q", "--import-mode=importlib", "-o", "pythonpath=", "-p", "no:cacheprovider",
-        "--junitxml", str(junit), str(bundle / "src/tests"),
+        "-q",
+        "--import-mode=importlib",
+        "-o",
+        "pythonpath=",
+        "-p",
+        "no:cacheprovider",
+        "--junitxml",
+        str(junit),
+        str(bundle / "src/tests"),
     ]
     result = pytest.main(arguments, plugins=[plugin])
     collection.write_text(

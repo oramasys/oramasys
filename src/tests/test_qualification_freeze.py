@@ -1,4 +1,5 @@
 """A proposed digest is useful evidence but cannot confer operator acceptance."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -10,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def helper():
-    spec = importlib.util.spec_from_file_location("qualification_freeze", ROOT / "scripts/qualification_freeze.py")
+    spec = importlib.util.spec_from_file_location(
+        "qualification_freeze", ROOT / "scripts/qualification_freeze.py"
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -28,11 +31,15 @@ def test_proposal_never_claims_approval() -> None:
 def test_approved_record_binds_both_inputs_and_consumer() -> None:
     manifest, coverage = {"schema": 3}, {"packet_version": 1}
     record = helper().proposal(manifest, coverage, "a" * 40)
-    record.update(status="approved", approval_ref="operator-decision:synthetic-approval")
+    record.update(
+        status="approved", approval_ref="operator-decision:synthetic-approval"
+    )
     helper().verify(record, manifest, coverage, "a" * 40)
-    for m, p, c in [({"schema": 2}, coverage, "a" * 40),
-                    (manifest, {"packet_version": 2}, "a" * 40),
-                    (manifest, coverage, "b" * 40)]:
+    for m, p, c in [
+        ({"schema": 2}, coverage, "a" * 40),
+        (manifest, {"packet_version": 2}, "a" * 40),
+        (manifest, coverage, "b" * 40),
+    ]:
         with pytest.raises(ValueError):
             helper().verify(record, m, p, c)
 

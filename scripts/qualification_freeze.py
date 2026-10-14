@@ -1,4 +1,5 @@
 """Compute a freeze proposal, or verify a separately approved immutable input pair."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,17 +11,29 @@ import re
 
 def digest(value: object) -> str:
     """Hash canonical UTF-8 JSON using the manifest's encoding rules."""
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
 
 
 def proposal(manifest: object, coverage: object, consumer: str) -> dict:
     """Prepare inputs for operator review without manufacturing an approval."""
     if re.fullmatch(r"[0-9a-f]{40}", consumer) is None:
         raise ValueError("consumer must be a full commit SHA")
-    return {"schema": 1, "status": "proposed", "approval_ref": None,
-            "consumer_commit": consumer, "manifest_digest": digest(manifest),
-            "coverage_digest": digest(coverage)}
+    return {
+        "schema": 1,
+        "status": "proposed",
+        "approval_ref": None,
+        "consumer_commit": consumer,
+        "manifest_digest": digest(manifest),
+        "coverage_digest": digest(coverage),
+    }
 
 
 def verify(record: dict, manifest: object, coverage: object, consumer: str) -> None:
@@ -30,7 +43,10 @@ def verify(record: dict, manifest: object, coverage: object, consumer: str) -> N
         raise ValueError("unsupported freeze schema")
     if record.get("status") != "approved":
         raise ValueError("freeze has not been approved")
-    if not isinstance(record.get("approval_ref"), str) or not record["approval_ref"].strip():
+    if (
+        not isinstance(record.get("approval_ref"), str)
+        or not record["approval_ref"].strip()
+    ):
         raise ValueError("approval reference required")
     for field in ("consumer_commit", "manifest_digest", "coverage_digest"):
         if record.get(field) != expected[field]:
