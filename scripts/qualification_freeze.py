@@ -37,7 +37,7 @@ def proposal(manifest: object, coverage: object, consumer: str) -> dict:
 
 
 def verify(record: dict, manifest: object, coverage: object, consumer: str) -> None:
-    """Refuse unapproved or changed inputs; an approval reference is externally audited."""
+    """Refuse unapproved or changed inputs; the reference is audited separately."""
     expected = proposal(manifest, coverage, consumer)
     if type(record.get("schema")) is not int or record["schema"] != 1:
         raise ValueError("unsupported freeze schema")

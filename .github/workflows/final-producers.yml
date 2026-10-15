@@ -3,6 +3,16 @@ name: final producer qualification
 # A manually invoked, additive evidence lane. It is deliberately not a required
 # check and cannot run without a separately approved, digest-bound freeze record.
 on:
+  push:
+    paths:
+      - ".github/workflows/final-producers.yml"
+      - "pyproject.toml"
+      - "requirements/compatibility-manifest.v3.json"
+      - "requirements/qualification-coverage-packet.v1.json"
+      - "requirements/qualification-freeze.v1.json"
+      - "requirements/qualification-approvers.v1.json"
+      - "scripts/qualification_freeze.py"
+      - "scripts/qualification_approval.py"
   workflow_dispatch:
     inputs:
       freeze_record:
@@ -12,9 +22,39 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 jobs:
+  freeze-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      qualified: ${{ steps.freeze.outputs.qualified }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - id: freeze
+        name: Verify an event-aware immutable freeze record
+        env:
+          DISPATCH_FREEZE_RECORD: ${{ inputs.freeze_record }}
+        run: |
+          set -eu
+          record="$RUNNER_TEMP/freeze.json"
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            printf '%s' "$DISPATCH_FREEZE_RECORD" > "$record"
+          else
+            record="$GITHUB_WORKSPACE/requirements/qualification-freeze.v1.json"
+          fi
+          if python scripts/qualification_freeze.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --record "$record" && \
+             GITHUB_TOKEN='${{ github.token }}' python scripts/qualification_approval.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --repository '${{ github.repository }}' --pull-request 45 --record "$record"; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+            echo 'No approved, matching, GitHub-account-verified freeze record; expensive qualification is skipped.'
+          fi
   final-producers:
+    needs: freeze-gate
+    if: needs.freeze-gate.outputs.qualified == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +69,6 @@ jobs:
       ORAMA_REQUIRE_OWNER_CANDIDATES: "1"
       ORAMA_REQUIRE_PHYLAX_INTEROP: "1"
       ORAMA_DOCS_V2_REGISTRY: ${{ github.workspace }}/registry/docs/v2/references/loop-graph-compatibility-2026-10-09/ownership-registry.json
-      FREEZE_RECORD: ${{ inputs.freeze_record }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -52,7 +91,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: oramasys/oramasys
-          ref: 65ec365
+          ref: 65ec365293c6a892cd4f978e656cfb61c0d04b9a
           path: registry
           fetch-depth: 1
           persist-credentials: false
@@ -65,16 +104,8 @@ jobs:
           test -z "$(git -C consumer status --porcelain)"
           test -z "$(git -C consumer-rebuild status --porcelain)"
           test -f "$ORAMA_DOCS_V2_REGISTRY"
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          Path(os.environ["RUNNER_TEMP"]).joinpath("freeze.json").write_text(
-              os.environ["FREEZE_RECORD"], encoding="utf-8"
-          )
-          PY
           python scripts/validate_coverage_packet.py requirements/qualification-coverage-packet.v1.json requirements/compatibility-manifest.v3.json
           python scripts/final_set_install_plan.py validate requirements/final-producers-install-plan.v1.json requirements/compatibility-manifest.v3.json
-          python scripts/qualification_freeze.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --record "$RUNNER_TEMP/freeze.json"
           python scripts/check_harness_consumer_drift.py f8898b35d5249e483b2f4a68c097957e675a0ef4 "$GITHUB_SHA"
       - name: Build consumer wheel twice and record provenance
         run: |
