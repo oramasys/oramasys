@@ -174,8 +174,10 @@ jobs:
           "$RUNNER_TEMP/qualification-venv/bin/python" -m pip check
       - name: Run installed suite and deterministic scenarios
         run: |
-          mkdir "$RUNNER_TEMP/harness-bundle" "$RUNNER_TEMP/outside-suite" "$RUNNER_TEMP/scenario-traces"
-          git archive "$GITHUB_SHA" | tar -x -C "$RUNNER_TEMP/harness-bundle"
+          mkdir "$RUNNER_TEMP/outside-suite" "$RUNNER_TEMP/scenario-traces"
+          # The bundle is a git worktree, not an archive: several harness tests
+          # run repository scripts that require a git repository.
+          git worktree add --detach "$RUNNER_TEMP/harness-bundle" "$GITHUB_SHA"
           rm -rf "$RUNNER_TEMP/harness-bundle/src/orama"
           consumer_wheel="$(find "$RUNNER_TEMP/dist-one" -maxdepth 1 -name '*.whl' -type f -print -quit)"
           test -n "$consumer_wheel"

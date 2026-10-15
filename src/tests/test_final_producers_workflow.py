@@ -133,3 +133,13 @@ def test_push_events_cannot_select_rehearsal() -> None:
 @pytest.mark.parametrize("name", ["consumer", "consumer-rebuild"])
 def test_consumer_checkouts_pin_the_qualified_commit(name: str) -> None:
     assert _checkout(name)["ref"] == "f8898b35d5249e483b2f4a68c097957e675a0ef4"
+
+
+def test_bundle_is_a_git_worktree_without_application_source() -> None:
+    suite = next(
+        step["run"] for step in _steps("final-producers")
+        if "run_installed_qualification_suite.py" in step.get("run", "")
+    )
+    assert "git worktree add --detach" in suite
+    assert "git archive" not in suite
+    assert suite.index("git worktree add") < suite.index('rm -rf "$RUNNER_TEMP/harness-bundle/src/orama"')

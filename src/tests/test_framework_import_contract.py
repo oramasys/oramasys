@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -21,7 +22,10 @@ def is_framework(name: str) -> bool:
 
 PACKAGE = "orama"
 ALLOWLIST = {"compat/pydantic_ai_bridge.py": {"pydantic_ai"}}
-SOURCE = Path(__file__).resolve().parents[1] / PACKAGE
+# The qualification bundle carries the harness tests without src/orama; the
+# consumer source under test is selected explicitly, as in the sibling static tests.
+SOURCE_ROOT = Path(os.environ.get("ORAMA_QUALIFICATION_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
+SOURCE = SOURCE_ROOT / "src" / PACKAGE
 
 
 def static_string(node: ast.AST) -> str | None:
@@ -120,7 +124,7 @@ assert not hits, hits
 
 def test_published_metadata_has_no_framework_dependencies() -> None:
     """Published runtime, extra, and build dependencies remain framework-free."""
-    data = tomllib.loads((SOURCE.parents[1] / "pyproject.toml").read_text())
+    data = tomllib.loads((SOURCE_ROOT / "pyproject.toml").read_text())
     project = data["project"]
     dependencies = project.get("dependencies", []) + data["build-system"].get("requires", [])
     dependencies += [item for group in project.get("optional-dependencies", {}).values() for item in group]
