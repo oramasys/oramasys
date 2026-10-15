@@ -226,6 +226,11 @@ jobs:
             ${{ runner.temp }}/identity.json
             ${{ runner.temp }}/collection-gate.json
             ${{ runner.temp }}/scenarios.json
+            ${{ runner.temp }}/scenario-traces
+            ${{ runner.temp }}/provenance-one.json
+            ${{ runner.temp }}/provenance-two.json
+            ${{ runner.temp }}/collection.json
+            ${{ runner.temp }}/final-results.xml
             ${{ runner.temp }}/rebuild-comparison.json
             ${{ runner.temp }}/install-reports
           if-no-files-found: warn

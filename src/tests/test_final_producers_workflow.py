@@ -143,3 +143,14 @@ def test_bundle_is_a_git_worktree_without_application_source() -> None:
     assert "git worktree add --detach" in suite
     assert "git archive" not in suite
     assert suite.index("git worktree add") < suite.index('rm -rf "$RUNNER_TEMP/harness-bundle/src/orama"')
+
+
+@pytest.mark.parametrize("name", [
+    "provenance-one.json", "provenance-two.json", "collection.json",
+    "final-results.xml", "scenario-traces",
+])
+def test_artifact_upload_retains_the_inputs_a_reviewer_needs_to_recompute_verdicts(
+    name: str,
+) -> None:
+    upload = [s for s in _steps("final-producers") if "upload-artifact" in str(s.get("uses", ""))][0]
+    assert name in upload["with"]["path"]
