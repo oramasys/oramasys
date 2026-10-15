@@ -188,3 +188,15 @@ def test_cli_requires_isolated_python(helper, capsys):
         != 0
     )
     assert json.loads(capsys.readouterr().out)["verified"] is False
+
+
+def test_cli_failure_reason_goes_to_stderr_not_the_json_verdict(helper, capsys):
+    """A failed run must be diagnosable from CI logs; the stdout verdict stays stable."""
+    helper.main([str(ROOT / "requirements/final-producers-install-plan.v1.json")])
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "schema": 1,
+        "verified": False,
+        "classification": "identity-verification-failed",
+    }
+    assert "identity-verification-failed: ValueError: python -I required" in captured.err

@@ -166,7 +166,13 @@ def main(argv=None):
         result = verify_identity(
             _plan.load_json(args.plan), args.consumer_wheel, args.consumer_provenance
         )
-    except Exception:
+    except Exception as error:
+        # The stdout verdict is a stable, minimal contract; the reason is for the
+        # operator's log and is never part of the verdict.
+        print(
+            f"identity-verification-failed: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
         print(
             json.dumps(
                 {

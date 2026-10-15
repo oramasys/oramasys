@@ -154,3 +154,14 @@ def test_artifact_upload_retains_the_inputs_a_reviewer_needs_to_recompute_verdic
 ) -> None:
     upload = [s for s in _steps("final-producers") if "upload-artifact" in str(s.get("uses", ""))][0]
     assert name in upload["with"]["path"]
+
+
+def test_consumer_install_includes_the_extra_that_delivers_the_phylax_dependencies() -> None:
+    """Producers are force-installed with --no-deps, so the extra must supply PyNaCl."""
+    install = next(
+        step["run"] for step in _steps("final-producers")
+        if "install_with_retry.py" in step.get("run", "")
+    )
+    assert '"./consumer[dev,grant-serving]"' in install
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "grant-serving = [" in pyproject
