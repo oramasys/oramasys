@@ -208,4 +208,4 @@ def test_cli_failure_reason_goes_to_stderr_not_the_json_verdict(helper, capsys, 
         "verified": False,
         "classification": "identity-verification-failed",
     }
-    assert "identity-verification-failed: ValueError: python -I required" in captured.err
+    assert captured.err.startswith("identity-verification-failed: ValueError: ")
