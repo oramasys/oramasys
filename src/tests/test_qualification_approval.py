@@ -95,3 +95,35 @@ def test_fresh_marker_requires_current_matching_account(tmp_path: Path) -> None:
 def test_zero_identifiers_are_refused() -> None:
     with pytest.raises(ValueError):
         tool.parse_reference("https://github.com/a/b/issues/0#issuecomment-0")
+
+
+def test_failed_post_consumes_the_marker_and_says_to_reauthenticate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fresh-auth marker is a one-time capability: it is spent before use."""
+    import subprocess
+    import time
+
+    config = tmp_path / "isolated"
+    config.mkdir()
+    tool.marker_path(config).write_text(
+        json.dumps({"schema": 1, "account": "diazMelgarejo", "issued_at": time.time()})
+    )
+    manifest, coverage = tmp_path / "m.json", tmp_path / "c.json"
+    manifest.write_text("{}")
+    coverage.write_text("{}")
+    monkeypatch.setattr(tool, "authenticated_login", lambda _dir: "diazMelgarejo")
+    monkeypatch.setattr(tool, "isolated_environment", lambda _dir: {})
+
+    def failing_post(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.CalledProcessError(1, "gh")
+
+    monkeypatch.setattr(tool.subprocess, "run", failing_post)
+    monkeypatch.setattr(sys, "argv", [
+        "qualification_approval.py", "approve", str(manifest), str(coverage),
+        "--consumer", CONSUMER, "--repository", REPOSITORY, "--pull-request", "45",
+        "--record", str(tmp_path / "record.json"), "--config-dir", str(config),
+    ])
+    assert tool.main() == 1
+    assert not tool.marker_path(config).exists()
+    assert "re-authenticate" in capsys.readouterr().err

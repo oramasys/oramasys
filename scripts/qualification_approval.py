@@ -183,9 +183,19 @@ def main() -> int:
                 require_fresh_marker(args.config_dir, login)
                 if login not in allowed:
                     raise ValueError("active account is not allowlisted")
+                # The marker is a one-time capability: spend it before use so a
+                # failed or interrupted post can never be retried with the same
+                # login. A new config directory and a new login are required.
                 marker_path(args.config_dir).unlink()
-                result = subprocess.run(["gh", "api", "--method", "POST", f"repos/{args.repository}/issues/{args.pull_request}/comments",
-                    "-f", f"body={body}"], env=isolated_environment(args.config_dir), check=True, capture_output=True, text=True)
+                try:
+                    result = subprocess.run(["gh", "api", "--method", "POST", f"repos/{args.repository}/issues/{args.pull_request}/comments",
+                        "-f", f"body={body}"], env=isolated_environment(args.config_dir), check=True,
+                        capture_output=True, text=True)
+                except subprocess.CalledProcessError as error:
+                    raise ValueError(
+                        "approval comment was not posted; the one-time login marker is spent, "
+                        "so re-authenticate in a new config directory and run approve again"
+                    ) from error
                 comment = json.loads(result.stdout)
                 reference = comment.get("html_url") if isinstance(comment, dict) else None
                 if not isinstance(reference, str):

@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 
 
 def digest(value: object) -> str:
@@ -53,7 +54,7 @@ def verify(record: dict, manifest: object, coverage: object, consumer: str) -> N
             raise ValueError(f"freeze mismatch: {field}")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Emit a proposal or verify an approved record supplied by the workflow."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("propose", "verify"))
@@ -62,7 +63,7 @@ def main() -> int:
     parser.add_argument("--consumer", required=True)
     parser.add_argument("--record")
     parser.add_argument("--output")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         manifest = json.loads(Path(args.manifest).read_text())
         coverage = json.loads(Path(args.coverage).read_text())
@@ -80,7 +81,7 @@ def main() -> int:
             print(output, end="")
         return 0
     except (OSError, ValueError, TypeError, AttributeError) as exc:
-        print(f"freeze-refused: {type(exc).__name__}")
+        print(f"freeze-refused: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 

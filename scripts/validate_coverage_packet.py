@@ -155,7 +155,11 @@ def validate_packet(packet: object, manifest: Mapping[str, object], repo: Path) 
     for key in ("required_capabilities", "disabled_capabilities"):
         if packet[key] != manifest.get(key):
             problems.append(f"{key} must equal the manifest's list")
-    final = [c for c in manifest.get("cells", []) if c.get("profile") == FINAL_PROFILE]  # type: ignore[union-attr]
+    cells = manifest.get("cells")
+    if not isinstance(cells, list) or not all(isinstance(c, Mapping) for c in cells):
+        problems.append("manifest cells must be a list of objects")
+        cells = []
+    final = [c for c in cells if c.get("profile") == FINAL_PROFILE]
     if (type(packet["final_cell_skips_allowed"]) is not int
             or packet["final_cell_skips_allowed"] != 0
             or any(type(c.get("max_skipped")) is not int or c.get("max_skipped") != 0 for c in final)

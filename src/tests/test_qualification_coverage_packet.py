@@ -286,7 +286,8 @@ def test_packet_integer_fields_do_not_accept_booleans_or_floats(
 @pytest.mark.parametrize("value", [False, 0.0, 1])
 def test_final_manifest_skip_policy_is_exact_integer_zero(value: object) -> None:
     manifest = copy.deepcopy(MANIFEST)
-    manifest["cells"][-1]["max_skipped"] = value
+    final = next(c for c in manifest["cells"] if c["profile"] == "final-producers")
+    final["max_skipped"] = value
     assert "final-producer cells must allow exactly zero skips" in (
         tool.validate_packet(_partitioned_packet(), manifest, ROOT)
     )
@@ -390,3 +391,11 @@ def test_the_digest_is_canonical_and_changes_with_any_content() -> None:
     changed = copy.deepcopy(PACKET)
     changed["residual_limits"] = [*changed["residual_limits"], "another limit"]
     assert canonical_digest(changed) != canonical_digest(PACKET)
+
+
+@pytest.mark.parametrize("cells", ["cells", None, 3, [1], [{"profile": "final-producers"}, "x"]])
+def test_malformed_manifest_cells_are_a_problem_not_an_exception(cells: object) -> None:
+    manifest = copy.deepcopy(MANIFEST)
+    manifest["cells"] = cells
+    problems = tool.validate_packet(_partitioned_packet(), manifest, ROOT)
+    assert any("manifest cells must be a list of objects" in line for line in problems)

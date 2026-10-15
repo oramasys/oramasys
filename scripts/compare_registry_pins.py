@@ -114,6 +114,8 @@ def main(argv: Sequence[str]) -> int:
             raise InputError("manifest must be an object")
         declared = manifest["registry_profiles"]
         producer = manifest.get("producer_registry", {})
+        if not isinstance(producer, Mapping):
+            raise InputError("producer_registry must be an object")
         registries = {name: strict_loads((fixtures / file).read_text(encoding="utf-8"))
                       for name, file in PROFILE_FIXTURES.items()}
         external: frozenset[str] = frozenset()

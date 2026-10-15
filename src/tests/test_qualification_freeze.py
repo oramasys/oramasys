@@ -50,3 +50,17 @@ def test_blank_approval_ref_is_rejected(approval: str | None) -> None:
     record.update(status="approved", approval_ref=approval)
     with pytest.raises(ValueError):
         helper().verify(record, {}, {}, "a" * 40)
+
+
+def test_refusal_names_the_reason_on_stderr_and_writes_no_stdout(tmp_path: Path, capsys) -> None:
+    manifest = tmp_path / "m.json"
+    coverage = tmp_path / "c.json"
+    manifest.write_text("{}")
+    coverage.write_text("{}")
+    code = helper().main(
+        ["verify", str(manifest), str(coverage), "--consumer", "a" * 40]
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert "freeze-refused: ValueError: record required" in captured.err

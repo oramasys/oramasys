@@ -5,6 +5,8 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+
+import pytest
 from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -138,3 +140,16 @@ def test_the_default_run_is_fixture_anchored_and_says_it_is_not_a_structural_aud
     assert code == 0 and out is not None
     assert {r["anchor"] for r in out["results"].values()} == {"fixture-snapshot"}
     assert "not a structural registry audit" in out["scope"]
+
+
+@pytest.mark.parametrize("producer", ["a string", ["list"], 7, None])
+def test_a_non_object_producer_registry_is_an_input_error_not_a_traceback(
+    tmp_path: Path, capsys, producer: object  # type: ignore[no-untyped-def]
+) -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    manifest["producer_registry"] = producer
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, _, err = _run([str(path), "--production-registry", str(PINNED_BYTES)], capsys)
+    assert code == 2
+    assert "producer_registry must be an object" in err
