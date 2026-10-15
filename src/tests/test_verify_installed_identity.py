@@ -190,9 +190,18 @@ def test_cli_requires_isolated_python(helper, capsys):
     assert json.loads(capsys.readouterr().out)["verified"] is False
 
 
-def test_cli_failure_reason_goes_to_stderr_not_the_json_verdict(helper, capsys):
+def test_cli_failure_reason_goes_to_stderr_not_the_json_verdict(helper, capsys, installed):
     """A failed run must be diagnosable from CI logs; the stdout verdict stays stable."""
-    helper.main([str(ROOT / "requirements/final-producers-install-plan.v1.json")])
+    args, _, _ = installed
+    helper.main(
+        [
+            str(ROOT / "requirements/final-producers-install-plan.v1.json"),
+            "--consumer-wheel",
+            str(args["consumer_wheel"]),
+            "--consumer-provenance",
+            str(args["consumer_provenance"]),
+        ]
+    )
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
         "schema": 1,
