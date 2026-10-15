@@ -25,7 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKEN_ENVIRONMENT = ("GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_COPILOT_PAT")
 MARKER_NAME = "qualification-fresh-auth.v1.json"
 MAX_MARKER_AGE_SECONDS = 15 * 60
-COMMENT_REF = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/(\d+)#issuecomment-(\d+)$")
+COMMENT_REF = re.compile(
+    r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/(\d+)#issuecomment-(\d+)$"
+)
 
 
 def digest(value: object) -> str:
@@ -76,7 +78,7 @@ def approval_body(repository: str, pull_request: int, consumer: str, manifest: o
 def parse_reference(reference: str) -> tuple[str, int, int]:
     matched = COMMENT_REF.fullmatch(reference)
     if matched is None:
-        raise ValueError("approval reference must be a GitHub issue-comment URL")
+        raise ValueError("approval reference must be a GitHub issue or pull-request comment URL")
     pull_request, comment_id = int(matched.group(2)), int(matched.group(3))
     if pull_request < 1 or comment_id < 1:
         raise ValueError("approval reference has an invalid pull request or comment ID")

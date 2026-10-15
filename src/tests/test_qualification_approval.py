@@ -23,16 +23,23 @@ def _load() -> ModuleType:
 
 tool = _load()
 ALLOWLIST = ROOT / "requirements/qualification-approvers.v1.json"
-REPOSITORY = "diazMelgarejo/orama-system"
+REPOSITORY = "oramasys/oramasys"
+PULL_REQUEST = 45
+COMMENT_ID = 6179741042
+PULL_COMMENT_REFERENCE = (
+    "https://github.com/oramasys/oramasys/pull/45#issuecomment-6179741042"
+)
 CONSUMER = "a" * 40
 
 
 def _body() -> str:
-    return tool.approval_body(REPOSITORY, 45, CONSUMER, {"schema": 3}, {"packet_version": 1}, ALLOWLIST)
+    return tool.approval_body(
+        REPOSITORY, PULL_REQUEST, CONSUMER, {"schema": 3}, {"packet_version": 1}, ALLOWLIST
+    )
 
 
 def _comment(**changes: object) -> dict[str, object]:
-    comment: dict[str, object] = {"id": 17, "html_url": f"https://github.com/{REPOSITORY}/issues/45#issuecomment-17",
+    comment: dict[str, object] = {"id": COMMENT_ID, "html_url": PULL_COMMENT_REFERENCE,
                                   "user": {"login": "diazMelgarejo"}, "body": _body(),
                                   "created_at": "2026-10-15T00:00:00Z", "updated_at": "2026-10-15T00:00:00Z"}
     comment.update(changes)
@@ -43,18 +50,25 @@ def test_exact_unedited_allowlisted_comment_is_accepted() -> None:
     tool.verify_comment(_comment(), _comment()["html_url"], _body(), tool.approvers(ALLOWLIST))
 
 
+def test_issue_comment_reference_is_accepted() -> None:
+    issue_reference = (
+        "https://github.com/oramasys/oramasys/issues/45#issuecomment-6179741042"
+    )
+    assert tool.parse_reference(issue_reference) == (REPOSITORY, PULL_REQUEST, COMMENT_ID)
+
+
 @pytest.mark.parametrize("changes", [
     {"body": "different"}, {"id": 18}, {"html_url": "https://github.com/other/repo/issues/45#issuecomment-17"},
     {"user": {"login": "other"}}, {"updated_at": "2026-10-15T00:00:01Z"},
 ])
 def test_comment_tampering_is_refused(changes: dict[str, object]) -> None:
     with pytest.raises(ValueError):
-        tool.verify_comment(_comment(**changes), "https://github.com/diazMelgarejo/orama-system/issues/45#issuecomment-17",
+        tool.verify_comment(_comment(**changes), PULL_COMMENT_REFERENCE,
                             _body(), tool.approvers(ALLOWLIST))
 
 
 @pytest.mark.parametrize("reference", [
-    "operator-decision:synthetic", "https://github.com/a/b/pull/45#issuecomment-17",
+    "operator-decision:synthetic", "https://github.com/a/b/pulls/45#issuecomment-17",
     "https://github.com/a/b/issues/0#issuecomment-17",
 ])
 def test_non_comment_references_are_refused(reference: str) -> None:
