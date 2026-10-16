@@ -150,7 +150,7 @@ def test_rehearsal_mode_exists_and_never_produces_evidence() -> None:
     assert "mode" in gate["outputs"]
     upload = _upload_step()
     assert "outputs.mode" in upload["with"]["name"]
-    assert any("evidence-status.json" in block for block in _run_blocks())
+    assert any("stamp_evidence_status.py" in block for block in _run_blocks())
 
 
 def test_push_events_cannot_select_rehearsal() -> None:
@@ -199,3 +199,47 @@ def test_consumer_install_includes_the_extra_that_delivers_the_phylax_dependenci
     assert '"./consumer[dev,grant-serving]"' in install
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "grant-serving = [" in pyproject
+
+
+def _seal_module() -> Any:
+    """Import the sealing script so the workflow can be checked against its required records."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "stamp_evidence_status_for_workflow", ROOT / "scripts" / "stamp_evidence_status.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["stamp_evidence_status_for_workflow"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_record_the_seal_requires_is_uploaded() -> None:
+    """The artifact must carry exactly what the seal hashes, so a digest can always be checked."""
+    seal = _seal_module()
+    uploaded = _upload_step()["with"]["path"]
+    for name in (*seal.REQUIRED_FILES, *seal.REQUIRED_DIRECTORIES, seal.STATUS_FILE):
+        assert f"${{{{ runner.temp }}}}/{name}" in uploaded
+
+
+def test_upload_fails_without_records_and_keeps_them_for_the_audit_window() -> None:
+    """Missing records are an error, not a warning, and retention is stated explicitly."""
+    upload = _upload_step()["with"]
+    assert upload["if-no-files-found"] == "error"
+    assert upload["retention-days"] == 90
+
+
+def test_seal_runs_always_binds_head_and_run_and_precedes_the_upload() -> None:
+    """The status is sealed even after a failure, from the real head and run, before upload."""
+    steps = _steps("final-producers")
+    index = next(i for i, s in enumerate(steps) if "stamp_evidence_status.py" in s.get("run", ""))
+    seal = steps[index]
+    assert seal["if"] == "always()"
+    for flag in ("--head-sha \"$GITHUB_SHA\"", "--run-id \"$RUN_ID\"",
+                 "--run-attempt \"$RUN_ATTEMPT\"", "--mode \"$QUALIFICATION_MODE\"",
+                 "--job-status \"$JOB_STATUS\""):
+        assert flag in seal["run"]
+    assert seal["env"]["JOB_STATUS"] == "${{ job.status }}"
+    assert index < steps.index(_upload_step())
+

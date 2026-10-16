@@ -199,23 +199,14 @@ jobs:
           print(canonical_digest(json.loads(Path(os.environ['GITHUB_WORKSPACE'], 'requirements/qualification-coverage-packet.v1.json').read_text())))
           PY
           )" --trace-dir "$RUNNER_TEMP/scenario-traces" --output "$RUNNER_TEMP/scenarios.json"
-      - name: Stamp evidence status
+      - name: Seal the retained records into the evidence status
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          mode = os.environ["QUALIFICATION_MODE"]
-          Path(os.environ["RUNNER_TEMP"], "evidence-status.json").write_text(json.dumps({
-              "schema": 1,
-              "mode": mode,
-              "evidence": mode == "evidence" and os.environ["JOB_STATUS"] == "success",
-              "job_status": os.environ["JOB_STATUS"],
-          }, sort_keys=True) + "\n", encoding="utf-8")
-          PY
+          python scripts/stamp_evidence_status.py --directory "$RUNNER_TEMP" --mode "$QUALIFICATION_MODE" --job-status "$JOB_STATUS" --head-sha "$GITHUB_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
       - name: Retain sanitized artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -233,4 +224,5 @@ jobs:
             ${{ runner.temp }}/final-results.xml
             ${{ runner.temp }}/rebuild-comparison.json
             ${{ runner.temp }}/install-reports
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 90
