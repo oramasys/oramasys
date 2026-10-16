@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load() -> ModuleType:
+    """Import the drift guard script as a module so its functions can be tested."""
     spec = importlib.util.spec_from_file_location(
         "check_harness_consumer_drift", ROOT / "scripts" / "check_harness_consumer_drift.py")
     assert spec is not None and spec.loader is not None
@@ -55,11 +56,13 @@ def test_an_unclassified_path_is_refused_rather_than_assumed_harmless(path: str)
 
 
 def _git(repo: Path, *args: str) -> str:
+    """Run a git command in ``repo`` and return its stripped stdout."""
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
                           check=True).stdout.strip()
 
 
 def _repo_with(tmp_path: Path, changed: str) -> tuple[Path, str, str]:
+    """Build a repo and return (repo, consumer, harness); harness adds the file ``changed``."""
     repo = tmp_path / "r"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -110,11 +113,11 @@ def test_cli_refuses_divergent_consumer_and_harness_histories(
     _git(repo, "config", "user.name", "t")
     (repo / "scripts").mkdir()
     (repo / "scripts" / "base.py").write_text("base = 1\n")
-    consumer = _commit_all(repo, "base")
+    base = _commit_all(repo, "base")
     _git(repo, "checkout", "-qb", "consumer")
     (repo / "scripts" / "consumer.py").write_text("consumer = 1\n")
     consumer = _commit_all(repo, "consumer")
-    _git(repo, "checkout", "-q", "-b", "harness", f"{consumer}^")
+    _git(repo, "checkout", "-q", "-b", "harness", base)
     (repo / "scripts" / "harness.py").write_text("harness = 1\n")
     harness = _commit_all(repo, "harness")
 
@@ -123,6 +126,7 @@ def test_cli_refuses_divergent_consumer_and_harness_histories(
 
 
 def _commit_all(repo: Path, message: str) -> str:
+    """Stage everything, commit with ``message`` and return the new commit SHA."""
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", message)
     return _git(repo, "rev-parse", "HEAD")

@@ -20,14 +20,17 @@ CHECKOUT = "actions/checkout@"
 
 
 def _workflow() -> dict[Any, Any]:
+    """Load the final-producers workflow YAML as plain data."""
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
 
 def _steps(job: str) -> list[dict[str, Any]]:
+    """Return the ordered steps of one job in the final-producers workflow."""
     return _workflow()["jobs"][job]["steps"]
 
 
 def _run_blocks() -> list[str]:
+    """Return the shell script of every ``run`` step across all workflow jobs."""
     return [
         step["run"]
         for job in _workflow()["jobs"].values()
@@ -37,6 +40,7 @@ def _run_blocks() -> list[str]:
 
 
 def _checkout(path: str) -> dict[str, Any]:
+    """Return the ``with`` block of the checkout step that targets ``path``."""
     for step in _steps("final-producers"):
         if str(step.get("uses", "")).startswith(CHECKOUT) and step["with"].get("path") == path:
             return step["with"]
@@ -44,6 +48,7 @@ def _checkout(path: str) -> dict[str, Any]:
 
 
 def test_registry_checkout_matches_the_manifest_producer_registry() -> None:
+    """The registry checkout must use the repository and ref the manifest pins."""
     registry = json.loads(MANIFEST.read_text(encoding="utf-8"))["producer_registry"]
     checkout = _checkout("registry")
     assert checkout["repository"] == registry["repository"]
@@ -51,6 +56,7 @@ def test_registry_checkout_matches_the_manifest_producer_registry() -> None:
 
 
 def test_parent_cleanliness_is_checked_before_any_nested_checkout() -> None:
+    """The parent-cleanliness step must run before any nested checkout."""
     steps = _steps("final-producers")
     nested = [
         index for index, step in enumerate(steps)
@@ -76,6 +82,7 @@ def test_root_checkout_keeps_history_for_the_directional_drift_proof() -> None:
 
 
 def test_no_expression_is_interpolated_into_a_shell_script() -> None:
+    """No workflow expression may be interpolated directly into a shell script."""
     for block in _run_blocks():
         assert "${{ github.token }}" not in block
         assert "${{ github.event_name }}" not in block
@@ -83,6 +90,7 @@ def test_no_expression_is_interpolated_into_a_shell_script() -> None:
 
 
 def test_orama_importing_validator_has_the_harness_source_on_its_path() -> None:
+    """Every validator invocation must put the harness source on PYTHONPATH."""
     commands = [
         line.strip()
         for block in _run_blocks()
@@ -94,6 +102,7 @@ def test_orama_importing_validator_has_the_harness_source_on_its_path() -> None:
 
 
 def test_drift_guard_runs_before_the_source_path_is_trusted() -> None:
+    """The drift guard must run before the validator trusts the source path."""
     step = next(
         step for step in _steps("final-producers")
         if "validate_coverage_packet.py" in step.get("run", "")
@@ -103,6 +112,7 @@ def test_drift_guard_runs_before_the_source_path_is_trusted() -> None:
 
 
 def test_rebuild_difference_is_warned_not_silently_swallowed() -> None:
+    """A rebuild difference must raise a warning rather than be swallowed."""
     build = next(
         step["run"] for step in _steps("final-producers")
         if "build_provenance.py compare" in step.get("run", "")
@@ -112,6 +122,7 @@ def test_rebuild_difference_is_warned_not_silently_swallowed() -> None:
 
 
 def test_build_runs_in_a_prepared_environment_that_provenance_records() -> None:
+    """The build must run without isolation in the environment that provenance records."""
     build = next(
         step["run"] for step in _steps("final-producers")
         if "build_provenance.py record" in step.get("run", "")
@@ -121,6 +132,7 @@ def test_build_runs_in_a_prepared_environment_that_provenance_records() -> None:
 
 
 def test_rehearsal_mode_exists_and_never_produces_evidence() -> None:
+    """Rehearsal is an opt-in dispatch input and its artifacts are never evidence."""
     workflow = _workflow()
     triggers = workflow.get("on", workflow.get(True))
     inputs = triggers["workflow_dispatch"]["inputs"]
@@ -134,6 +146,7 @@ def test_rehearsal_mode_exists_and_never_produces_evidence() -> None:
 
 
 def test_push_events_cannot_select_rehearsal() -> None:
+    """The freeze gate must only honour the rehearsal input on workflow_dispatch."""
     gate = next(s["run"] for s in _steps("freeze-gate") if "run" in s)
     assert "workflow_dispatch" in gate
     assert "GITHUB_EVENT_NAME" in gate
@@ -142,10 +155,12 @@ def test_push_events_cannot_select_rehearsal() -> None:
 
 @pytest.mark.parametrize("name", ["consumer", "consumer-rebuild"])
 def test_consumer_checkouts_pin_the_qualified_commit(name: str) -> None:
+    """Both consumer checkouts must pin the qualified commit."""
     assert _checkout(name)["ref"] == "f8898b35d5249e483b2f4a68c097957e675a0ef4"
 
 
 def test_bundle_is_a_git_worktree_without_application_source() -> None:
+    """The harness bundle is a detached worktree with the application source removed."""
     suite = next(
         step["run"] for step in _steps("final-producers")
         if "run_installed_qualification_suite.py" in step.get("run", "")
@@ -162,6 +177,7 @@ def test_bundle_is_a_git_worktree_without_application_source() -> None:
 def test_artifact_upload_retains_the_inputs_a_reviewer_needs_to_recompute_verdicts(
     name: str,
 ) -> None:
+    """The uploaded artifact must retain each input needed to recompute verdicts."""
     upload = [s for s in _steps("final-producers") if "upload-artifact" in str(s.get("uses", ""))][0]
     assert name in upload["with"]["path"]
 

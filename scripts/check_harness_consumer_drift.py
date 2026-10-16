@@ -46,9 +46,10 @@ def changed_paths(repo: str, consumer: str, harness: str) -> list[str]:
     """Return the canonical changed-path inventory between two commits.
 
     ``consumer`` must be an ancestor of ``harness``: a directional diff cannot prove soundness
-    across divergent histories. The inventory must not depend on local presentation or configuration: NUL-delimited names
-    (no quoting, no newline splitting), submodule changes never ignored even when the user's
-    ``diff.ignoreSubmodules`` says otherwise, no rename folding, no external diff or textconv.
+    across divergent histories. The inventory must not depend on local presentation or
+    configuration: NUL-delimited names (no quoting, no newline splitting), submodule changes never
+    ignored even when the user's ``diff.ignoreSubmodules`` says otherwise, no rename folding, no
+    external diff or textconv.
     """
     ancestry = subprocess.run(
         ["git", "-C", repo, "merge-base", "--is-ancestor", consumer, harness],
