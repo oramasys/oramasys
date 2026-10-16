@@ -125,6 +125,41 @@ def test_cli_refuses_divergent_consumer_and_harness_histories(
     assert "consumer is not an ancestor of harness" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("bad", ["", "-x", "--all"])
+def test_cli_rejects_a_revision_that_could_be_read_as_a_git_option(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], bad: str
+) -> None:
+    """A revision that is empty or starts with '-' never reaches git as an argument."""
+    repo, consumer, harness = _repo_with(tmp_path, "scripts/tool.py")
+
+    assert guard.main(["x", bad, harness, "--repo", str(repo)]) == 2
+    assert guard.main(["x", consumer, bad, "--repo", str(repo)]) == 2
+    assert "must be non-empty and must not start with '-'" in capsys.readouterr().err
+
+
+def test_cli_reports_a_shallow_checkout_instead_of_a_false_divergence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A truncated history cannot prove ancestry, and the error must say so."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "-q")
+    _git(source, "config", "user.email", "t@example.invalid")
+    _git(source, "config", "user.name", "t")
+    _git(source, "config", "uploadpack.allowAnySHA1InWant", "true")
+    (source / "scripts").mkdir()
+    (source / "scripts" / "a.py").write_text("a = 1\n")
+    consumer = _commit_all(source, "consumer")
+    (source / "scripts" / "b.py").write_text("b = 1\n")
+    harness = _commit_all(source, "harness")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", source.as_uri(), str(clone)], check=True)
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", consumer)
+
+    assert guard.main(["x", consumer, harness, "--repo", str(clone)]) == 2
+    assert "shallow checkout" in capsys.readouterr().err
+
+
 def _commit_all(repo: Path, message: str) -> str:
     """Stage everything, commit with ``message`` and return the new commit SHA."""
     _git(repo, "add", "-A")

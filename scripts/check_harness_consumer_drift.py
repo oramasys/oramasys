@@ -42,6 +42,15 @@ def permitted(classified: dict[str, list[str]]) -> bool:
     return not classified["forbidden"] and not classified["unclassified"]
 
 
+def _is_shallow(repo: str) -> bool:
+    """True when ``repo`` is a shallow clone, where ancestry can look falsely absent."""
+    done = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--is-shallow-repository"],
+        capture_output=True, check=False,
+    )
+    return done.returncode == 0 and done.stdout.strip() == b"true"
+
+
 def changed_paths(repo: str, consumer: str, harness: str) -> list[str]:
     """Return the canonical changed-path inventory between two commits.
 
@@ -51,11 +60,18 @@ def changed_paths(repo: str, consumer: str, harness: str) -> list[str]:
     ignored even when the user's ``diff.ignoreSubmodules`` says otherwise, no rename folding, no
     external diff or textconv.
     """
+    for label, revision in (("consumer", consumer), ("harness", harness)):
+        if not revision or revision.startswith("-"):
+            raise RuntimeError(f"{label} revision must be non-empty and must not start with '-'")
     ancestry = subprocess.run(
         ["git", "-C", repo, "merge-base", "--is-ancestor", consumer, harness],
         capture_output=True, check=False,
     )
     if ancestry.returncode == 1:
+        if _is_shallow(repo):
+            raise RuntimeError(
+                "cannot prove consumer is an ancestor of harness in a shallow checkout "
+                "(fetch full history)")
         raise RuntimeError("consumer is not an ancestor of harness")
     if ancestry.returncode != 0:
         detail = ancestry.stderr.decode("utf-8", "replace").strip()[:200]
