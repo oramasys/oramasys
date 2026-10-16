@@ -66,8 +66,12 @@ def test_parent_cleanliness_is_checked_before_any_nested_checkout() -> None:
 
 
 def test_root_checkout_keeps_history_for_the_directional_drift_proof() -> None:
-    checkout = _steps("freeze-gate")[0]
-    assert str(checkout["uses"]).startswith(CHECKOUT)
+    """The job running the drift guard must retain the harness's history."""
+    checkout = next(
+        step for step in _steps("final-producers")
+        if str(step.get("uses", "")).startswith(CHECKOUT)
+        and not step.get("with", {}).get("path")
+    )
     assert checkout["with"]["fetch-depth"] == 0
 
 

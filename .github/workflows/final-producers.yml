@@ -42,8 +42,6 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-          # The directional C..H drift proof needs C, H, and their merge base.
-          fetch-depth: 0
       - id: freeze
         name: Select evidence, rehearsal or skip
         env:
