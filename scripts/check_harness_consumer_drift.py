@@ -3,9 +3,11 @@
 Usage: check_harness_consumer_drift.py <C> <H> [--repo DIR]
 
 Qualification tests the consumer at C using the harness at H. That is only sound when
-``git diff C..H`` touches nothing the consumer's runtime depends on. Allowed paths are the
-requirements, scripts, workflows and tests. Anything under ``src/orama/``, ``pyproject.toml`` or
-any path not listed is refused, which forces C to be re-selected and the freeze recomputed.
+``C`` is an ancestor of ``H`` and ``git diff C..H`` touches nothing the consumer's runtime
+depends on. Allowed paths are the requirements, scripts, workflows and tests. Anything under
+``src/orama/``, ``pyproject.toml`` or any path not listed is refused, which forces C to be
+re-selected and the freeze recomputed. The checkout must retain history for both revisions and
+their merge base (the final-producers workflow uses ``fetch-depth: 0``).
 Compares COMMITTED C and H only; it says nothing about checkout cleanliness, so the final runner
 must also check staged and untracked contamination. Prints a JSON verdict (C, H, the classified
 paths). Exit 0 allowed, 1 refused, 2 usage or git error.
@@ -43,10 +45,20 @@ def permitted(classified: dict[str, list[str]]) -> bool:
 def changed_paths(repo: str, consumer: str, harness: str) -> list[str]:
     """Return the canonical changed-path inventory between two commits.
 
-    The inventory must not depend on local presentation or configuration: NUL-delimited names
+    ``consumer`` must be an ancestor of ``harness``: a directional diff cannot prove soundness
+    across divergent histories. The inventory must not depend on local presentation or configuration: NUL-delimited names
     (no quoting, no newline splitting), submodule changes never ignored even when the user's
     ``diff.ignoreSubmodules`` says otherwise, no rename folding, no external diff or textconv.
     """
+    ancestry = subprocess.run(
+        ["git", "-C", repo, "merge-base", "--is-ancestor", consumer, harness],
+        capture_output=True, check=False,
+    )
+    if ancestry.returncode == 1:
+        raise RuntimeError("consumer is not an ancestor of harness")
+    if ancestry.returncode != 0:
+        detail = ancestry.stderr.decode("utf-8", "replace").strip()[:200]
+        raise RuntimeError(f"git merge-base failed: {detail}")
     done = subprocess.run(
         ["git", "-C", repo, "-c", "diff.ignoreSubmodules=none", "-c", "diff.renames=false",
          "-c", "core.quotePath=false", "diff", "--name-only", "-z", "--no-renames",

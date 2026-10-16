@@ -65,6 +65,12 @@ def test_parent_cleanliness_is_checked_before_any_nested_checkout() -> None:
     assert min(clean) < min(nested)
 
 
+def test_root_checkout_keeps_history_for_the_directional_drift_proof() -> None:
+    checkout = _steps("freeze-gate")[0]
+    assert str(checkout["uses"]).startswith(CHECKOUT)
+    assert checkout["with"]["fetch-depth"] == 0
+
+
 def test_no_expression_is_interpolated_into_a_shell_script() -> None:
     for block in _run_blocks():
         assert "${{ github.token }}" not in block

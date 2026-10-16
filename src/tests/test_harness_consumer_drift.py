@@ -99,6 +99,29 @@ def test_cli_distinguishes_a_git_error_from_a_refusal(tmp_path: Path) -> None:
     assert guard.main(["x", "only-one-arg"]) == 2
 
 
+def test_cli_refuses_divergent_consumer_and_harness_histories(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A directional diff is sound only when the consumer is an ancestor of the harness."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.invalid")
+    _git(repo, "config", "user.name", "t")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "base.py").write_text("base = 1\n")
+    consumer = _commit_all(repo, "base")
+    _git(repo, "checkout", "-qb", "consumer")
+    (repo / "scripts" / "consumer.py").write_text("consumer = 1\n")
+    consumer = _commit_all(repo, "consumer")
+    _git(repo, "checkout", "-q", "-b", "harness", f"{consumer}^")
+    (repo / "scripts" / "harness.py").write_text("harness = 1\n")
+    harness = _commit_all(repo, "harness")
+
+    assert guard.main(["x", consumer, harness, "--repo", str(repo)]) == 2
+    assert "consumer is not an ancestor of harness" in capsys.readouterr().err
+
+
 def _commit_all(repo: Path, message: str) -> str:
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", message)
