@@ -39,6 +39,14 @@ def _run_blocks() -> list[str]:
     ]
 
 
+def _upload_step() -> dict[str, Any]:
+    """Return the first artifact-upload step of the final-producers job."""
+    return next(
+        step for step in _steps("final-producers")
+        if "upload-artifact" in str(step.get("uses", ""))
+    )
+
+
 def _checkout(path: str) -> dict[str, Any]:
     """Return the ``with`` block of the checkout step that targets ``path``."""
     for step in _steps("final-producers"):
@@ -140,7 +148,7 @@ def test_rehearsal_mode_exists_and_never_produces_evidence() -> None:
     assert inputs["rehearsal"]["default"] is False
     gate = workflow["jobs"]["freeze-gate"]
     assert "mode" in gate["outputs"]
-    upload = [s for s in _steps("final-producers") if "upload-artifact" in str(s.get("uses", ""))][0]
+    upload = _upload_step()
     assert "outputs.mode" in upload["with"]["name"]
     assert any("evidence-status.json" in block for block in _run_blocks())
 
@@ -178,7 +186,7 @@ def test_artifact_upload_retains_the_inputs_a_reviewer_needs_to_recompute_verdic
     name: str,
 ) -> None:
     """The uploaded artifact must retain each input needed to recompute verdicts."""
-    upload = [s for s in _steps("final-producers") if "upload-artifact" in str(s.get("uses", ""))][0]
+    upload = _upload_step()
     assert name in upload["with"]["path"]
 
 
