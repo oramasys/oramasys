@@ -30,11 +30,12 @@ PULL_COMMENT_REFERENCE = (
     "https://github.com/oramasys/oramasys/pull/45#issuecomment-6179741042"
 )
 CONSUMER = "a" * 40
+HARNESS = "b" * 40
 
 
 def _body() -> str:
     return tool.approval_body(
-        REPOSITORY, PULL_REQUEST, CONSUMER, {"schema": 3}, {"packet_version": 1}, ALLOWLIST
+        REPOSITORY, PULL_REQUEST, CONSUMER, HARNESS, {"schema": 3}, {"packet_version": 1}, ALLOWLIST
     )
 
 
@@ -79,7 +80,14 @@ def test_non_comment_references_are_refused(reference: str) -> None:
 def test_allowlist_digest_binds_the_exact_allowlist_bytes_semantics(tmp_path: Path) -> None:
     changed = tmp_path / "allowlist.json"
     changed.write_text(json.dumps({"schema": 1, "accounts": ["someone-else"]}))
-    assert _body() != tool.approval_body(REPOSITORY, 45, CONSUMER, {"schema": 3}, {"packet_version": 1}, changed)
+    assert _body() != tool.approval_body(REPOSITORY, 45, CONSUMER, HARNESS, {"schema": 3}, {"packet_version": 1}, changed)
+
+
+def test_harness_commit_binds_the_approval_body() -> None:
+    assert _body() != tool.approval_body(
+        REPOSITORY, PULL_REQUEST, CONSUMER, "c" * 40,
+        {"schema": 3}, {"packet_version": 1}, ALLOWLIST,
+    )
 
 
 def test_fresh_marker_requires_current_matching_account(tmp_path: Path) -> None:
@@ -121,7 +129,7 @@ def test_failed_post_consumes_the_marker_and_says_to_reauthenticate(
     monkeypatch.setattr(tool.subprocess, "run", failing_post)
     monkeypatch.setattr(sys, "argv", [
         "qualification_approval.py", "approve", str(manifest), str(coverage),
-        "--consumer", CONSUMER, "--repository", REPOSITORY, "--pull-request", "45",
+        "--consumer", CONSUMER, "--harness", HARNESS, "--repository", REPOSITORY, "--pull-request", "45",
         "--record", str(tmp_path / "record.json"), "--config-dir", str(config),
     ])
     assert tool.main() == 1

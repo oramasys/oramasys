@@ -161,6 +161,11 @@ def test_push_events_cannot_select_rehearsal() -> None:
     assert "REHEARSAL" in gate
 
 
+def test_evidence_mode_binds_both_verifiers_to_the_checked_out_harness() -> None:
+    gate = next(step["run"] for step in _steps("freeze-gate") if "run" in step)
+    assert gate.count('--harness "$GITHUB_SHA"') == 2
+
+
 @pytest.mark.parametrize("name", ["consumer", "consumer-rebuild"])
 def test_consumer_checkouts_pin_the_qualified_commit(name: str) -> None:
     """Both consumer checkouts must pin the qualified commit."""

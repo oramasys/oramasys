@@ -23,24 +23,34 @@ def digest(value: object) -> str:
     ).hexdigest()
 
 
-def proposal(manifest: object, coverage: object, consumer: str) -> dict:
+def _commit(value: str, label: str) -> str:
+    """Require one immutable full Git commit identifier."""
+    if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise ValueError(f"{label} must be a full commit SHA")
+    return value
+
+
+def proposal(manifest: object, coverage: object, consumer: str, harness: str) -> dict:
     """Prepare inputs for operator review without manufacturing an approval."""
-    if re.fullmatch(r"[0-9a-f]{40}", consumer) is None:
-        raise ValueError("consumer must be a full commit SHA")
+    _commit(consumer, "consumer")
+    _commit(harness, "harness")
     return {
-        "schema": 1,
+        "schema": 2,
         "status": "proposed",
         "approval_ref": None,
         "consumer_commit": consumer,
+        "harness_commit": harness,
         "manifest_digest": digest(manifest),
         "coverage_digest": digest(coverage),
     }
 
 
-def verify(record: dict, manifest: object, coverage: object, consumer: str) -> None:
+def verify(
+    record: dict, manifest: object, coverage: object, consumer: str, harness: str
+) -> None:
     """Refuse unapproved or changed inputs; the reference is audited separately."""
-    expected = proposal(manifest, coverage, consumer)
-    if type(record.get("schema")) is not int or record["schema"] != 1:
+    expected = proposal(manifest, coverage, consumer, harness)
+    if type(record.get("schema")) is not int or record["schema"] != 2:
         raise ValueError("unsupported freeze schema")
     if record.get("status") != "approved":
         raise ValueError("freeze has not been approved")
@@ -49,7 +59,12 @@ def verify(record: dict, manifest: object, coverage: object, consumer: str) -> N
         or not record["approval_ref"].strip()
     ):
         raise ValueError("approval reference required")
-    for field in ("consumer_commit", "manifest_digest", "coverage_digest"):
+    for field in (
+        "consumer_commit",
+        "harness_commit",
+        "manifest_digest",
+        "coverage_digest",
+    ):
         if record.get(field) != expected[field]:
             raise ValueError(f"freeze mismatch: {field}")
 
@@ -61,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("manifest")
     parser.add_argument("coverage")
     parser.add_argument("--consumer", required=True)
+    parser.add_argument("--harness", required=True)
     parser.add_argument("--record")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
@@ -71,9 +87,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.record is None:
                 raise ValueError("record required")
             record = json.loads(Path(args.record).read_text())
-            verify(record, manifest, coverage, args.consumer)
+            verify(record, manifest, coverage, args.consumer, args.harness)
         else:
-            record = proposal(manifest, coverage, args.consumer)
+            record = proposal(manifest, coverage, args.consumer, args.harness)
         output = json.dumps(record, indent=2, sort_keys=True) + "\n"
         if args.output:
             Path(args.output).write_text(output)

@@ -63,8 +63,8 @@ jobs:
             else
               record="$GITHUB_WORKSPACE/requirements/qualification-freeze.v1.json"
             fi
-            if python scripts/qualification_freeze.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --record "$record" && \
-               python scripts/qualification_approval.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --repository "$QUALIFICATION_REPOSITORY" --pull-request "$QUALIFICATION_PULL_REQUEST" --record "$record"; then
+            if python scripts/qualification_freeze.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --harness "$GITHUB_SHA" --record "$record" && \
+               python scripts/qualification_approval.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --harness "$GITHUB_SHA" --repository "$QUALIFICATION_REPOSITORY" --pull-request "$QUALIFICATION_PULL_REQUEST" --record "$record"; then
               mode=evidence
             else
               echo 'No approved, matching, GitHub-account-verified freeze record; qualification is skipped.'
