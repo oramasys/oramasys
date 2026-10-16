@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,50 @@ def test_blank_approval_ref_is_rejected(approval: str | None) -> None:
     record.update(status="approved", approval_ref=approval)
     with pytest.raises(ValueError):
         helper().verify(record, {}, {}, CONSUMER, HARNESS)
+
+
+def test_binding_retains_only_the_verified_approval_inputs() -> None:
+    record = helper().proposal({}, {}, CONSUMER, HARNESS)
+    record.update(
+        status="approved",
+        approval_ref="https://github.com/example/repo/issues/1#issuecomment-2",
+        ignored="not retained",
+    )
+    binding = helper().binding(record, {}, {}, CONSUMER, HARNESS)
+    assert binding == {
+        "schema": 2,
+        "status": "approved",
+        "approval_ref": "https://github.com/example/repo/issues/1#issuecomment-2",
+        "consumer_commit": CONSUMER,
+        "harness_commit": HARNESS,
+        "manifest_digest": helper().digest({}),
+        "coverage_digest": helper().digest({}),
+    }
+
+
+def test_binding_cli_emits_one_sanitized_record(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The workflow output is one JSON record and never forwards extra record fields."""
+    manifest = tmp_path / "manifest.json"
+    coverage = tmp_path / "coverage.json"
+    record_path = tmp_path / "record.json"
+    manifest.write_text("{}", encoding="utf-8")
+    coverage.write_text("{}", encoding="utf-8")
+    record = helper().proposal({}, {}, CONSUMER, HARNESS)
+    record.update(
+        status="approved",
+        approval_ref="https://github.com/example/repo/issues/1#issuecomment-2",
+        ignored="not retained",
+    )
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert helper().main([
+        "binding", str(manifest), str(coverage), "--consumer", CONSUMER,
+        "--harness", HARNESS, "--record", str(record_path),
+    ]) == 0
+
+    output = capsys.readouterr().out
+    assert output.count("\n") == 1
+    assert json.loads(output) == helper().binding(record, {}, {}, CONSUMER, HARNESS)
 
 
 def test_refusal_names_the_reason_on_stderr_and_writes_no_stdout(tmp_path: Path, capsys) -> None:

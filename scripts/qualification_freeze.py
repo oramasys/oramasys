@@ -69,10 +69,26 @@ def verify(
             raise ValueError(f"freeze mismatch: {field}")
 
 
+def binding(
+    record: dict, manifest: object, coverage: object, consumer: str, harness: str
+) -> dict:
+    """Return the exact approved inputs safe to retain with an evidence receipt."""
+    verify(record, manifest, coverage, consumer, harness)
+    return {
+        "schema": 2,
+        "status": "approved",
+        "approval_ref": record["approval_ref"],
+        "consumer_commit": consumer,
+        "harness_commit": harness,
+        "manifest_digest": digest(manifest),
+        "coverage_digest": digest(coverage),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     """Emit a proposal or verify an approved record supplied by the workflow."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("propose", "verify"))
+    parser.add_argument("action", choices=("propose", "verify", "binding"))
     parser.add_argument("manifest")
     parser.add_argument("coverage")
     parser.add_argument("--consumer", required=True)
@@ -83,14 +99,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = json.loads(Path(args.manifest).read_text())
         coverage = json.loads(Path(args.coverage).read_text())
-        if args.action == "verify":
+        if args.action in {"verify", "binding"}:
             if args.record is None:
                 raise ValueError("record required")
             record = json.loads(Path(args.record).read_text())
-            verify(record, manifest, coverage, args.consumer, args.harness)
+            if args.action == "verify":
+                verify(record, manifest, coverage, args.consumer, args.harness)
+            else:
+                record = binding(record, manifest, coverage, args.consumer, args.harness)
         else:
             record = proposal(manifest, coverage, args.consumer, args.harness)
-        output = json.dumps(record, indent=2, sort_keys=True) + "\n"
+        output = (
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            if args.action == "binding"
+            else json.dumps(record, indent=2, sort_keys=True) + "\n"
+        )
         if args.output:
             Path(args.output).write_text(output)
         else:
