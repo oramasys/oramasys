@@ -47,12 +47,19 @@ def test_runtime_paths_force_c_to_be_reselected(path: str) -> None:
     assert result["forbidden"] == [path]
 
 
-@pytest.mark.parametrize("path", ["README.md", "docs/x.md", "setup.cfg", "src/other/mod.py", "Makefile"])
+@pytest.mark.parametrize("path", ["README.md", "docs/x.md", "docs/COMPATIBILITY_REVIEW_2026-10-09.md.bak", "docs/other-review.md", "setup.cfg", "src/other/mod.py", "Makefile"])
 def test_an_unclassified_path_is_refused_rather_than_assumed_harmless(path: str) -> None:
     """The allowlist is closed: unknown means refused."""
     result = guard.classify([path])
     assert not guard.permitted(result)
     assert result["unclassified"] == [path]
+
+
+def test_the_compatibility_review_is_the_only_allowed_docs_file() -> None:
+    """Only that exact file is allowed; neighbours and look-alikes stay refused."""
+    result = guard.classify(["docs/COMPATIBILITY_REVIEW_2026-10-09.md", "scripts/x.py"])
+    assert guard.permitted(result)
+    assert result["allowed"] == ["docs/COMPATIBILITY_REVIEW_2026-10-09.md", "scripts/x.py"]
 
 
 def _git(repo: Path, *args: str) -> str:

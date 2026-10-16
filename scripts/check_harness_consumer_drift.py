@@ -20,6 +20,9 @@ import sys
 from collections.abc import Iterable, Sequence
 
 ALLOWED_PREFIXES = ("requirements/", "scripts/", ".github/", "src/tests/", "tests/")
+# Exact files (not a docs/ prefix): the compatibility review is qualification documentation that the
+# harness maintains next to its evidence, so a change to it cannot alter what the consumer does.
+ALLOWED_FILES = frozenset({"docs/COMPATIBILITY_REVIEW_2026-10-09.md"})
 FORBIDDEN_PREFIXES = ("src/orama/",)
 FORBIDDEN_FILES = frozenset({"pyproject.toml"})
 
@@ -30,7 +33,7 @@ def classify(paths: Iterable[str]) -> dict[str, list[str]]:
     for path in paths:
         if path in FORBIDDEN_FILES or path.startswith(FORBIDDEN_PREFIXES):
             result["forbidden"].append(path)
-        elif path.startswith(ALLOWED_PREFIXES):
+        elif path in ALLOWED_FILES or path.startswith(ALLOWED_PREFIXES):
             result["allowed"].append(path)
         else:
             result["unclassified"].append(path)
