@@ -38,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.freeze.outputs.mode }}
+      approval_binding: ${{ steps.freeze.outputs.approval_binding }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -63,9 +64,11 @@ jobs:
             else
               record="$GITHUB_WORKSPACE/requirements/qualification-freeze.v1.json"
             fi
-            if python scripts/qualification_freeze.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --record "$record" && \
-               python scripts/qualification_approval.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --repository "$QUALIFICATION_REPOSITORY" --pull-request "$QUALIFICATION_PULL_REQUEST" --record "$record"; then
+            if python scripts/qualification_freeze.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --harness "$GITHUB_SHA" --record "$record" && \
+               python scripts/qualification_approval.py verify requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --harness "$GITHUB_SHA" --repository "$QUALIFICATION_REPOSITORY" --pull-request "$QUALIFICATION_PULL_REQUEST" --record "$record"; then
               mode=evidence
+              binding="$(python scripts/qualification_freeze.py binding requirements/compatibility-manifest.v3.json requirements/qualification-coverage-packet.v1.json --consumer f8898b35d5249e483b2f4a68c097957e675a0ef4 --harness "$GITHUB_SHA" --record "$record")"
+              printf 'approval_binding=%s\n' "$binding" >> "$GITHUB_OUTPUT"
             else
               echo 'No approved, matching, GitHub-account-verified freeze record; qualification is skipped.'
             fi
@@ -81,6 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       QUALIFICATION_MODE: ${{ needs.freeze-gate.outputs.mode }}
+      APPROVAL_BINDING: ${{ needs.freeze-gate.outputs.approval_binding }}
       ORAMA_REQUIRE_AGATE_EVIDENCE: "1"
       ORAMA_REQUIRE_CLEAN_INSTALL: "1"
       ORAMA_REQUIRE_CORE_GATE: "1"
@@ -206,6 +210,10 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
+          if [ "$QUALIFICATION_MODE" = evidence ]; then
+            test -n "$APPROVAL_BINDING"
+            printf '%s\n' "$APPROVAL_BINDING" > "$RUNNER_TEMP/approval-binding.json"
+          fi
           python scripts/stamp_evidence_status.py --directory "$RUNNER_TEMP" --mode "$QUALIFICATION_MODE" --job-status "$JOB_STATUS" --head-sha "$GITHUB_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
       - name: Retain sanitized artifacts
         if: always()
@@ -223,6 +231,7 @@ jobs:
             ${{ runner.temp }}/collection.json
             ${{ runner.temp }}/final-results.xml
             ${{ runner.temp }}/rebuild-comparison.json
+            ${{ runner.temp }}/approval-binding.json
             ${{ runner.temp }}/install-reports
           if-no-files-found: error
           retention-days: 90

@@ -60,16 +60,26 @@ def approvers(path: Path) -> tuple[str, ...]:
     return tuple(accounts)
 
 
-def approval_body(repository: str, pull_request: int, consumer: str, manifest: object,
-                  coverage: object, allowlist: Path) -> str:
+def approval_body(
+    repository: str,
+    pull_request: int,
+    consumer: str,
+    harness: str,
+    manifest: object,
+    coverage: object,
+    allowlist: Path,
+) -> str:
     if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None or pull_request < 1:
         raise ValueError("invalid repository or pull request")
     if re.fullmatch(r"[0-9a-f]{40}", consumer) is None:
         raise ValueError("consumer must be a full commit SHA")
+    if re.fullmatch(r"[0-9a-f]{40}", harness) is None:
+        raise ValueError("harness must be a full commit SHA")
     allowed = approvers(allowlist)
     return "\n".join((
         "oramasys-qualification-approval: v1", f"repository: {repository}",
         f"pull_request: {pull_request}", f"consumer_commit: {consumer}",
+        f"harness_commit: {harness}",
         f"manifest_digest: {digest(manifest)}", f"coverage_digest: {digest(coverage)}",
         f"allowlist_digest: {digest(list(allowed))}",
     )) + "\n"
@@ -156,6 +166,7 @@ def main() -> int:
         command.add_argument("manifest", type=Path)
         command.add_argument("coverage", type=Path)
         command.add_argument("--consumer", required=True)
+        command.add_argument("--harness", required=True)
         command.add_argument("--repository", required=True)
         command.add_argument("--pull-request", required=True, type=int)
         command.add_argument("--record", type=Path, required=True)
@@ -177,7 +188,15 @@ def main() -> int:
         else:
             manifest, coverage = strict_load(args.manifest), strict_load(args.coverage)
             allowed = approvers(args.allowlist)
-            body = approval_body(args.repository, args.pull_request, args.consumer, manifest, coverage, args.allowlist)
+            body = approval_body(
+                args.repository,
+                args.pull_request,
+                args.consumer,
+                args.harness,
+                manifest,
+                coverage,
+                args.allowlist,
+            )
             if args.action == "approve":
                 login = authenticated_login(args.config_dir)
                 require_fresh_marker(args.config_dir, login)
@@ -200,8 +219,9 @@ def main() -> int:
                 reference = comment.get("html_url") if isinstance(comment, dict) else None
                 if not isinstance(reference, str):
                     raise ValueError("GitHub did not return an approval comment URL")
-                record = {"schema": 1, "status": "approved", "approval_ref": reference,
-                          "consumer_commit": args.consumer, "manifest_digest": digest(manifest), "coverage_digest": digest(coverage)}
+                record = {"schema": 2, "status": "approved", "approval_ref": reference,
+                          "consumer_commit": args.consumer, "harness_commit": args.harness,
+                          "manifest_digest": digest(manifest), "coverage_digest": digest(coverage)}
                 args.record.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             else:
                 record = strict_load(args.record)

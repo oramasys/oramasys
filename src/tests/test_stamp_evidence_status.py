@@ -37,6 +37,11 @@ def _populate(directory: Path) -> None:
         (directory / name / "one.json").write_text(f"{name} one\n", encoding="utf-8")
 
 
+def _approval_binding(directory: Path) -> None:
+    """Write the sanitized approval binding required only for evidence mode."""
+    (directory / "approval-binding.json").write_text('{"schema":2}\n', encoding="utf-8")
+
+
 def _status(directory: Path, *, mode: str = "evidence", job_status: str = "success") -> dict:
     """Build the sealed status for ``directory`` with a fixed head and run."""
     return seal.build_status(directory, mode=mode, job_status=job_status, head_sha=HEAD,
@@ -52,6 +57,7 @@ def _argv(directory: Path, *extra: str, job_status: str = "success") -> list[str
 def test_a_complete_successful_evidence_run_is_sealed_as_evidence(tmp_path: Path) -> None:
     """Every required record is hashed and the run is bound to its head and run id."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     status = _status(tmp_path)
 
     assert status["evidence"] is True
@@ -62,7 +68,11 @@ def test_a_complete_successful_evidence_run_is_sealed_as_evidence(tmp_path: Path
     assert status["files"]["collection.json"] == expected
     assert status["files"]["scenario-traces/one.json"] == hashlib.sha256(
         b"scenario-traces one\n").hexdigest()
-    assert len(status["files"]) == len(seal.REQUIRED_FILES) + len(seal.REQUIRED_DIRECTORIES)
+    assert len(status["files"]) == (
+        len(seal.REQUIRED_FILES)
+        + len(seal.EVIDENCE_REQUIRED_FILES)
+        + len(seal.REQUIRED_DIRECTORIES)
+    )
 
 
 @pytest.mark.parametrize(("mode", "job_status"), [
@@ -73,8 +83,31 @@ def test_only_a_successful_evidence_mode_run_can_be_evidence(
 ) -> None:
     """Rehearsal and failed runs stay non-evidence even when every record is present."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
 
     assert _status(tmp_path, mode=mode, job_status=job_status)["evidence"] is False
+
+
+def test_evidence_requires_the_verified_approval_binding(tmp_path: Path) -> None:
+    """An evidence receipt without its approved input binding is incomplete."""
+    _populate(tmp_path)
+
+    status = _status(tmp_path)
+
+    assert status["evidence"] is False
+    assert status["complete"] is False
+    assert "approval-binding.json: missing" in status["problems"]
+
+
+def test_rehearsal_does_not_require_an_approval_binding(tmp_path: Path) -> None:
+    """A rehearsal records execution without implying an operator-approved freeze."""
+    _populate(tmp_path)
+
+    status = _status(tmp_path, mode="rehearsal")
+
+    assert status["complete"] is True
+    assert status["evidence"] is False
+    assert "approval-binding.json" not in status["files"]
 
 
 @pytest.mark.parametrize("name", [*("identity.json", "provenance-one.json", "collection.json",
@@ -82,6 +115,7 @@ def test_only_a_successful_evidence_mode_run_can_be_evidence(
 def test_a_missing_required_file_removes_the_evidence_claim(tmp_path: Path, name: str) -> None:
     """A lost provenance, collection or result record cannot be sealed as evidence."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     (tmp_path / name).unlink()
     status = _status(tmp_path)
 
@@ -94,6 +128,7 @@ def test_a_missing_required_file_removes_the_evidence_claim(tmp_path: Path, name
 def test_an_empty_record_is_not_a_record(tmp_path: Path) -> None:
     """A zero-byte file proves nothing and is rejected."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     (tmp_path / "collection.json").write_text("")
 
     assert "collection.json: empty" in _status(tmp_path)["problems"]
@@ -103,6 +138,7 @@ def test_an_empty_record_is_not_a_record(tmp_path: Path) -> None:
 def test_an_empty_or_missing_record_directory_is_rejected(tmp_path: Path, name: str) -> None:
     """Traces and install reports must contain at least one file."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     (tmp_path / name / "one.json").unlink()
     assert f"{name}/: no records" in _status(tmp_path)["problems"]
 
@@ -113,6 +149,7 @@ def test_an_empty_or_missing_record_directory_is_rejected(tmp_path: Path, name: 
 def test_symlinked_records_are_never_followed(tmp_path: Path) -> None:
     """A link cannot smuggle outside content into the sealed set."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("secret\n")
     (tmp_path / "identity.json").unlink()
@@ -130,6 +167,7 @@ def test_symlinked_records_are_never_followed(tmp_path: Path) -> None:
 def test_nested_trace_paths_are_recorded_with_posix_separators(tmp_path: Path) -> None:
     """A trace in a subdirectory is hashed under a stable relative key."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     nested = tmp_path / "scenario-traces" / "group"
     nested.mkdir()
     (nested / "deep.json").write_text("deep\n")
@@ -140,6 +178,7 @@ def test_nested_trace_paths_are_recorded_with_posix_separators(tmp_path: Path) -
 def test_main_writes_the_seal_and_exits_zero_for_a_sound_run(tmp_path: Path) -> None:
     """The default output is evidence-status.json beside the records."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
 
     assert seal.main(_argv(tmp_path)) == 0
     written = json.loads((tmp_path / "evidence-status.json").read_text(encoding="utf-8"))
@@ -152,6 +191,7 @@ def test_main_fails_a_green_job_that_lost_records(
 ) -> None:
     """A job that reports success but lost records must not pass, and still writes the seal."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     (tmp_path / "provenance-two.json").unlink()
 
     assert seal.main(_argv(tmp_path)) == 1
@@ -162,6 +202,7 @@ def test_main_fails_a_green_job_that_lost_records(
 def test_main_does_not_mask_an_already_failed_job(tmp_path: Path) -> None:
     """When the job already failed, the seal records it and the stamp step adds no second failure."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     (tmp_path / "provenance-two.json").unlink()
 
     assert seal.main(_argv(tmp_path, job_status="failure")) == 0
@@ -170,6 +211,7 @@ def test_main_does_not_mask_an_already_failed_job(tmp_path: Path) -> None:
 def test_main_honours_an_explicit_output_path(tmp_path: Path) -> None:
     """``--output`` redirects the seal and leaves the records directory untouched."""
     _populate(tmp_path)
+    _approval_binding(tmp_path)
     target = tmp_path.parent / f"{tmp_path.name}-status.json"
 
     assert seal.main(_argv(tmp_path, "--output", str(target))) == 0

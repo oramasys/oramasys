@@ -30,6 +30,7 @@ REQUIRED_FILES = (
     "final-results.xml",
     "rebuild-comparison.json",
 )
+EVIDENCE_REQUIRED_FILES = ("approval-binding.json",)
 REQUIRED_DIRECTORIES = ("scenario-traces", "install-reports")
 STATUS_FILE = "evidence-status.json"
 
@@ -43,7 +44,12 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def collect(directory: Path) -> tuple[dict[str, str], list[str]]:
+def required_files(mode: str) -> tuple[str, ...]:
+    """Return files that must be retained for this mode's evidence claim."""
+    return REQUIRED_FILES + (EVIDENCE_REQUIRED_FILES if mode == "evidence" else ())
+
+
+def collect(directory: Path, *, mode: str) -> tuple[dict[str, str], list[str]]:
     """Hash the required records; return ``(digests, problems)``.
 
     A required file must be a regular, non-empty file. A required directory must hold at least one
@@ -52,7 +58,7 @@ def collect(directory: Path) -> tuple[dict[str, str], list[str]]:
     """
     digests: dict[str, str] = {}
     problems: list[str] = []
-    for name in REQUIRED_FILES:
+    for name in required_files(mode):
         path = directory / name
         if path.is_symlink():
             problems.append(f"{name}: is a symlink")
@@ -81,7 +87,7 @@ def collect(directory: Path) -> tuple[dict[str, str], list[str]]:
 def build_status(directory: Path, *, mode: str, job_status: str, head_sha: str,
                  run_id: str, run_attempt: str) -> dict[str, Any]:
     """Return the sealed status document for one qualification run."""
-    digests, problems = collect(directory)
+    digests, problems = collect(directory, mode=mode)
     complete = not problems
     return {
         "schema": SCHEMA,

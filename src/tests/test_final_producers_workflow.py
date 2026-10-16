@@ -161,6 +161,30 @@ def test_push_events_cannot_select_rehearsal() -> None:
     assert "REHEARSAL" in gate
 
 
+def test_evidence_mode_binds_verifiers_and_retained_binding_to_the_checked_out_harness() -> None:
+    """Both verifiers and the retained binding must name the checked-out harness."""
+    workflow = _workflow()
+    gate_job = workflow["jobs"]["freeze-gate"]
+    gate = next(step["run"] for step in _steps("freeze-gate") if "run" in step)
+    assert gate.count('--harness "$GITHUB_SHA"') == 3
+    assert gate_job["outputs"]["approval_binding"] == "${{ steps.freeze.outputs.approval_binding }}"
+    assert gate.index("qualification_approval.py verify") < gate.index("qualification_freeze.py binding")
+    assert "printf 'approval_binding=%s\\n' \"$binding\" >> \"$GITHUB_OUTPUT\"" in gate
+
+
+def test_evidence_receipt_retains_only_the_verified_approval_binding() -> None:
+    """The final job receives a sanitized output, not the raw dispatch record."""
+    workflow = _workflow()
+    final_job = workflow["jobs"]["final-producers"]
+    seal = next(step for step in _steps("final-producers") if "stamp_evidence_status.py" in step.get("run", ""))
+
+    assert final_job["env"]["APPROVAL_BINDING"] == "${{ needs.freeze-gate.outputs.approval_binding }}"
+    assert "DISPATCH_FREEZE_RECORD" not in final_job.get("env", {})
+    assert 'printf \'%s\\n\' "$APPROVAL_BINDING" > "$RUNNER_TEMP/approval-binding.json"' in seal["run"]
+    assert 'if [ "$QUALIFICATION_MODE" = evidence ]; then' in seal["run"]
+    assert "approval-binding.json" in _upload_step()["with"]["path"]
+
+
 @pytest.mark.parametrize("name", ["consumer", "consumer-rebuild"])
 def test_consumer_checkouts_pin_the_qualified_commit(name: str) -> None:
     """Both consumer checkouts must pin the qualified commit."""
@@ -219,7 +243,12 @@ def test_every_record_the_seal_requires_is_uploaded() -> None:
     """The artifact must carry exactly what the seal hashes, so a digest can always be checked."""
     seal = _seal_module()
     uploaded = _upload_step()["with"]["path"]
-    for name in (*seal.REQUIRED_FILES, *seal.REQUIRED_DIRECTORIES, seal.STATUS_FILE):
+    for name in (
+        *seal.REQUIRED_FILES,
+        *seal.EVIDENCE_REQUIRED_FILES,
+        *seal.REQUIRED_DIRECTORIES,
+        seal.STATUS_FILE,
+    ):
         assert f"${{{{ runner.temp }}}}/{name}" in uploaded
 
 
