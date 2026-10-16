@@ -5,6 +5,13 @@ map identifies the owners and records that make a constellation inspectable; it
 does not claim that every planned satellite, skill, or memory integration is
 already wired or serving.
 
+In the vocabulary of the legacy method's
+[escalation card](https://github.com/diazMelgarejo/orama-system/blob/main/bin/orama-system/cidf/references/skill-chain-loop-graph-reference-card.md),
+this map describes the **Constellation** shape: several repositories or owners
+compose one system. Choosing between a skill, chain, loop, or graph before that
+point is covered by the
+[Orama system v1 architecture map](https://github.com/diazMelgarejo/orama-system/blob/main/ARCHITECTURE.md).
+
 ## System Shape
 
 ```mermaid
@@ -34,6 +41,7 @@ policy implementation to the application.
 | Endpoint identity, admission, egress, and peer verification | Telos | Ask for semantic authorization; do not add raw network clients. |
 | Grant verification, provenance, audit redaction, and admission | Phylax | Consume decisions; remain fail-closed when a required verifier is absent. |
 | Hardware placement and local capability | Agate | Request placement; do not infer hardware policy locally. |
+| Coordination records: claims, handoffs, leases, acknowledgements | Dedicated coordination satellite (planned; Perpetua-Tools serves it for v1 until it is migrated) | Compose and treat events as signals; any effect they request still needs a Phylax decision. |
 | Memory, retrieval, and knowledge indexes | Dedicated satellites | Label derived data and preserve source/provenance boundaries. |
 | Human approval and deployment choice | Operator | Keep approval distinct from routing, evaluation, and completion. |
 
@@ -46,6 +54,10 @@ policy implementation to the application.
 | Knowledge | What concepts and sources relate? | Source, time, confidence, and derived-view labeling. |
 | Evidence | Why is a claim supported? | Bound artifacts, tests, source references, or a human decision. |
 | Audit | Who independently checked it and what remains open? | Review scope, authority, limitation, and receipt. |
+
+This taxonomy mirrors the one in the v1 architecture map. Its meanings are
+defined there; this table adds only the v2 record shapes, so change both
+documents together.
 
 These graphs may reference each other but must not be collapsed into a mutable
 shared cache. A queue event is not an authorization decision; an index hit is
@@ -77,7 +89,7 @@ surfaces. Its documented boundaries are:
 - [Gateway-to-Telos migration](docs/architecture/gateway-telos-endpoint-security-migration.md)
 - [Orchestrator-controller invariants](docs/architecture/orchestrator-controller-invariants.md)
 - [Outbound consumer authority ledger](docs/architecture/outbound-consumer-authority-ledger.md)
-- [M1 qualification records](docs/COMPATIBILITY_REVIEW_2026-10-09.md)
+- [M1 compatibility review, before qualification](docs/COMPATIBILITY_REVIEW_2026-10-09.md)
 
 The planned source-backed CSV artifact is deliberately not represented as a
 shipped feature here. Before implementation, its child design must bind source
