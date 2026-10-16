@@ -91,12 +91,13 @@ surfaces. Its documented boundaries are:
 - [Outbound consumer authority ledger](docs/architecture/outbound-consumer-authority-ledger.md)
 - [M1 compatibility review, before qualification](docs/COMPATIBILITY_REVIEW_2026-10-09.md)
 
-The planned source-backed CSV artifact is deliberately not represented as a
-shipped feature here. Before implementation, its child design must bind source
-fixtures, task identity, CSV output, independent verifier, path/spreadsheet
-safety, receipt retention, and failure/recovery behavior. Configured retrieval
-or model adapters follow only after that offline proof and must retain Telos,
-Phylax, and Agate authority boundaries.
+The local workspace proof of concept implements the first offline child slice:
+selected passages become an extractive CSV and a separately verifiable receipt
+entirely in request memory. Its contract, privacy profiles, and limits are
+documented in [the local workspace plan](docs/plans/2026-10-16-local-workspace.md).
+It does not qualify configured retrieval, a model adapter, durable recovery,
+or provider serving. Those follow only after additional offline evidence and
+must retain Telos, Phylax, and Agate authority boundaries.
 
 ## v1 and Design-Corpus References
 

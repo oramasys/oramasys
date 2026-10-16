@@ -63,6 +63,20 @@ Inbound HTTP on the glass window is capability-declared and bearer-authorized:
 
 `GET /health` stays public. Auth is **Bearer header only** (no cookie / S-Session in this release). CORS is deferred to S-Network.
 
+## Local workspace proof of concept
+
+`POST /api/workspace/run` accepts a bounded task plus selected local source
+passages and produces an extractive `evidence.csv` with a canonical receipt.
+The verifier re-parses the CSV and checks source bindings, hashes, row count,
+and spreadsheet safety. It uses no model, network, persistence, or external
+sharing. Privacy is `local` by default; `sources`, `redacted`, and `open` are
+explicit per-run preferences that remain inert until a qualified transport
+adapter consumes them.
+
+Use `GET /api/workspace/capabilities` to inspect the current limits. See the
+[local workspace plan](docs/plans/2026-10-16-local-workspace.md) for the
+contract, roadmap, and verification scope.
+
 Optional AuthProviders (disabled by default) never replace local secrets:
 
 | Env | Provider |

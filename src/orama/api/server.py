@@ -76,6 +76,8 @@ def create_app(
 
     app = FastAPI(title="oramasys", version="2.0.0-alpha.1", lifespan=lifespan)
     install_authz(app)
+    from orama.workspace.api import router as workspace_router
+    app.include_router(workspace_router)
     active_runner = runner or UnconfiguredGraphRunner()
     active_graph = graph if compiled_graph is None else compiled_graph
 
