@@ -129,7 +129,7 @@ def test_tripwire_imports_every_module() -> None:
 
 
 def test_tripwire_catches_a_planted_computed_family_import(tmp_path: Path) -> None:
-    """The tripwire itself must fail on an import the AST scan cannot resolve."""
+    """The tripwire itself must block a planted computed framework import."""
     package = tmp_path / "planted_pkg"
     package.mkdir()
     (package / "__init__.py").write_text("")
