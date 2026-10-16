@@ -140,3 +140,39 @@ def test_refusal_reason_reaches_stderr_and_stdout_verdict_stays_stable(
     captured = capsys.readouterr()
     assert captured.out.strip() == "collection-refused: ValueError"
     assert "collected 3 nodes but junit 1 tests ran" in captured.err
+
+
+def test_execution_must_match_collection_by_membership_not_count() -> None:
+    collected = ["src/tests/a.py::test_one", "src/tests/a.py::test_two"]
+    other = ["src/tests/a.py::test_one", "src/tests/b.py::test_three"]
+    assert gate_module().check_execution(collected, collected) == []
+    problems = gate_module().check_execution(collected, other)
+    assert any("missing" in p for p in problems)
+    assert any("unexpected" in p for p in problems)
+
+
+def test_execution_refuses_duplicates_and_absent_tests() -> None:
+    collected = ["src/tests/a.py::test_one", "src/tests/a.py::test_two"]
+    assert gate_module().check_execution(collected, collected[:1])
+    assert gate_module().check_execution(collected, collected + collected[:1])
+
+
+def test_collection_report_without_executed_ids_is_refused(tmp_path, capsys, monkeypatch) -> None:
+    import json
+
+    packet_path = tmp_path / "packet.json"
+    packet_path.write_text(json.dumps(packet()))
+    collection_path = tmp_path / "collection.json"
+    collection_path.write_text(
+        json.dumps({"schema": 1, "node_ids": ["src/tests/core_gate/test_ready.py::test_a"]})
+    )
+    junit_path = tmp_path / "junit.xml"
+    junit_path.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0"/>')
+    monkeypatch.setattr(
+        "sys.argv", ["collection_gate.py", str(junit_path), str(packet_path), str(collection_path)]
+    )
+    monkeypatch.setenv("ORAMA_REQUIRE_CORE_GATE", "1")
+    monkeypatch.setenv("ORAMA_DOCS_V2_REGISTRY", "registry.json")
+
+    assert gate_module().main() == 1
+    assert "executed_node_ids" in capsys.readouterr().err

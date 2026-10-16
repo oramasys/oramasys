@@ -40,6 +40,22 @@ def check_count_agreement(nodes: list[str], junit_total: int) -> list[str]:
     return [f"collected {len(nodes)} nodes but junit {junit_total} tests ran"]
 
 
+def check_execution(collected: list[str], executed: object) -> list[str]:
+    """Require the tests that ran to be exactly the tests that were collected."""
+    if not isinstance(executed, list) or not all(isinstance(n, str) and n for n in executed):
+        return ["executed node ids are malformed"]
+    problems = []
+    if len(set(executed)) != len(executed):
+        problems.append("duplicate executed node IDs")
+    missing = sorted(set(collected) - set(executed))
+    unexpected = sorted(set(executed) - set(collected))
+    if missing:
+        problems.append(f"collected but not executed: {len(missing)} missing")
+    if unexpected:
+        problems.append(f"executed but not collected: {len(unexpected)} unexpected")
+    return problems
+
+
 def check_results(xml: str) -> int:
     """Return the passed count only for a nonempty successful zero-skip report."""
     try:
@@ -77,6 +93,8 @@ def main() -> int:
         passed = check_results(Path(args.junit).read_text())
         if not problems:
             problems = check_count_agreement(report["node_ids"], passed)
+        if not problems:
+            problems = check_execution(report["node_ids"], report["executed_node_ids"])
         if problems:
             raise ValueError("; ".join(problems))
         print(json.dumps({"schema": 1, "passed": passed, "skipped": 0,

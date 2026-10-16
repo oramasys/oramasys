@@ -53,3 +53,24 @@ def test_import_origin_must_be_an_installed_site_package(
     module.__file__ = str(tmp_path / "source/orama/__init__.py")
     with pytest.raises(ValueError, match="site-packages"):
         tool.assert_installed_origin()
+
+
+def test_runner_records_every_phase_of_each_executed_test() -> None:
+    """Executed ids come from the run itself, so membership can be compared to collection."""
+    import importlib.util
+    from types import SimpleNamespace
+
+    spec = importlib.util.spec_from_file_location(
+        "run_installed_qualification_suite",
+        Path(__file__).resolve().parents[2] / "scripts/run_installed_qualification_suite.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    plugin = module._Collected()
+    for when in ("setup", "call", "teardown"):
+        plugin.pytest_runtest_logreport(SimpleNamespace(nodeid="src/tests/a.py::test_one", when=when))
+    plugin.pytest_runtest_logreport(SimpleNamespace(nodeid="src/tests/a.py::test_two", when="call"))
+
+    assert plugin.executed_node_ids == ["src/tests/a.py::test_one", "src/tests/a.py::test_two"]

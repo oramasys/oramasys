@@ -46,9 +46,15 @@ class _Collected:
 
     def __init__(self) -> None:
         self.node_ids: list[str] = []
+        self.executed_node_ids: list[str] = []
 
     def pytest_collection_finish(self, session: Any) -> None:
         self.node_ids = [item.nodeid for item in session.items]
+
+    def pytest_runtest_logreport(self, report: Any) -> None:
+        # Every phase counts: a test skipped at setup still ran in the suite.
+        if report.nodeid not in self.executed_node_ids:
+            self.executed_node_ids.append(report.nodeid)
 
 
 def run(bundle: Path, junit: Path, collection: Path) -> int:
@@ -76,7 +82,8 @@ def run(bundle: Path, junit: Path, collection: Path) -> int:
     ]
     result = pytest.main(arguments, plugins=[plugin])
     collection.write_text(
-        json.dumps({"schema": 1, "node_ids": plugin.node_ids}, sort_keys=True) + "\n",
+        json.dumps({"schema": 1, "node_ids": plugin.node_ids,
+                    "executed_node_ids": plugin.executed_node_ids}, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return int(result)
