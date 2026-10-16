@@ -85,6 +85,13 @@ and the clean, non-editable install verifier exist and pass.
   runs; it fails on the previous head.
 - **Gap errors survive pickling.** Both gap error classes rebuild from their
   constructor arguments, so diagnostics cross worker and process boundaries.
+- **Tripwire proves it trips.**
+  `test_tripwire_catches_a_planted_computed_family_import` plants a computed
+  `langchain_` import in a throwaway package and requires the blocker to fail
+  the import, so the runtime tripwire is itself tested and not only run on the
+  real package.
+- **Oracle lock note.** `editables` stays pinned at 0.5 with a comment:
+  hatchling needs it for editable builds under `--no-build-isolation`.
 
 Verification on Python 3.12 against Core candidate `b9b4477`: oracle
 environment 284 passed; framework-free application suite 271 passed.
