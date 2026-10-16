@@ -1,9 +1,11 @@
-# Architecture Map
+# Architecture Map — v2 Oramasys Constellation
 
 Oramasys composes application workflows above the `perpetua-core` kernel. This
-map identifies the owners and records that make a constellation inspectable; it
-does not claim that every planned satellite, skill, or memory integration is
-already wired or serving.
+is the overarching router and map: it identifies the moving parts, their
+decision boundaries, and the contracts that let us build an inspectable
+constellation. Markdown is a treasure trail to those contracts, code, tests,
+receipts, and sources; it never creates a second control plane or claims that
+every planned satellite is wired or serving.
 
 In the vocabulary of the legacy method's
 [escalation card](https://github.com/diazMelgarejo/orama-system/blob/main/bin/orama-system/cidf/references/skill-chain-loop-graph-reference-card.md),
@@ -31,6 +33,31 @@ The arrow from Oramasys to Core is one way: application composition may import
 the kernel; the kernel must not import Oramasys or a satellite. A satellite
 returns a decision through its declared contract rather than donating its
 policy implementation to the application.
+
+## Build a Constellation
+
+Build outward from an outcome, keeping each added capability independently
+inspectable and removable:
+
+1. Declare the user outcome, audience, local-first privacy profile, inputs,
+   expected artifact, and explicit limits.
+2. Draw the smallest typed execution graph that owns state transitions,
+   checkpoints, recovery, and a measurable stop condition.
+3. Assign each decision to one owner: Core for structure; Oramasys for
+   composition; Telos for endpoints; Phylax for grants/provenance; Agate for
+   placement; a dedicated satellite for memory or retrieval; and an operator
+   for approval.
+4. Define an adapter contract instead of importing a satellite's policy:
+   capability discovery, request/response schema, privacy label, failure
+   behavior, provenance, and receipt.
+5. Materialize a real local artifact first, independently verify it, and keep
+   the receipt's scope and limitations with the result.
+6. Add one satellite or provider only after offline tests demonstrate its
+   boundary. Progressive sharing is opt-in; a missing required verifier stays
+   fail-closed.
+
+This makes a constellation a graph of explicit contracts—not a monolith, a
+shared mutable cache, or a collection of undocumented integrations.
 
 ## Ownership Map
 
@@ -99,7 +126,7 @@ It does not qualify configured retrieval, a model adapter, durable recovery,
 or provider serving. Those follow only after additional offline evidence and
 must retain Telos, Phylax, and Agate authority boundaries.
 
-## v1 and Design-Corpus References
+## v1 and Secondary Reference Matches
 
 The legacy method remains a parallel source of operational guidance, not a
 runtime dependency:
@@ -109,12 +136,15 @@ runtime dependency:
 - [Policy ownership decision](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/ADR-D-LG-1-POLICY-OWNERSHIP.md)
 - [Oramasys mastery standard](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/ORAMASYS-MASTERY-v3.md)
 
-The PT loop/graph closure and Phase 0 LLM Wiki are secondary historical and
-document-graph references, not v2 authority:
+The PT loop/graph closure and Phase 0 LLM Wiki remain secondary reference
+matches, not v2 authority:
 
-- [PT loop/graph closure record](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/.agent/memory/working/LOOP_GRAPH_REVISION4_CLOSURE_2026-10-09.md)
+- [PT loop/graph closure record](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/.agent/memory/working/LOOP_GRAPH_REVISION4_CLOSURE_2026-10-09.md):
+  current qualification, ownership split, evidence rules, and open limits.
 - [Phase 0 LLM Wiki graph](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/docs/phase-0-specifications/wiki/README.md)
-  and [typed edges](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/docs/phase-0-specifications/wiki/edges.md)
+  and [typed edges](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/docs/phase-0-specifications/wiki/edges.md):
+  an inspectable graph of files, concepts, decisions, implementation, evidence,
+  handoffs, and security policy.
 
 ## Readiness Boundary
 
