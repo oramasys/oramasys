@@ -4,6 +4,12 @@ Hardware-aware multi-agent **orchestration system** — the graph DSL + FastAPI
 surface layered on top of the `perpetua-core` kernel. Imports `perpetua-core`;
 the kernel never imports `oramasys` (one-way boundary).
 
+## Architecture Map
+
+[ARCHITECTURE.md](ARCHITECTURE.md) is the concise map of component ownership,
+graph meanings, evidence boundaries, and constellation composition. It is
+navigation and design guidance, not a runtime-readiness claim.
+
 ## Layout
 
 ```
