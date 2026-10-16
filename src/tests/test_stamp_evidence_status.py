@@ -146,6 +146,26 @@ def test_an_empty_or_missing_record_directory_is_rejected(tmp_path: Path, name: 
     assert f"{name}/: missing" in _status(tmp_path)["problems"]
 
 
+@pytest.mark.parametrize("name", ["scenario-traces", "install-reports"])
+def test_an_empty_record_inside_a_record_directory_removes_the_evidence_claim(
+        tmp_path: Path, name: str) -> None:
+    """A truncated zero-byte trace or report proves nothing, so it cannot be sealed as evidence."""
+    _populate(tmp_path)
+    _approval_binding(tmp_path)
+    nested = tmp_path / name / "group"
+    nested.mkdir()
+    (nested / "truncated.json").write_text("")
+
+    status = _status(tmp_path)
+
+    assert f"{name}/group/truncated.json: empty" in status["problems"]
+    assert f"{name}/group/truncated.json" not in status["files"]
+    assert status["complete"] is False
+    assert status["evidence"] is False
+    # The other, non-empty record in the same directory is still sealed.
+    assert f"{name}/one.json" in status["files"]
+
+
 def test_symlinked_records_are_never_followed(tmp_path: Path) -> None:
     """A link cannot smuggle outside content into the sealed set."""
     _populate(tmp_path)
