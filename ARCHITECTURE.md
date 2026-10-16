@@ -41,7 +41,7 @@ policy implementation to the application.
 | Endpoint identity, admission, egress, and peer verification | Telos | Ask for semantic authorization; do not add raw network clients. |
 | Grant verification, provenance, audit redaction, and admission | Phylax | Consume decisions; remain fail-closed when a required verifier is absent. |
 | Hardware placement and local capability | Agate | Request placement; do not infer hardware policy locally. |
-| Coordination records: claims, handoffs, leases, acknowledgements | Dedicated coordination satellite (planned; Perpetua-Tools serves it for v1 until it is migrated) | Compose and treat events as signals; any effect they request still needs a Phylax decision. |
+| Coordination records: claims, handoffs, leases, acknowledgements | v2: the Orchestrator Controller, a boot module inside oramasys that starts before any Orchestrator (no separate satellite repository). v1, as it works today: Perpetua-Tools serves it, until a parity migration | Compose. The top Orchestrator is a client of the controller, not its host; authority comes from a Phylax capability, never from spawn order. Events are signals; any effect they request still needs a Phylax decision. |
 | Memory, retrieval, and knowledge indexes | Dedicated satellites | Label derived data and preserve source/provenance boundaries. |
 | Human approval and deployment choice | Operator | Keep approval distinct from routing, evaluation, and completion. |
 
