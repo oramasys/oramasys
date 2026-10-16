@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Mapping
 import xml.etree.ElementTree as ET
@@ -30,6 +31,13 @@ def check_collection(packet: Mapping, nodes: object, environment: Mapping[str, s
         if not environment.get(name, "").strip():
             problems.append(f"required setup input missing: {name}")
     return problems
+
+
+def check_count_agreement(nodes: list[str], junit_total: int) -> list[str]:
+    """Every collected node must be reported once, so a silent subset cannot pass."""
+    if len(nodes) == junit_total:
+        return []
+    return [f"collected {len(nodes)} nodes but junit {junit_total} tests ran"]
 
 
 def check_results(xml: str) -> int:
@@ -67,6 +75,8 @@ def main() -> int:
             raise ValueError("unsupported collection report")
         problems = check_collection(packet, report.get("node_ids"), os.environ)
         passed = check_results(Path(args.junit).read_text())
+        if not problems:
+            problems = check_count_agreement(report["node_ids"], passed)
         if problems:
             raise ValueError("; ".join(problems))
         print(json.dumps({"schema": 1, "passed": passed, "skipped": 0,
@@ -74,6 +84,7 @@ def main() -> int:
         return 0
     except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
         print(f"collection-refused: {type(exc).__name__}")
+        print(f"collection-refused: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 

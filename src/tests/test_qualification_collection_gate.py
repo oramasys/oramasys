@@ -101,3 +101,42 @@ def test_result_gate_accepts_nonempty_success() -> None:
         )
         == 2
     )
+
+
+def test_junit_count_must_equal_collected_node_count() -> None:
+    nodes = ["src/tests/core_gate/test_ready.py::test_a", "src/tests/core_gate/test_ready.py::test_b"]
+    assert gate_module().check_count_agreement(nodes, 2) == []
+
+
+@pytest.mark.parametrize("junit_total", [1, 3])
+def test_junit_count_mismatch_is_refused_with_both_counts(junit_total: int) -> None:
+    nodes = ["src/tests/core_gate/test_ready.py::test_a", "src/tests/core_gate/test_ready.py::test_b"]
+    problems = gate_module().check_count_agreement(nodes, junit_total)
+    assert len(problems) == 1
+    assert "collected 2" in problems[0]
+    assert f"junit {junit_total}" in problems[0]
+
+
+def test_refusal_reason_reaches_stderr_and_stdout_verdict_stays_stable(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    import json
+
+    packet_path = tmp_path / "packet.json"
+    packet_path.write_text(json.dumps(packet()))
+    collection_path = tmp_path / "collection.json"
+    collection_path.write_text(
+        json.dumps({"schema": 1, "node_ids": ["src/tests/core_gate/test_ready.py::test_a", "src/tests/core_gate/test_ready.py::test_b", "src/tests/core_gate/test_ready.py::test_c"]})
+    )
+    junit_path = tmp_path / "junit.xml"
+    junit_path.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0"/>')
+    monkeypatch.setattr(
+        "sys.argv", ["collection_gate.py", str(junit_path), str(packet_path), str(collection_path)]
+    )
+    monkeypatch.setenv("ORAMA_REQUIRE_CORE_GATE", "1")
+    monkeypatch.setenv("ORAMA_DOCS_V2_REGISTRY", "registry.json")
+
+    assert gate_module().main() == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "collection-refused: ValueError"
+    assert "collected 3 nodes but junit 1 tests ran" in captured.err
