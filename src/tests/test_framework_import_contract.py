@@ -101,8 +101,8 @@ def test_ast_and_live_allowlist() -> None:
     assert seen == {(path, root) for path, roots in ALLOWLIST.items() for root in roots}
 
 
-def test_tripwire_imports_every_module() -> None:
-    """A blocker both records and prevents computed import-time imports."""
+def _tripwire(source_parent: Path, package: str) -> subprocess.CompletedProcess[str]:
+    """Import every module of ``package`` in a clean interpreter with a framework blocker."""
     code = f'''
 import importlib, importlib.abc, pkgutil, sys
 hits = []
@@ -110,16 +110,34 @@ class Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if any(fullname.split('.')[0] == family or fullname.split('.')[0].startswith(family + '_')\n               for family in {FAMILIES!r}):
             hits.append(fullname)
-            raise ModuleNotFoundError('framework import blocked', name=fullname)
+            raise ModuleNotFoundError('framework import blocked: ' + fullname, name=fullname)
 sys.meta_path.insert(0, Blocker())
-sys.path.insert(0, {str(SOURCE.parent)!r})
-top = importlib.import_module({PACKAGE!r})
+sys.path.insert(0, {str(source_parent)!r})
+top = importlib.import_module({package!r})
 for info in pkgutil.walk_packages(top.__path__, top.__name__ + '.'):
     importlib.import_module(info.name)
 assert not hits, hits
 '''
-    result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    return subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
+                          timeout=60, check=False)
+
+
+def test_tripwire_imports_every_module() -> None:
+    """A blocker both records and prevents computed import-time imports."""
+    result = _tripwire(SOURCE.parent, PACKAGE)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_tripwire_catches_a_planted_computed_family_import(tmp_path: Path) -> None:
+    """The tripwire itself must block a planted computed framework import."""
+    package = tmp_path / "planted_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "mod.py").write_text(
+        "import importlib\nimportlib.import_module('langchain_' + 'text_splitters')\n")
+    result = _tripwire(tmp_path, "planted_pkg")
+    assert result.returncode != 0
+    assert "framework import blocked: langchain_text_splitters" in result.stdout + result.stderr
 
 
 def test_published_metadata_has_no_framework_dependencies() -> None:
