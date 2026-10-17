@@ -123,3 +123,40 @@ def test_oversized_request_is_refused_before_validation(client):
     response = client.post("/api/workspace/run", content=b" " * 270000,
                            headers={"Content-Type": "application/json"})
     assert response.status_code == 413
+
+
+def test_bare_carriage_return_round_trips_through_the_csv_verifier(client):
+    text = "first\rsecond"
+    payload = {**FIXTURE, "sources": [{"id": "s1", "title": "CR fixture",
+               "passage": text, "kind": "primary"}],
+               "records": [{"claim": text, "source_id": "s1", "quote": text}]}
+    response = client.post("/api/workspace/run", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["receipt"]["row_count"] == 1
+
+
+def test_verifier_binds_the_receipt_to_the_hashed_input(client):
+    two_sources = {**FIXTURE, "sources": [
+        {"id": "s1", "title": "One", "passage": "The fixture contains three records.",
+         "kind": "unverified"},
+        {"id": "s2", "title": "Two", "passage": "Another passage.", "kind": "primary"}]}
+    result = client.post("/api/workspace/run", json=two_sources).json()
+    verifier = importlib.import_module("orama.workspace.verify")
+    csv_text = result["csv"]
+    assert verifier.verify_artifact(csv_text, result["receipt"])["passed"]
+    for tamper in (
+        lambda r: r.update(task="A different task"),
+        lambda r: r.update(privacy="open"),
+        lambda r: r.pop("input_sha256"),
+        lambda r: r.update(source_order=list(reversed(r["source_order"]))),
+    ):
+        receipt = json.loads(result["receipt_json"])
+        tamper(receipt)
+        verdict = verifier.verify_artifact(csv_text, receipt)
+        assert not verdict["passed"]
+
+
+def test_capabilities_expose_the_numeric_limits(client):
+    limits = client.get("/api/workspace/capabilities").json()["limits"]
+    assert limits == {"max_body_bytes": 262144, "max_sources": 32, "max_records": 100,
+                      "max_text_chars": 12000, "max_short_text_chars": 500}

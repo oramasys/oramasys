@@ -33,7 +33,7 @@ and the quote must occur verbatim in the selected source passage.
 This proves bounded source attribution, not real-world truth or general semantic entailment.
 General-user mode emphasizes the task and file; research mode expands source/check details.
 The existing v1 operator console remains reachable; the new workspace is the front door.
-v2 serves an independent small workspace from its existing FastAPI application.
+v2 serves the workspace API from its existing FastAPI application; the browser UI is a later slice.
 Both API contracts have the same fields and synthetic parity fixtures.
 All UI assets are local; no fonts, telemetry, analytics, or remote JavaScript.
 

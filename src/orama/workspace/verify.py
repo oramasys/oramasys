@@ -4,6 +4,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
+
+
+def canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _sha(text: str) -> str:
@@ -47,6 +52,16 @@ def verify_artifact(csv_text: str, receipt: dict) -> dict:
             )
         check("exact_source_support", supported)
         check("spreadsheet_safety", safe)
+        by_id = {source["id"]: source for source in receipt["sources"]}
+        rebuilt = {
+            "task": receipt["task"], "privacy": receipt["privacy"],
+            "sources": [{key: by_id[source_id][key] for key in ("id", "title", "passage", "kind")}
+                        for source_id in receipt["source_order"]],
+            "records": [{key: record[key] for key in ("claim", "source_id", "quote")}
+                        for record in records],
+        }
+        check("input_sha256", len(receipt["source_order"]) == len(sources)
+              and _sha(canonical_json(rebuilt)) == receipt["input_sha256"])
         check("receipt_schema", receipt["schema_version"] == "workspace-artifact-v1")
     except (KeyError, TypeError, ValueError, AttributeError, csv.Error):
         check("parseable_evidence", False)

@@ -4,17 +4,23 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from orama.workspace.verify import verify_artifact
+from orama.workspace.verify import canonical_json, verify_artifact
 
-Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=12000)]
-ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+MAX_BODY_BYTES = 262144
+MAX_SOURCES = 32
+MAX_RECORDS = 100
+MAX_TEXT_CHARS = 12000
+MAX_SHORT_TEXT_CHARS = 500
+Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
+                                        max_length=MAX_TEXT_CHARS)]
+ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
+                                             max_length=MAX_SHORT_TEXT_CHARS)]
 SourceId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")]
 Privacy = Literal["local", "sources", "redacted", "open"]
 Kind = Literal["primary", "secondary", "unverified"]
@@ -58,8 +64,8 @@ def safe_cell(value: str) -> bool:
 class WorkspaceTask(StrictModel):
     task: ShortText
     privacy: Privacy = "local"
-    sources: list[Source] = Field(min_length=1, max_length=32)
-    records: list[Record] = Field(min_length=1, max_length=100)
+    sources: list[Source] = Field(min_length=1, max_length=MAX_SOURCES)
+    records: list[Record] = Field(min_length=1, max_length=MAX_RECORDS)
 
     @model_validator(mode="after")
     def grounded_records(self):
@@ -76,10 +82,6 @@ class WorkspaceTask(StrictModel):
                        (record.claim, record.source_id, source.title, record.quote)):
                 raise ValueError("unsafe_spreadsheet_cell")
         return self
-
-
-def canonical_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def digest(value: str) -> str:
@@ -111,7 +113,8 @@ def run_task(task: WorkspaceTask) -> dict:
         "task": task.task, "privacy": task.privacy,
         "requested_disclosure": PRIVACY_PROFILES[task.privacy],
         "actual_disclosure": "none", "execution": "offline-deterministic",
-        "sources": sources, "records": [record.model_dump() for record in task.records],
+        "sources": sources, "source_order": [source.id for source in task.sources],
+        "records": [record.model_dump() for record in task.records],
         "input_sha256": digest(canonical_json(task.model_dump())),
         "artifact_sha256": digest(csv_text), "row_count": len(task.records),
         "limitations": LIMITATIONS,
@@ -148,4 +151,9 @@ def capabilities() -> dict:
         "network_enabled": False, "formats": ["csv"],
         "verification": "exact-extractive-attribution",
         "retention": "request-memory-only", "limitations": LIMITATIONS,
+        "limits": {
+            "max_body_bytes": MAX_BODY_BYTES, "max_sources": MAX_SOURCES,
+            "max_records": MAX_RECORDS, "max_text_chars": MAX_TEXT_CHARS,
+            "max_short_text_chars": MAX_SHORT_TEXT_CHARS,
+        },
     }
