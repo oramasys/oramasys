@@ -32,6 +32,7 @@ ALLOWLIST_DIGEST = "6ecbbfe8e65f1e9cc2ee5ddb4077c8e7b57a664cf558403b69d5708da57b
 
 EXPECT = {
     "m1-gen1": {
+        "record_sha256": "a0457ab37d69144bb100adb5be2b9c4fbd21fec27bc5531d7339bc60d1251014",
         "inventory_digest": "142fd8ac5b58e2482516271b8177daaae97934e8f3aaace3440c59ba08b38f77",
         "manifest_digest": "4892b6ba9894eee0e85deae3dcbb020a82f3afb55fadc7424f2a3cfa2dd6bae2",
         "harness_commit": "3332b615668d4040ff9d0e8cc0d888870e6160fa",
@@ -43,6 +44,7 @@ EXPECT = {
         "core": "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973",
     },
     "m1-gen2": {
+        "record_sha256": "661371f533c9a9f3ec1d9de070580ffaef95076db79597d90de22a81290efb17",
         "inventory_digest": "47c7790b0d95eef57f5cb6ad7f86dcae77fb4ae7aa0b0667b2deb86d4479845c",
         "manifest_digest": "309d44440d4db0938ed55891ffa5a26768b420033982e6eaf71c1382b1d9a32f",
         "harness_commit": "902d2a8edc3fb1b9f7a91fe93a8aca6f4f000100",
@@ -101,11 +103,17 @@ def load_record(folder: Path) -> dict:
 
 def verify_generation(folder: Path) -> list[str]:
     """Return the problems found in one generation folder; empty means it is intact."""
+    expected = EXPECT.get(folder.name)
+    if expected is None:
+        return ["generation has no pinned expectations"]
     try:
+        record_bytes = (folder / "generation.json").read_bytes()
         record = load_record(folder)
     except (OSError, ValueError) as error:
         return [f"generation.json unreadable: {error}"]
     problems: list[str] = []
+    if _sha(record_bytes) != expected["record_sha256"]:
+        problems.append("generation.json differs from its reviewed bytes")
     inventory = record.get("inventory")
     if not isinstance(inventory, list) or not inventory:
         return ["inventory missing"]
@@ -132,6 +140,22 @@ def verify_generation(folder: Path) -> list[str]:
     if record.get("inventory_digest") != _inventory_digest(inventory):
         problems.append("inventory_digest does not match the inventory")
     return problems
+
+
+# The problem each tampering must produce. Pinning the whole record would refuse every record
+# edit by itself, so each mutation must also trip the specific check that guards it.
+REFUSAL = {
+    "flip_byte": "sha256 differs",
+    "extra_file": "not in the inventory",
+    "missing_file": "missing or not a regular file",
+    "bad_digest": "inventory_digest does not match",
+    "unsorted": "unique and sorted",
+    "symlink": "missing or not a regular file",
+    "traversal": "unsafe path",
+    "artifact_identity": "reviewed bytes",
+    "record_identity": "reviewed bytes",
+    "record_reserialization": "reviewed bytes",
+}
 
 
 @pytest.fixture(params=sorted(EXPECT))
@@ -222,6 +246,9 @@ def test_generation_one_copies_equal_the_retained_historical_sources() -> None:
         "unsorted",
         "symlink",
         "traversal",
+        "artifact_identity",
+        "record_identity",
+        "record_reserialization",
     ],
 )
 def test_the_verifier_refuses_tampered_generations(
@@ -252,10 +279,33 @@ def test_the_verifier_refuses_tampered_generations(
         target.symlink_to(
             GENERATIONS / generation / "inputs/compatibility-manifest.v3.json"
         )
-    else:
+    elif mutation == "traversal":
         record["inventory"][0]["path"] = "../escape.json"
         (folder / "generation.json").write_text(json.dumps(record))
-    assert verify_generation(folder) != []
+    else:
+        if mutation == "artifact_identity":
+            record["evidence"]["artifacts"][0]["artifact_id"] = "0"
+        elif mutation == "record_identity":
+            record["id"] = "different-generation"
+        (folder / "generation.json").write_text(json.dumps(record))
+    problems = verify_generation(folder)
+    assert any(REFUSAL[mutation] in problem for problem in problems), problems
+
+
+def test_every_mutation_names_the_check_that_must_refuse_it() -> None:
+    """Whole-record pinning must not mask the individual checks: each mutation has its own."""
+    assert set(REFUSAL) == {
+        "flip_byte",
+        "extra_file",
+        "missing_file",
+        "bad_digest",
+        "unsorted",
+        "symlink",
+        "traversal",
+        "artifact_identity",
+        "record_identity",
+        "record_reserialization",
+    }
 
 
 def test_nothing_at_runtime_or_in_ci_consumes_generations_or_a_pointer() -> None:
