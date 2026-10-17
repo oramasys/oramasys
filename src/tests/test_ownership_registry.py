@@ -31,7 +31,7 @@ SNAPSHOTS = {
     "core-r3": FIXTURES / "graph-ownership-registry-core-r3.json",
 }
 CORE_PINS = {
-    "production": "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973",
+    "production": "6d75cfe08af95992dddffab13ae3019aa9c41350",
     "policy-r3": "04759a50c748444ff97136ea95c1e1289eac3a1a",
     "core-r3": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68",
 }
@@ -52,11 +52,14 @@ def snapshot_for_profile(profile: str) -> Path:
 
 SNAPSHOT = snapshot_for_profile(PROFILE)
 PINNED_DIGESTS = {
-    "baseline": "91d3c74b5cd9aea1d176dd87115f09151fc1e3a6155292aa58a32d8f7bb40787",
+    "baseline": "1f1531d94f73309f2c3271af41313fd15bf5438ba0a91355ea81111fb66fcb34",
     "policy-r3": "4972754f7ceb0ad3e908f6583533fec3c59a807732ac86c3ee967df33e29e36f",
     "core-r3": "e270493a7c924871e50fcf384c792a6922a375976127e26214f69b7c89ba9437",
 }
 PRE_R3_ARCHIVE_DIGEST = "c1bf6b519f703184745e61142f259ae8eb73d163210bb1395437f8a82c2b402f"
+# M1 generation 1 production snapshot (Core 609ff0ed), kept byte for byte after the
+# generation-2 promotion as historical and rollback evidence.
+M1_GEN1_ARCHIVE_DIGEST = "91d3c74b5cd9aea1d176dd87115f09151fc1e3a6155292aa58a32d8f7bb40787"
 
 
 def index_records(registry: dict[str, Any]) -> dict[str, Any]:
@@ -94,6 +97,18 @@ def test_pre_r3_archive_preserves_the_original_baseline_bytes() -> None:
     """The archived baseline is evidence, not JSON eligible for reformatting."""
     archive = FIXTURES / "graph-ownership-registry-pre-r3.json"
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == PRE_R3_ARCHIVE_DIGEST
+
+
+def test_m1_gen1_archive_preserves_the_generation_one_production_bytes() -> None:
+    """Generation 1 stays reproducible: same bytes, Core 609ff0ed, same structure as now."""
+    archive = FIXTURES / "graph-ownership-registry-m1-gen1.json"
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == M1_GEN1_ARCHIVE_DIGEST
+    gen1 = json.loads(archive.read_text(encoding="utf-8"))
+    assert gen1["qualification_profile"]["core_pin"] == "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973"
+    current = json.loads((FIXTURES / "graph-ownership-registry.json").read_text(encoding="utf-8"))
+    assert {k: v for k, v in gen1.items() if k != "qualification_profile"} == {
+        k: v for k, v in current.items() if k != "qualification_profile"}, (
+        "the promotion may move only the qualification profile, never a structural record")
 
 
 def test_unknown_profile_is_refused() -> None:

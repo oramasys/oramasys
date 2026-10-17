@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from orama.compat.manifest import ManifestError, canonical_digest, validate_manifest
+from tests.active_pins import HISTORY, M1_GEN1_CORE_PINS
 from tests.test_compatibility_manifest import lane_shas
 from tests.test_compatibility_pins import producer_refs
 from tests.test_ownership_registry import CORE_PINS
@@ -18,6 +19,7 @@ from tests.test_ownership_registry import CORE_PINS
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "requirements" / "compatibility-manifest.v3.json"
 SCRIPT = ROOT / "scripts" / "compat_manifest_digest.py"
+GEN1 = HISTORY / "compatibility-manifest.v3.json"
 SHA_FIELDS = ("candidate", "production_pin")
 
 
@@ -50,7 +52,7 @@ def test_data_file_validates_as_schema3() -> None:
 
 def test_data_carries_the_verified_identities() -> None:
     manifest = load()
-    assert manifest["consumer"]["sha"] == "f8898b35d5249e483b2f4a68c097957e675a0ef4"
+    assert manifest["consumer"]["sha"] == "133553a6d05b8704e6e4010f581d57623829f4b2"
     grant = manifest["producers"]["grant-authority"]
     assert grant["declared_dependency"] is False
     assert "production_pin" not in grant
@@ -150,12 +152,24 @@ def test_script_lone_surrogate_in_unvalidated_section_is_stable_error(tmp_path: 
     assert "Traceback" not in result.stderr
 
 
-def test_data_pins_differ_from_candidates_and_core_pin_is_registry_bound() -> None:
+def test_data_pins_equal_candidates_only_through_the_flag_and_core_is_registry_bound() -> None:
+    """Generation 2 promotes the candidates: equality is declared, never implied."""
     producers = load()["producers"]
     for role, entry in producers.items():
         if role != "grant-authority":
-            assert entry["production_pin"] != entry["candidate"]
+            assert entry["production_pin"] == entry["candidate"]
+            assert entry["candidate_equals_pin"] is True
     assert producers["neutral-mechanics"]["production_pin"] == CORE_PINS["production"]
+
+
+def test_generation_one_pins_differed_from_their_candidates() -> None:
+    """Archived generation 1 keeps its unpromoted shape and its frozen registry binding."""
+    producers = json.loads(GEN1.read_text(encoding="utf-8"))["producers"]
+    for role, entry in producers.items():
+        if role != "grant-authority":
+            assert entry["production_pin"] != entry["candidate"]
+            assert "candidate_equals_pin" not in entry
+    assert producers["neutral-mechanics"]["production_pin"] == M1_GEN1_CORE_PINS["production"]
 
 
 def test_script_exit_codes_for_digest_mismatch(tmp_path: Path) -> None:
@@ -217,3 +231,22 @@ def test_script_refuses_a_producer_ref_that_differs_from_the_registry() -> None:
 def test_script_usage_error_is_exit_2() -> None:
     assert run_script().returncode == 2
     assert run_script("/nonexistent/manifest.json").returncode == 2
+
+
+def test_script_refuses_a_self_consistent_manifest_on_the_wrong_lane(tmp_path: Path) -> None:
+    """The lane check reads requirements/, never the manifest's own pins.
+
+    A manifest that moves a profile's pin and every matching cell together is
+    self-consistent. It must still be refused while the lane file names another Core,
+    otherwise the check compares the manifest with itself and can never fail.
+    """
+    bad = load()
+    moved = "1" * 40
+    bad["registry_profiles"]["policy-r3"] = moved
+    for cell in bad["cells"]:
+        if cell["profile"] == "policy-r3":
+            cell["core_sha"] = moved
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(bad), encoding="utf-8")
+    result = run_script(str(path), "--allow-unbound")
+    assert result.returncode == 1, result.stderr

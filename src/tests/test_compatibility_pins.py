@@ -11,7 +11,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from tests.active_pins import ACTIVE_PINS, LANE_FILES
+from tests.active_pins import ACTIVE_PINS, LANE_FILES, M1_GEN1_CORE_PINS
 from tests.test_ownership_registry import CORE_PINS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -112,7 +112,8 @@ def test_every_workflow_action_is_pinned_to_a_full_commit() -> None:
 
 
 def test_active_pins_differ_from_frozen_only_where_declared() -> None:
-    """The live contract may move production alone; frozen evidence keeps its own table."""
-    moved = {p for p in CORE_PINS if ACTIVE_PINS[p] != CORE_PINS[p]}
-    assert moved <= {"production"}, f"undeclared pin movement: {sorted(moved)}"
+    """Generation two moves production Core alone; generation one keeps its own table."""
+    moved = {p for p in M1_GEN1_CORE_PINS if ACTIVE_PINS[p] != M1_GEN1_CORE_PINS[p]}
+    assert moved == {"production"}, f"undeclared pin movement: {sorted(moved)}"
+    assert ACTIVE_PINS == CORE_PINS
     assert all(FULL_SHA.fullmatch(sha) for sha in ACTIVE_PINS.values())

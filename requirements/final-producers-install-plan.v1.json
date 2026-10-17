@@ -2,7 +2,7 @@
   "schema": 1,
   "consumer": {
     "repository": "oramasys/oramasys",
-    "commit": "f8898b35d5249e483b2f4a68c097957e675a0ef4",
+    "commit": "133553a6d05b8704e6e4010f581d57623829f4b2",
     "distribution": "oramasys",
     "module": "orama",
     "install_mode": "built-wheel"

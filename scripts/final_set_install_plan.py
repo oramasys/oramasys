@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import sys
 
-CONSUMER_COMMIT = "f8898b35d5249e483b2f4a68c097957e675a0ef4"
+CONSUMER_COMMIT = "133553a6d05b8704e6e4010f581d57623829f4b2"
 CONSUMER = {
     "repository": "oramasys/oramasys",
     "commit": CONSUMER_COMMIT,

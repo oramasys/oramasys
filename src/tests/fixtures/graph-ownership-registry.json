@@ -446,9 +446,9 @@
   ],
   "qualification_profile": {
     "status": "production",
-    "name": "core-r3-production",
+    "name": "m1-gen2-production",
     "core_schema": "2",
-    "core_pin": "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973",
-    "note": "Reviewed merged R3 producer and consumer baseline. Candidate profiles remain historical qualification evidence."
+    "core_pin": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+    "note": "M1 generation-2 production baseline: perpetua-core 6d75cfe0, promoted from the M1 candidate set qualified in oramasys run 38916773943. Structural records are unchanged from generation 1. ownership-registry-m1-gen1.json keeps the generation-1 bytes (Core 609ff0ed) as historical and rollback evidence. Becomes the active production pin only after operator evidence acceptance and merge."
   }
 }

@@ -187,8 +187,8 @@ def test_evidence_receipt_retains_only_the_verified_approval_binding() -> None:
 
 @pytest.mark.parametrize("name", ["consumer", "consumer-rebuild"])
 def test_consumer_checkouts_pin_the_qualified_commit(name: str) -> None:
-    """Both consumer checkouts must pin the qualified commit."""
-    assert _checkout(name)["ref"] == "f8898b35d5249e483b2f4a68c097957e675a0ef4"
+    """Both consumer checkouts must pin the qualified generation-2 consumer C2."""
+    assert _checkout(name)["ref"] == "133553a6d05b8704e6e4010f581d57623829f4b2"
 
 
 def test_bundle_is_a_git_worktree_without_application_source() -> None:
