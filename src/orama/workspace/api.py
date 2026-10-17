@@ -3,10 +3,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from orama.workspace.workflow import WorkspaceTask, capabilities, run_task
+from orama.workspace.workflow import MAX_BODY_BYTES, WorkspaceTask, capabilities, run_task
 
 router = APIRouter()
-MAX_BODY_BYTES = 262144
 
 
 @router.get("/api/workspace/capabilities")
