@@ -45,8 +45,8 @@ langsmith==0.14.5
 logfire-api==5.1.1
 openai==1.109.1
 opentelemetry-api==1.37.0
-oramasys-agate @ git+https://github.com/oramasys/agate.git@41a0da9d52e0131049a1469234ac56f6990fc635
-oramasys-telos @ git+https://github.com/oramasys/telos.git@b2143083044496d93be3ca2dc88c28135e034d9f
+oramasys-agate @ git+https://github.com/oramasys/agate.git@172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc
+oramasys-telos @ git+https://github.com/oramasys/telos.git@931b6347142e8e66b31136e3ac8159d86eb5b2f7
 orjson==3.13.0
 ormsgpack==1.12.2
 packaging==25.0
