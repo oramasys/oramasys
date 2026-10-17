@@ -19,7 +19,8 @@ from orama.compat.manifest import (
     validate_workflow,
     workflow_cells,
 )
-from tests.test_compatibility_pins import LANE_FILES, producer_refs
+from tests.active_pins import LANE_FILES, frozen_lane_files
+from tests.test_compatibility_pins import producer_refs
 from tests.test_ownership_registry import CORE_PINS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,9 +33,8 @@ def load() -> dict:
 
 
 def lane_shas() -> dict[str, dict[str, str]]:
-    return {p: {"path": f"requirements/{n}",
-                "sha": (ROOT / "requirements" / n).read_text(encoding="utf-8").strip()}
-            for p, n in LANE_FILES.items()}
+    """Lane files as the frozen M1 manifest records them (not the live, promoted files)."""
+    return frozen_lane_files()
 
 
 def check(manifest: dict) -> None:
