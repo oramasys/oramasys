@@ -38,10 +38,10 @@ jobs:
         run: |
           python -m pip install --no-cache-dir '.[dev]'
           python -m pip check
-          python -m pip freeze | grep 'perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@609ff0ed99cf8eca6c9ef608e764b7a25b6b9973'
+          python -m pip freeze | grep 'perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@6d75cfe08af95992dddffab13ae3019aa9c41350'
       - name: Verify clean non-editable production install from outside the checkout
         working-directory: ${{ runner.temp }}
-        run: python -I "$GITHUB_WORKSPACE/scripts/verify_production_install.py" 609ff0ed99cf8eca6c9ef608e764b7a25b6b9973
+        run: python -I "$GITHUB_WORKSPACE/scripts/verify_production_install.py" 6d75cfe08af95992dddffab13ae3019aa9c41350
       - name: Enforce Telos network authority
         run: python scripts/check_telos_network_authority.py src/orama
       - name: Test with coverage

@@ -11,6 +11,7 @@ import re
 import tomllib
 from pathlib import Path
 
+from tests.active_pins import ACTIVE_PINS, LANE_FILES
 from tests.test_ownership_registry import CORE_PINS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,11 +22,6 @@ CORE_URL = "git+https://github.com/oramasys/perpetua-core.git@"
 PRODUCER_CHECKOUT = re.compile(
     r"repository:\s*diazMelgarejo/orama-system\s*\n\s*ref:\s*(\S+)"
 )
-LANE_FILES = {
-    "production": "compatibility-core-production.txt",
-    "policy-r3": "compatibility-core-policy-r3.txt",
-    "core-r3": "compatibility-core-candidate.txt",
-}
 
 
 def producer_refs() -> dict[str, list[str]]:
@@ -61,12 +57,12 @@ def test_core_lane_files_match_the_registry_profiles() -> None:
     for profile, name in LANE_FILES.items():
         sha = (REQUIREMENTS / name).read_text(encoding="utf-8").strip()
         assert FULL_SHA.fullmatch(sha), f"{name} must hold one full commit SHA"
-        assert sha == CORE_PINS[profile], f"{name} disagrees with profile {profile}"
+        assert sha == ACTIVE_PINS[profile], f"{name} disagrees with profile {profile}"
 
 
 def test_production_pin_agrees_everywhere_it_is_repeated() -> None:
     """Package dependency, production lane and the clean-install check name one Core."""
-    expected = CORE_PINS["production"]
+    expected = ACTIVE_PINS["production"]
     assert production_dependency_pin() == expected
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert f"{CORE_URL}{expected}" in ci
@@ -90,7 +86,7 @@ def test_reproduction_recipe_pairs_each_lane_sha_with_its_profile() -> None:
         shas = FULL_SHA.findall(block)
         assert len(profiles) == 1, f"command must set exactly one profile:\n{block}"
         assert len(set(shas)) == 1, f"command must name exactly one Core SHA:\n{block}"
-        assert shas[0] == CORE_PINS[profiles[0]], f"SHA does not match {profiles[0]}"
+        assert shas[0] == ACTIVE_PINS[profiles[0]], f"SHA does not match {profiles[0]}"
         seen[profiles[0]] = shas[0]
     assert set(seen) == set(LANE_FILES), f"recipe must cover every lane, got {sorted(seen)}"
 
@@ -98,11 +94,11 @@ def test_reproduction_recipe_pairs_each_lane_sha_with_its_profile() -> None:
 def test_ci_repeats_only_the_production_core_and_the_producer_revision() -> None:
     """Every full SHA in ci.yml is either the production Core pin or the producer ref."""
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    allowed = {CORE_PINS["production"], *producer_refs()["ci.yml"]}
+    allowed = {ACTIVE_PINS["production"], *producer_refs()["ci.yml"]}
     # Action pins are checked by test_every_workflow_action_is_pinned_to_a_full_commit.
     without_actions = "\n".join(ln for ln in ci.splitlines() if "uses:" not in ln)
     assert set(FULL_SHA.findall(without_actions)) == allowed
-    assert CORE_PINS["production"] in re.findall(
+    assert ACTIVE_PINS["production"] in re.findall(
         r"verify_production_install\.py\"\s+([0-9a-f]{40})", ci)
 
 
@@ -113,3 +109,10 @@ def test_every_workflow_action_is_pinned_to_a_full_commit() -> None:
             m = re.search(r"uses:\s*(\S+)", line)
             if m and not m.group(1).startswith("./"):
                 assert re.search(r"@[0-9a-f]{40}$", m.group(1)), f"{wf.name}: {line.strip()}"
+
+
+def test_active_pins_differ_from_frozen_only_where_declared() -> None:
+    """The live contract may move production alone; frozen evidence keeps its own table."""
+    moved = {p for p in CORE_PINS if ACTIVE_PINS[p] != CORE_PINS[p]}
+    assert moved <= {"production"}, f"undeclared pin movement: {sorted(moved)}"
+    assert all(FULL_SHA.fullmatch(sha) for sha in ACTIVE_PINS.values())

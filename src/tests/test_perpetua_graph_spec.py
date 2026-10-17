@@ -10,10 +10,11 @@ import pytest
 from perpetua_core.graph.spec import GraphSpec
 
 from orama.graph.perpetua_graph import build_graph_spec
+from tests.active_pins import ACTIVE_PINS
 
 
 ROOT = Path(__file__).resolve().parents[2]
-_GRAPH_SPEC_VALIDATION_REVISION = "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973"
+_GRAPH_SPEC_VALIDATION_REVISION = ACTIVE_PINS["production"]
 
 
 def test_default_graph_spec_round_trips_with_stable_identity() -> None:
