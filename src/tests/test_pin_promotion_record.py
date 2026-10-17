@@ -1,9 +1,10 @@
-"""The generation-2 promotion record agrees with every place it describes, and stays inert.
+"""The generation-2 promotion record agrees with every place it describes.
 
 The record links the active generation to an immutable rollback target. It must agree with
 the active manifest, the package dependencies, the registry snapshots and the archived
-generation 1. It may not claim an authorization: it stays ``proposed`` until the operator
-accepts the evidence, and ``production-pin-promotion`` remains disabled in the manifest.
+generation 1. Its status is a label that matches what main installs (``pins-merged``); serving
+activation and T3 are separate switches listed in ``still_off``. The approved manifest keeps its
+frozen pre-merge labels, which the record explicitly supersedes.
 """
 from __future__ import annotations
 
@@ -22,11 +23,20 @@ MANIFEST = json.loads((REQ / "compatibility-manifest.v3.json").read_text(encodin
 FIXTURES = ROOT / "src" / "tests" / "fixtures"
 
 
-def test_record_is_proposed_and_promotion_stays_disabled() -> None:
+def test_record_says_pins_are_merged_and_names_what_stays_off() -> None:
+    """The status is a label that must match what main installs; serving and T3 stay separate."""
     assert RECORD["schema"] == 1 and RECORD["generation"] == "m1-gen2"
-    assert RECORD["status"] == "proposed"
+    assert RECORD["status"] == "pins-merged"
+    assert RECORD["pins_merged"] == {
+        "orama_system_pr": 414, "oramasys_consumer_pr": 53, "oramasys_harness_pr": 55}
+    assert {"serving", "t3", "t4", "t5"} <= set(RECORD["still_off"])
+    assert "authorizes nothing" not in RECORD["scope"], "stale: the pins are already installed"
+
+
+def test_frozen_manifest_keeps_its_original_labels_and_the_record_supersedes_them() -> None:
+    """The approved manifest is never edited; its pre-merge capability label is superseded here."""
     assert "production-pin-promotion" in MANIFEST["disabled_capabilities"]
-    assert "authorizes nothing" in RECORD["scope"]
+    assert RECORD["supersedes_frozen_labels"] == ["production-pin-promotion"]
 
 
 def test_promoted_pins_are_the_active_manifest_and_package_pins() -> None:
