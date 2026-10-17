@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "sealed_files": {
+    "approval-binding.json": {
+      "3.11": "dfddccea9b29439e69af734d5da67c4a5a76fad28d1920e77cd92bbd6e52aae0",
+      "3.12": "dfddccea9b29439e69af734d5da67c4a5a76fad28d1920e77cd92bbd6e52aae0"
+    },
+    "collection-gate.json": {
+      "3.11": "52a2d9da90131af4d4829779561a242842b22c09a66ec1594f657231510c2605",
+      "3.12": "52a2d9da90131af4d4829779561a242842b22c09a66ec1594f657231510c2605"
+    },
+    "collection.json": {
+      "3.11": "a4eb1239eb5f1f8cd4e2f8795c093957919eff2bc84561b6d280747cd40add3b",
+      "3.12": "a4eb1239eb5f1f8cd4e2f8795c093957919eff2bc84561b6d280747cd40add3b"
+    },
+    "final-results.xml": {
+      "3.11": "6db34a48e6edd029e7f6f95038d61b04ecab598e10257111add9b57797a91053",
+      "3.12": "b98c29928d4cf2d02c00dd4ceb28c7c6da2b39506bd0b3f62344174426f850b5"
+    },
+    "identity.json": {
+      "3.11": "4a8eed3ffce8f7e904919cf5ec0c3edc4f8b59c433c8d4d889c9cf99639e9a8d",
+      "3.12": "4a8eed3ffce8f7e904919cf5ec0c3edc4f8b59c433c8d4d889c9cf99639e9a8d"
+    },
+    "install-reports/producer-1.json": {
+      "3.11": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed",
+      "3.12": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed"
+    },
+    "install-reports/producer-2.json": {
+      "3.11": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed",
+      "3.12": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed"
+    },
+    "install-reports/producer-3.json": {
+      "3.11": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed",
+      "3.12": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed"
+    },
+    "install-reports/producer-4.json": {
+      "3.11": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed",
+      "3.12": "e530ea8e53a75ddf0b5d0664eb721c4eadadb74485af9106ff17f490542d4eed"
+    },
+    "provenance-one.json": {
+      "3.11": "a807b3e78f4eec2965db8f76f6947b927bc21906dfc438bd2ea9b9410244e5f2",
+      "3.12": "cbccdeee087d661d06bc45065a367709ddaec91323b3b9f700960b0d2e5939f8"
+    },
+    "provenance-two.json": {
+      "3.11": "a807b3e78f4eec2965db8f76f6947b927bc21906dfc438bd2ea9b9410244e5f2",
+      "3.12": "cbccdeee087d661d06bc45065a367709ddaec91323b3b9f700960b0d2e5939f8"
+    },
+    "rebuild-comparison.json": {
+      "3.11": "4c295975a380163cd7a71470b49e9a7f2764d8794883f5dea203a5eb6ee289a2",
+      "3.12": "4c295975a380163cd7a71470b49e9a7f2764d8794883f5dea203a5eb6ee289a2"
+    },
+    "scenario-traces/POP-CAPABILITY-1.json": {
+      "3.11": "3300bab0a0ffe3194b67377fa839a9b23f9c9237fdfb0c6890403db9e3157217",
+      "3.12": "3300bab0a0ffe3194b67377fa839a9b23f9c9237fdfb0c6890403db9e3157217"
+    },
+    "scenario-traces/POP-CASCADE-1.json": {
+      "3.11": "e5462adea01f02d6298743e69cf79e59c6b1cab59adb6ffe8788496b28042167",
+      "3.12": "e5462adea01f02d6298743e69cf79e59c6b1cab59adb6ffe8788496b28042167"
+    },
+    "scenario-traces/POP-COMMON-1.json": {
+      "3.11": "598391f5150083b80f176fe196017ee60aa08600a995724a4acd44d62b10fe80",
+      "3.12": "598391f5150083b80f176fe196017ee60aa08600a995724a4acd44d62b10fe80"
+    },
+    "scenario-traces/POP-COMMS-1.json": {
+      "3.11": "e261af4ee6bd47a0936d47489bb028175c3bf9cc805c315014abf8321318dbb4",
+      "3.12": "e261af4ee6bd47a0936d47489bb028175c3bf9cc805c315014abf8321318dbb4"
+    },
+    "scenario-traces/POP-CONFORM-1.json": {
+      "3.11": "7500daa54bb0362b26364296cb423d3dc5382b09b301b05da0accda968e5649c",
+      "3.12": "7500daa54bb0362b26364296cb423d3dc5382b09b301b05da0accda968e5649c"
+    },
+    "scenario-traces/POP-MOTIVE-1.json": {
+      "3.11": "e94a0b1d7ad36ad849ef75e34cedc87be4bd30de4db6f8d93bb5fff6195f5578",
+      "3.12": "e94a0b1d7ad36ad849ef75e34cedc87be4bd30de4db6f8d93bb5fff6195f5578"
+    },
+    "scenarios.json": {
+      "3.11": "cfa7e5c933f4a9f1f8576a96164695a9e79513486fcf251546637feeb48986eb",
+      "3.12": "cfa7e5c933f4a9f1f8576a96164695a9e79513486fcf251546637feeb48986eb"
+    }
+  },
+  "source": {
+    "kind": "metadata-only receipt",
+    "path": "docs/v2/references/m1-gen2-qualification-evidence-receipt-2026-10-18.md",
+    "pull_request": 416,
+    "repository": "orama-system"
+  }
+}
