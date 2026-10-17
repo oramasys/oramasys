@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 
-DIALER_PATH = Path("src/orama/gateway/dialer.py")
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE_ROOT = Path(os.environ.get("ORAMA_QUALIFICATION_SOURCE_ROOT", ROOT))
+DIALER_PATH = SOURCE_ROOT / "src/orama/gateway/dialer.py"
 
 
 def _imports(path: Path) -> set[str]:

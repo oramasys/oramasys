@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
@@ -147,4 +148,7 @@ def test_guard_does_not_scan_test_tree(tmp_path: Path) -> None:
 
 
 def test_current_oramasys_production_tree_has_no_raw_network_authority() -> None:
-    assert scan_tree(ROOT / "src/orama") == []
+    source_root = Path(os.environ.get("ORAMA_QUALIFICATION_SOURCE_ROOT", ROOT))
+    production = source_root / "src/orama"
+    assert production.is_dir(), "qualification source tree is unavailable"
+    assert scan_tree(production) == []

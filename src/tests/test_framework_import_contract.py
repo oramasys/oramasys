@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -21,7 +22,10 @@ def is_framework(name: str) -> bool:
 
 PACKAGE = "orama"
 ALLOWLIST = {"compat/pydantic_ai_bridge.py": {"pydantic_ai"}}
-SOURCE = Path(__file__).resolve().parents[1] / PACKAGE
+# The qualification bundle carries the harness tests without src/orama; the
+# consumer source under test is selected explicitly, as in the sibling static tests.
+SOURCE_ROOT = Path(os.environ.get("ORAMA_QUALIFICATION_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
+SOURCE = SOURCE_ROOT / "src" / PACKAGE
 
 
 def static_string(node: ast.AST) -> str | None:
@@ -97,8 +101,8 @@ def test_ast_and_live_allowlist() -> None:
     assert seen == {(path, root) for path, roots in ALLOWLIST.items() for root in roots}
 
 
-def test_tripwire_imports_every_module() -> None:
-    """A blocker both records and prevents computed import-time imports."""
+def _tripwire(source_parent: Path, package: str) -> subprocess.CompletedProcess[str]:
+    """Import every module of ``package`` in a clean interpreter with a framework blocker."""
     code = f'''
 import importlib, importlib.abc, pkgutil, sys
 hits = []
@@ -106,21 +110,39 @@ class Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if any(fullname.split('.')[0] == family or fullname.split('.')[0].startswith(family + '_')\n               for family in {FAMILIES!r}):
             hits.append(fullname)
-            raise ModuleNotFoundError('framework import blocked', name=fullname)
+            raise ModuleNotFoundError('framework import blocked: ' + fullname, name=fullname)
 sys.meta_path.insert(0, Blocker())
-sys.path.insert(0, {str(SOURCE.parent)!r})
-top = importlib.import_module({PACKAGE!r})
+sys.path.insert(0, {str(source_parent)!r})
+top = importlib.import_module({package!r})
 for info in pkgutil.walk_packages(top.__path__, top.__name__ + '.'):
     importlib.import_module(info.name)
 assert not hits, hits
 '''
-    result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    return subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
+                          timeout=60, check=False)
+
+
+def test_tripwire_imports_every_module() -> None:
+    """A blocker both records and prevents computed import-time imports."""
+    result = _tripwire(SOURCE.parent, PACKAGE)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_tripwire_catches_a_planted_computed_family_import(tmp_path: Path) -> None:
+    """The tripwire itself must block a planted computed framework import."""
+    package = tmp_path / "planted_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "mod.py").write_text(
+        "import importlib\nimportlib.import_module('langchain_' + 'text_splitters')\n")
+    result = _tripwire(tmp_path, "planted_pkg")
+    assert result.returncode != 0
+    assert "framework import blocked: langchain_text_splitters" in result.stdout + result.stderr
 
 
 def test_published_metadata_has_no_framework_dependencies() -> None:
     """Published runtime, extra, and build dependencies remain framework-free."""
-    data = tomllib.loads((SOURCE.parents[1] / "pyproject.toml").read_text())
+    data = tomllib.loads((SOURCE_ROOT / "pyproject.toml").read_text())
     project = data["project"]
     dependencies = project.get("dependencies", []) + data["build-system"].get("requires", [])
     dependencies += [item for group in project.get("optional-dependencies", {}).values() for item in group]

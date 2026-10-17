@@ -1,0 +1,70 @@
+{
+  "agate_profile_source": {
+    "commit": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
+    "path": "src/agate/data/hardware_profiles.json",
+    "repository": "oramasys/agate",
+    "sha256": "ce0eed94041e191398516958b240fb3bb838255c3644eb63bec55508e7051edc"
+  },
+  "agate_profiles": [
+    "mac-studio",
+    "win-rtx3080",
+    "win-rtx5080"
+  ],
+  "disabled_capabilities": [
+    "t3-implementation",
+    "t4-production-foreign-provider-transport",
+    "t5-continuation",
+    "remote-autonomous-activation",
+    "production-pin-promotion"
+  ],
+  "final_cell_skips_allowed": 0,
+  "historical_only_modules": [
+    "src/tests/core_gate/test_start_seam_absent.py"
+  ],
+  "packet_version": 1,
+  "required_capabilities": [
+    "seam-positive-modules-collected"
+  ],
+  "required_environment": [
+    "ORAMA_REQUIRE_AGATE_EVIDENCE",
+    "ORAMA_REQUIRE_CLEAN_INSTALL",
+    "ORAMA_REQUIRE_CORE_GATE",
+    "ORAMA_REQUIRE_CORE_R3",
+    "ORAMA_REQUIRE_CORE_START_SEAM",
+    "ORAMA_REQUIRE_OWNER_CANDIDATES",
+    "ORAMA_REQUIRE_PHYLAX_INTEROP"
+  ],
+  "required_modules": [
+    "src/tests/agate_evidence/test_agate_evidence_age.py",
+    "src/tests/core_gate/test_accounting_start_integration.py",
+    "src/tests/core_gate/test_admission_gate_scheduler.py",
+    "src/tests/core_gate/test_admission_runner_scheduler.py",
+    "src/tests/core_gate/test_admitted_observation_delivery.py",
+    "src/tests/core_gate/test_admitted_observation_unknown_disposition.py",
+    "src/tests/core_gate/test_crash_windows.py",
+    "src/tests/core_gate/test_delivery_seam.py",
+    "src/tests/core_gate/test_lost_run_recovery.py",
+    "src/tests/core_gate/test_runtime_gate_hardening.py",
+    "src/tests/core_gate/test_start_seam_runtime.py",
+    "src/tests/interop/test_verify_only_serving.py",
+    "src/tests/owner_candidates/test_adapters.py"
+  ],
+  "required_setup_inputs": [
+    "ORAMA_DOCS_V2_REGISTRY"
+  ],
+  "residual_limits": [
+    "Evidence is GitHub-hosted ubuntu-latest on Python 3.11 and 3.12 only; macOS is auxiliary and non-gating; Windows, NFS and read-only mounts are not covered.",
+    "Scenario drivers are deterministic synthetic fixtures; a structurally valid receipt makes no claim about a live population or a calibrated risk.",
+    "Verify-only serving is same-UID and local-only; cross-UID or remote publication of revocation state is unsupported, and no Level-1 freshness bound exists.",
+    "The descriptor proof cannot exclude a foreign opener of the same database file in the instant of the open, outside the module's lock.",
+    "Phylax is composition-only and the grant-serving extra is opt-in; no production-pin promotion, serving activation or T3 behaviour is qualified here."
+  ],
+  "scenarios": [
+    "POP-CASCADE-1",
+    "POP-COMMS-1",
+    "POP-COMMON-1",
+    "POP-CONFORM-1",
+    "POP-CAPABILITY-1",
+    "POP-MOTIVE-1"
+  ]
+}

@@ -50,7 +50,7 @@ def test_data_file_validates_as_schema3() -> None:
 
 def test_data_carries_the_verified_identities() -> None:
     manifest = load()
-    assert manifest["consumer"]["sha"] == "99283f789f078689404653d5105b597e614160b0"
+    assert manifest["consumer"]["sha"] == "f8898b35d5249e483b2f4a68c097957e675a0ef4"
     grant = manifest["producers"]["grant-authority"]
     assert grant["declared_dependency"] is False
     assert "production_pin" not in grant
