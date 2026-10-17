@@ -17,11 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_ownership_registry import CORE_PINS
+from tests.active_pins import ACTIVE_PINS
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "verify_production_install.py"
-SHA = CORE_PINS["production"]
+SHA = ACTIVE_PINS["production"]
 
 
 def _has_r3() -> bool:
