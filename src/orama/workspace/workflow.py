@@ -12,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from orama.workspace.verify import canonical_json, verify_artifact
 
+# v2 adds source_order, which lets the verifier rebuild the hashed input. v1 receipts remain
+# verifiable through an explicit legacy path in orama.workspace.verify.
+RECEIPT_SCHEMA = "workspace-artifact-v2"
 MAX_BODY_BYTES = 262144
 MAX_SOURCES = 32
 MAX_RECORDS = 100
@@ -92,11 +95,14 @@ def run_task(task: WorkspaceTask) -> dict:
     """Materialize and separately reparse a bounded CSV entirely in memory."""
     source_map = {source.id: source for source in task.sources}
     output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\n")
-    writer.writerow(COLUMNS)
+    plain = csv.writer(output, lineterminator="\n")
+    # Python 3.11's QUOTE_MINIMAL leaves a bare carriage return unquoted, which a strict
+    # reader then splits into extra rows. Quote every field of any row that contains one.
+    quoted = csv.writer(output, lineterminator="\n", quoting=csv.QUOTE_ALL)
+    plain.writerow(COLUMNS)
     for record in task.records:
-        writer.writerow((record.claim, record.source_id,
-                         source_map[record.source_id].title, record.quote))
+        row = (record.claim, record.source_id, source_map[record.source_id].title, record.quote)
+        (quoted if any("\r" in field for field in row) else plain).writerow(row)
     csv_text = output.getvalue()
     run_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
@@ -107,7 +113,7 @@ def run_task(task: WorkspaceTask) -> dict:
         for source in sorted(task.sources, key=lambda source: ranks[source.kind])
     ]
     receipt = {
-        "schema_version": "workspace-artifact-v1",
+        "schema_version": RECEIPT_SCHEMA,
         "implementation": "oramasys/offline-poc-1",
         "run_id": run_id, "created_at": created_at,
         "task": task.task, "privacy": task.privacy,

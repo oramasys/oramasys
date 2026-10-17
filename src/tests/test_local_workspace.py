@@ -160,3 +160,26 @@ def test_capabilities_expose_the_numeric_limits(client):
     limits = client.get("/api/workspace/capabilities").json()["limits"]
     assert limits == {"max_body_bytes": 262144, "max_sources": 32, "max_records": 100,
                       "max_text_chars": 12000, "max_short_text_chars": 500}
+
+
+def test_a_legacy_v1_receipt_still_verifies_with_an_explicit_note(client):
+    """Receipts downloaded before source_order existed are legacy evidence, not damaged."""
+    result = client.post("/api/workspace/run", json=FIXTURE).json()
+    verifier = importlib.import_module("orama.workspace.verify")
+    legacy = json.loads(result["receipt_json"])
+    legacy["schema_version"] = "workspace-artifact-v1"
+    legacy.pop("source_order")
+    verdict = verifier.verify_artifact(result["csv"], legacy)
+    assert verdict["passed"]
+    assert any("legacy v1" in note for note in verdict["notes"])
+    assert not any(check["name"] == "input_sha256" for check in verdict["checks"])
+    current = verifier.verify_artifact(result["csv"], json.loads(result["receipt_json"]))
+    assert current["passed"] and current["notes"] == []
+
+
+def test_an_unknown_receipt_version_fails_closed(client):
+    result = client.post("/api/workspace/run", json=FIXTURE).json()
+    verifier = importlib.import_module("orama.workspace.verify")
+    receipt = json.loads(result["receipt_json"])
+    receipt["schema_version"] = "workspace-artifact-v9"
+    assert not verifier.verify_artifact(result["csv"], receipt)["passed"]
