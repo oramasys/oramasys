@@ -28,10 +28,10 @@ PROFILE_FIXTURES = {
 }
 DEFAULT_FIXTURES = Path(__file__).resolve().parents[1] / "src" / "tests" / "fixtures"
 # sha256 of docs/v2/references/loop-graph-compatibility-2026-10-09/ownership-registry.json at
-# diazMelgarejo/orama-system 65ec365293c6a892cd4f978e656cfb61c0d04b9a (the manifest's producer
+# diazMelgarejo/orama-system a5bdcd2b76a865e61f0ff2e752550ee73d18f82e (the manifest's producer
 # registry ref). A test asserts it equals the digest of the production fixture snapshot.
 PINNED_PRODUCTION_REGISTRY_SHA256 = (
-    "91d3c74b5cd9aea1d176dd87115f09151fc1e3a6155292aa58a32d8f7bb40787"
+    "1f1531d94f73309f2c3271af41313fd15bf5438ba0a91355ea81111fb66fcb34"
 )
 PINNED_PRODUCTION_REGISTRY_PATH = (
     "docs/v2/references/loop-graph-compatibility-2026-10-09/ownership-registry.json"

@@ -38,15 +38,18 @@ LANE_FILES = {
 }
 
 
-def lane_files(frozen_pins: dict[str, str]) -> dict[str, dict[str, str]]:
-    """Return each historical lane's path and its frozen generation-one SHA.
+def lane_files() -> dict[str, dict[str, str]]:
+    """Return each lane file's path and pinned SHA, read from requirements/.
 
-    The manifest is evidence of generation one, so it is checked against the pins it
-    froze, never against the live lane files, which advance with later promotions.
-    Agreement of the live files with the active contract is a separate test.
+    The expected SHA always comes from the repository's lane files, never from the
+    manifest under test, so a self-consistent manifest on the wrong lane is refused.
+    Archived generations are checked by their own tests against a separate frozen table.
     """
-    return {profile: {"path": f"requirements/{name}", "sha": frozen_pins.get(profile, "")}
-            for profile, name in LANE_FILES.items()}
+    return {
+        profile: {"path": f"requirements/{name}",
+                  "sha": (ROOT / "requirements" / name).read_text(encoding="utf-8").strip()}
+        for profile, name in LANE_FILES.items()
+    }
 
 
 VALUE_OPTIONS = ("--expected-digest", "--producer-ref", "--consumer-sha")
@@ -122,7 +125,7 @@ def main(argv: list[str]) -> int:
         ref = options["--producer-ref"]
         if ref is None:
             raise ManifestError("--producer-ref is required to bind the registry ref")
-        validate_manifest(manifest, core_pins=pins, lane_files=lane_files(pins),
+        validate_manifest(manifest, core_pins=pins, lane_files=lane_files(),
                           producer_ref=ref, expected_digest=expected,
                           consumer_sha=options["--consumer-sha"])
         digest = canonical_digest(manifest)

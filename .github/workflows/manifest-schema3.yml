@@ -23,7 +23,7 @@ jobs:
         python-version: ["3.11", "3.12"]
     runs-on: ubuntu-latest
     env:
-      PRODUCER_REGISTRY_REF: 65ec365293c6a892cd4f978e656cfb61c0d04b9a
+      PRODUCER_REGISTRY_REF: a5bdcd2b76a865e61f0ff2e752550ee73d18f82e
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:

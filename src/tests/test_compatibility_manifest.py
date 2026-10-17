@@ -19,7 +19,7 @@ from orama.compat.manifest import (
     validate_workflow,
     workflow_cells,
 )
-from tests.active_pins import LANE_FILES, frozen_lane_files
+from tests.active_pins import LANE_FILES, live_lane_files
 from tests.test_compatibility_pins import producer_refs
 from tests.test_ownership_registry import CORE_PINS
 
@@ -33,8 +33,8 @@ def load() -> dict:
 
 
 def lane_shas() -> dict[str, dict[str, str]]:
-    """Lane files as the frozen M1 manifest records them (not the live, promoted files)."""
-    return frozen_lane_files()
+    """The live lane files; archived generation-one data uses ``frozen_lane_files()``."""
+    return live_lane_files()
 
 
 def check(manifest: dict) -> None:

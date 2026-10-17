@@ -2,11 +2,11 @@
   "schema": 2,
   "producer_registry": {
     "repository": "diazMelgarejo/orama-system",
-    "ref": "65ec365293c6a892cd4f978e656cfb61c0d04b9a"
+    "ref": "a5bdcd2b76a865e61f0ff2e752550ee73d18f82e"
   },
   "cells": [
-    {"profile": "production", "python": "3.11", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973", "require_r3": true, "min_passed": 360, "max_skipped": 1},
-    {"profile": "production", "python": "3.12", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "609ff0ed99cf8eca6c9ef608e764b7a25b6b9973", "require_r3": true, "min_passed": 360, "max_skipped": 1},
+    {"profile": "production", "python": "3.11", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "6d75cfe08af95992dddffab13ae3019aa9c41350", "require_r3": true, "min_passed": 360, "max_skipped": 1},
+    {"profile": "production", "python": "3.12", "core_file": "requirements/compatibility-core-production.txt", "core_sha": "6d75cfe08af95992dddffab13ae3019aa9c41350", "require_r3": true, "min_passed": 360, "max_skipped": 1},
     {"profile": "policy-r3", "python": "3.11", "core_file": "requirements/compatibility-core-policy-r3.txt", "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a", "require_r3": false, "min_passed": 345, "max_skipped": 5},
     {"profile": "policy-r3", "python": "3.12", "core_file": "requirements/compatibility-core-policy-r3.txt", "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a", "require_r3": false, "min_passed": 345, "max_skipped": 5},
     {"profile": "core-r3", "python": "3.11", "core_file": "requirements/compatibility-core-candidate.txt", "core_sha": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68", "require_r3": true, "min_passed": 360, "max_skipped": 1},

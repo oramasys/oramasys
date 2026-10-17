@@ -94,7 +94,7 @@ def test_the_reviewed_bytes_are_accepted_as_the_external_anchor(capsys) -> None:
     code, out, _ = _run([str(MANIFEST), "--production-registry", str(PINNED_BYTES)], capsys)
     assert code == 0 and out is not None
     assert out["results"]["production"]["anchor"] == "external-registry"
-    assert out["external_anchor"]["ref"] == "65ec365293c6a892cd4f978e656cfb61c0d04b9a"
+    assert out["external_anchor"]["ref"] == "a5bdcd2b76a865e61f0ff2e752550ee73d18f82e"
     assert out["external_anchor"]["sha256"] == tool.PINNED_PRODUCTION_REGISTRY_SHA256
 
 
