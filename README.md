@@ -4,6 +4,12 @@ Hardware-aware multi-agent **orchestration system** — the graph DSL + FastAPI
 surface layered on top of the `perpetua-core` kernel. Imports `perpetua-core`;
 the kernel never imports `oramasys` (one-way boundary).
 
+## Architecture Map
+
+[ARCHITECTURE.md](ARCHITECTURE.md) is the concise map of component ownership,
+graph meanings, evidence boundaries, and constellation composition. It is
+navigation and design guidance, not a runtime-readiness claim.
+
 ## Layout
 
 ```
@@ -56,6 +62,20 @@ Inbound HTTP on the glass window is capability-declared and bearer-authorized:
 | `ORAMA_LAN_BIND_HOST` | LAN host override when `ORAMA_BIND_LAN` is set. |
 
 `GET /health` stays public. Auth is **Bearer header only** (no cookie / S-Session in this release). CORS is deferred to S-Network.
+
+## Local workspace proof of concept
+
+`POST /api/workspace/run` accepts a bounded task plus selected local source
+passages and produces an extractive `evidence.csv` with a canonical receipt.
+The verifier re-parses the CSV and checks source bindings, hashes, row count,
+and spreadsheet safety. It uses no model, network, persistence, or external
+sharing. Privacy is `local` by default; `sources`, `redacted`, and `open` are
+explicit per-run preferences that remain inert until a qualified transport
+adapter consumes them.
+
+Use `GET /api/workspace/capabilities` to inspect the current limits. See the
+[local workspace plan](docs/plans/2026-10-16-local-workspace.md) for the
+contract, roadmap, and verification scope.
 
 Optional AuthProviders (disabled by default) never replace local secrets:
 

@@ -32,6 +32,8 @@ class RouteSpec:
 
 # Every non-framework glass-window route must appear here before merge.
 ROUTE_MANIFEST: tuple[RouteSpec, ...] = (
+    RouteSpec("GET", "/api/workspace/capabilities", RouteCapability.READ),
+    RouteSpec("POST", "/api/workspace/run", RouteCapability.MUTATE),
     RouteSpec("GET", "/health", RouteCapability.PUBLIC),
     RouteSpec("POST", "/run", RouteCapability.MUTATE),
     RouteSpec("POST", "/adjustments", RouteCapability.LIFECYCLE),

@@ -53,8 +53,9 @@ def collect(directory: Path, *, mode: str) -> tuple[dict[str, str], list[str]]:
     """Hash the required records; return ``(digests, problems)``.
 
     A required file must be a regular, non-empty file. A required directory must hold at least one
-    regular file. Symlinks are never followed, so a retained record cannot point outside the
-    directory, and each one is reported as a problem.
+    regular file, and every file in it must also be non-empty: a zero-byte trace or report is
+    reported as a problem and is not hashed into the seal. Symlinks are never followed, so a
+    retained record cannot point outside the directory, and each one is reported as a problem.
     """
     digests: dict[str, str] = {}
     problems: list[str] = []
@@ -80,7 +81,11 @@ def collect(directory: Path, *, mode: str) -> tuple[dict[str, str], list[str]]:
         if not files:
             problems.append(f"{name}/: no records")
         for member in files:
-            digests[f"{name}/{member.relative_to(root).as_posix()}"] = sha256_of(member)
+            relative = f"{name}/{member.relative_to(root).as_posix()}"
+            if member.stat().st_size == 0:
+                problems.append(f"{relative}: empty")
+            else:
+                digests[relative] = sha256_of(member)
     return digests, problems
 
 

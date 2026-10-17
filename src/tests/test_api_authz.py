@@ -222,11 +222,19 @@ def test_manifest_covers_app_routes():
     app_routes = {
         (list(route.methods)[0].upper(), route.path)
         for route in app.routes
-        if isinstance(route, APIRoute) and route.path in {"/health", "/run"}
+        if isinstance(route, APIRoute)
+        and route.path in {
+            "/health",
+            "/run",
+            "/api/workspace/capabilities",
+            "/api/workspace/run",
+        }
     }
     assert app_routes <= declared
     assert ("GET", "/health") in declared
     assert ("POST", "/run") in declared
+    assert ("GET", "/api/workspace/capabilities") in declared
+    assert ("POST", "/api/workspace/run") in declared
     assert capability_for("GET", "/health").value == "public"
     assert capability_for("POST", "/run").value == "mutate"
     assert len(ROUTE_MANIFEST) >= 2
