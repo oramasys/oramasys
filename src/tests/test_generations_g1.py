@@ -330,13 +330,22 @@ def test_only_the_two_read_only_checkers_consume_generations_or_the_pointer() ->
     needles = ("requirements/generations", "ACTIVE-GENERATION", "generation-consumers")
     scanned = [
         *(ROOT / ".github").rglob("*"),
-        *(ROOT / "scripts").rglob("*.py"),
+        *(ROOT / "scripts").rglob("*"),
         *(ROOT / "src" / "orama").rglob("*.py"),
         ROOT / "pyproject.toml",
         *ROOT.glob("requirements/*.txt"),
+        *ROOT.glob("requirements/*.in"),
+        *(
+            ROOT / name
+            for name in ("Makefile", "tox.ini", "noxfile.py", "setup.cfg", "setup.py")
+        ),
     ]
     for path in scanned:
         relative = path.relative_to(ROOT).as_posix()
+        # Bytecode is a derived copy of the permitted checkers (importing them writes it), so it
+        # is skipped; otherwise the result would depend on whether a checker ran first.
+        if "__pycache__" in path.parts:
+            continue
         if path.is_file() and relative not in CHECKERS:
             text = path.read_text(encoding="utf-8", errors="ignore")
             assert not any(n in text for n in needles), f"{relative} reads a generation"
