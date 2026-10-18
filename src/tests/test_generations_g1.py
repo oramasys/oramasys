@@ -70,6 +70,7 @@ GEN1_SOURCES = {
 
 
 def _sha(data: bytes) -> str:
+    """Return the lowercase SHA-256 digest for fixture or record bytes."""
     return hashlib.sha256(data).hexdigest()
 
 
@@ -90,6 +91,7 @@ def load_record(folder: Path) -> dict:
     """Read a generation record, refusing duplicate keys."""
 
     def no_duplicates(pairs: list[tuple[str, object]]) -> dict:
+        """Reject duplicate JSON keys while reconstructing the object."""
         keys = [k for k, _ in pairs]
         if len(set(keys)) != len(keys):
             raise ValueError("duplicate key")
@@ -160,10 +162,12 @@ REFUSAL = {
 
 @pytest.fixture(params=sorted(EXPECT))
 def generation(request: pytest.FixtureRequest) -> str:
+    """Parametrize integrity tests over every pinned immutable generation."""
     return request.param
 
 
 def test_the_pinned_generations_are_present() -> None:
+    """Every reviewed generation has a corresponding immutable folder."""
     assert set(EXPECT) <= {p.name for p in GENERATIONS.iterdir() if p.is_dir()}
 
 
@@ -175,11 +179,13 @@ def test_every_present_generation_is_intact_and_pinned() -> None:
 
 
 def test_inventory_digest_is_the_pinned_literal(generation: str) -> None:
+    """A generation inventory retains its approved canonical digest."""
     record = load_record(GENERATIONS / generation)
     assert record["inventory_digest"] == EXPECT[generation]["inventory_digest"]
 
 
 def test_identities_match_the_approvals_and_receipts(generation: str) -> None:
+    """Generation identities agree with their captured approval and evidence facts."""
     expected = EXPECT[generation]
     record = load_record(GENERATIONS / generation)
     identities = record["identities"]
@@ -217,6 +223,7 @@ def test_copies_agree_with_their_own_record(generation: str) -> None:
 
 
 def test_evidence_digests_cover_nineteen_files_in_both_cells(generation: str) -> None:
+    """Both interpreter cells seal the same nineteen evidence inputs."""
     evidence = json.loads(
         (GENERATIONS / generation / "evidence/sealed-digests.json").read_text()
     )
