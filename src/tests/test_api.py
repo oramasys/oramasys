@@ -1,7 +1,7 @@
 """TDD: oramasys API glass-window contracts."""
 import pytest
 from httpx import AsyncClient, ASGITransport
-from orama.api.server import app, create_app
+from orama.api.server import create_app
 
 _TOKEN = "test-control-plane-token-32b"
 

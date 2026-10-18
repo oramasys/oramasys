@@ -18,7 +18,6 @@ from perpetua_core.state import PerpetuaState
 from orama.graph.bounded_observer import (
     BoundedObserver,
     BoundedObserverConfig,
-    GapRecord,
     OrderedEvent,
     UnknownDisposition,
 )
