@@ -75,28 +75,28 @@ def _run(name: str, expect: str | None, body) -> bool:
 
 
 def main() -> int:
-    def spend(a, l, c, *, units=3, kind="release", basis=None, state="unknown"):
-        epoch, hold = _unknown(l, units=3, state=state)
-        g = _issue(a, l, epoch, hold, kind=kind, units=units, basis=basis)
-        return c.consume(g.to_wire(), caller_principal=PRINCIPAL), l, g
+    def spend(a, ledger, c, *, units=3, kind="release", basis=None, state="unknown"):
+        epoch, hold = _unknown(ledger, units=3, state=state)
+        g = _issue(a, ledger, epoch, hold, kind=kind, units=units, basis=basis)
+        return c.consume(g.to_wire(), caller_principal=PRINCIPAL), ledger, g
 
     results = [
         _run("unknown hold, real hold id, release", "released",
-             lambda a, l, c: (lambda r: l.hold_state(RUN, ATTEMPT))(spend(a, l, c))),
+             lambda a, ledger, c: (lambda r: ledger.hold_state(RUN, ATTEMPT))(spend(a, ledger, c))),
         _run("live HELD hold is never adjusted", "grant.hold_ineligible",
-             lambda a, l, c: spend(a, l, c, state="held")),
+             lambda a, ledger, c: spend(a, ledger, c, state="held")),
         _run("foreign cost basis is refused", "grant.basis_mismatch",
-             lambda a, l, c: spend(a, l, c, basis="usd_cents")),
+             lambda a, ledger, c: spend(a, ledger, c, basis="usd_cents")),
         _run("exact retry returns the stored receipt", "same",
-             lambda a, l, c: (lambda r: "same" if c.consume(r[2].to_wire(), caller_principal=PRINCIPAL) == r[0] else "diff")(spend(a, l, c))),
+             lambda a, ledger, c: (lambda r: "same" if c.consume(r[2].to_wire(), caller_principal=PRINCIPAL) == r[0] else "diff")(spend(a, ledger, c))),
         _run("revoked grant is refused", "grant.revoked",
-             lambda a, l, c: (lambda e_h: (a.revoke((g := _issue(a, l, *e_h)).grant_id), c.consume(g.to_wire(), caller_principal=PRINCIPAL))[1])(_unknown(l, units=3))),
+             lambda a, ledger, c: (lambda e_h: (a.revoke((g := _issue(a, ledger, *e_h)).grant_id), c.consume(g.to_wire(), caller_principal=PRINCIPAL))[1])(_unknown(ledger, units=3))),
         _run("tampered wire is refused", "grant.malformed",
-             lambda a, l, c: (lambda e_h: c.consume(_issue(a, l, *e_h).to_wire().replace(b'"units":3', b'"units":4'), caller_principal=PRINCIPAL))(_unknown(l, units=3))),
+             lambda a, ledger, c: (lambda e_h: c.consume(_issue(a, ledger, *e_h).to_wire().replace(b'"units":3', b'"units":4'), caller_principal=PRINCIPAL))(_unknown(ledger, units=3))),
         _run("partial grants 1 then 2 resolve a hold of 3", "settled",
-             lambda a, l, c: (lambda e_h: (c.consume(_issue(a, l, *e_h, kind="release", units=1).to_wire(), caller_principal=PRINCIPAL),
-                                           c.consume(_issue(a, l, *e_h, kind="settle", units=2).to_wire(), caller_principal=PRINCIPAL),
-                                           l.hold_state(RUN, ATTEMPT))[2])(_unknown(l, units=3))),
+             lambda a, ledger, c: (lambda e_h: (c.consume(_issue(a, ledger, *e_h, kind="release", units=1).to_wire(), caller_principal=PRINCIPAL),
+                                           c.consume(_issue(a, ledger, *e_h, kind="settle", units=2).to_wire(), caller_principal=PRINCIPAL),
+                                           ledger.hold_state(RUN, ATTEMPT))[2])(_unknown(ledger, units=3))),
     ]
     consumer_default = AdjustmentGrantConsumer(StepLedger(Path(tempfile.mkdtemp()) / "l.sqlite3"))
     try:
