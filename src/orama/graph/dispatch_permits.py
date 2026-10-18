@@ -19,6 +19,13 @@ stored one:
 ``requested_at`` is excluded from the binding digest: it is the consumer's
 own clock reading, recorded on the first request only, never used for
 identity/freshness/expiry, and a later retry's value is ignored.
+
+Collaborator contract: the store must return the nonterminal permit of the
+requested grant, and ``issue_new`` must return a permit for that grant carrying
+the digest it was handed. These are the ports' own documented postconditions.
+``decide_permit`` fails closed with ``ValueError`` (never a permit) when either is
+violated. That is a collaborator bug, not a protocol refusal, so it is
+deliberately outside the closed ``permit.*`` refusal vocabulary.
 """
 from __future__ import annotations
 
@@ -187,14 +194,35 @@ def decide_permit(
     - A nonterminal permit exists with a DIFFERENT binding digest: raises
       ``PermitRefused("permit.conflict")``. The stored permit is not
       returned and ``issue_new`` is never called.
+
+    Collaborator guards raise ``ValueError`` and return or store nothing: the
+    store returning a permit for a different grant or a terminal (``expired`` /
+    ``abandoned``) permit, or ``issue_new`` returning a permit whose
+    ``grant_id`` or ``binding_digest`` is not the requested grant's and the
+    digest it was handed. They run before any protocol decision, so a
+    collaborator bug is never misreported as ``permit.conflict``. The stored
+    digest is the retry identity key, so persisting a different one would
+    silently break later comparisons.
     """
     digest = compute_binding_digest(request.binding_fields())
     existing = store.get_nonterminal_permit_for_grant(request.grant_id)
 
     if existing is None:
         permit = issue_new(request, digest)
+        if permit.grant_id != request.grant_id or permit.binding_digest != digest:
+            raise ValueError(
+                "issue_new must return a permit for the requested grant and binding digest"
+            )
         store.insert_permit(permit)
         return permit
+
+    if existing.grant_id != request.grant_id:
+        raise ValueError("PermitStore returned a permit for a different grant")
+
+    if existing.state not in NONTERMINAL_PERMIT_STATES:
+        raise ValueError(
+            "PermitStore returned a terminal permit; only nonterminal permits may be returned"
+        )
 
     if existing.binding_digest != digest:
         raise PermitRefused("permit.conflict")

@@ -1,7 +1,8 @@
 """E1 "C2" dispatch permit replay protection tests.
 
-Covers the four explicit replay/crash test cases from the C2 spec, plus the
-"no existing permit" issuance path, using an in-memory fake PermitStore.
+Covers the four explicit replay/crash test cases from the C2 spec, the
+"no existing permit" issuance path, and the fail-closed guards on the store and
+``issue_new`` collaborators, using an in-memory fake PermitStore.
 """
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from orama.graph.binding_digest import compute_binding_digest
 from orama.graph.dispatch_permits import (
     DispatchPermit,
     ExpiredPermit,
@@ -217,3 +219,91 @@ def test_expired_stored_permit_is_not_revived_as_identical_retry() -> None:
 
     assert exc_info.value.permit.grant_id == GRANT_ID
     assert exc_info.value.permit.expires_at == expires_at
+
+
+class FixedPermitStore(FakePermitStore):
+    """Store that answers every lookup with one fixed permit, whatever the grant or state."""
+
+    def __init__(self, permit: DispatchPermit) -> None:
+        """Remember the permit to return no matter what is asked for."""
+        super().__init__()
+        self._fixed = permit
+
+    def get_nonterminal_permit_for_grant(self, grant_id: str) -> DispatchPermit | None:
+        """Return the fixed permit even when it belongs to another grant or is terminal."""
+        return self._fixed
+
+
+def test_store_returning_a_permit_for_another_grant_fails_closed() -> None:
+    """A wrong-grant permit is never returned, even when its stored digest matches.
+
+    The digest comparison alone would accept it as an identical retry, so the
+    grant guard must reject it first and nothing may be issued.
+    """
+    request = make_request()
+    matching_digest = compute_binding_digest(request.binding_fields())
+    store = FixedPermitStore(make_permit(grant_id="other-grant", binding_digest=matching_digest))
+
+    with pytest.raises(ValueError, match="different grant"):
+        decide_permit(request, store, now=now_utc(), issue_new=unexpected_issue_new)
+
+
+@pytest.mark.parametrize("terminal_state", ["expired", "abandoned"])
+def test_store_returning_a_terminal_permit_fails_closed(terminal_state: str) -> None:
+    """A terminal permit is never returned as the live one, even with a matching digest.
+
+    An abandoned permit was superseded after a consumer attestation, so handing it
+    back as an identical retry would let a dead permit be used again.
+    """
+    request = make_request()
+    matching_digest = compute_binding_digest(request.binding_fields())
+    store = FixedPermitStore(make_permit(binding_digest=matching_digest, state=terminal_state))
+
+    with pytest.raises(ValueError, match="terminal permit"):
+        decide_permit(request, store, now=now_utc(), issue_new=unexpected_issue_new)
+
+
+def test_store_returning_a_finalized_permit_is_still_an_identical_retry() -> None:
+    """finalized is nonterminal, so the state guard must not over-reject a live one."""
+    request = make_request()
+    matching_digest = compute_binding_digest(request.binding_fields())
+    finalized = make_permit(binding_digest=matching_digest, state="finalized")
+
+    result = decide_permit(
+        request, FixedPermitStore(finalized), now=now_utc(), issue_new=unexpected_issue_new
+    )
+
+    assert result is finalized
+
+
+def test_issue_new_returning_a_permit_for_another_grant_is_rejected_before_storing() -> None:
+    """issue_new must mint a permit for the requested grant; a wrong one is never stored."""
+    store = FakePermitStore()
+
+    with pytest.raises(ValueError, match="requested grant and binding digest"):
+        decide_permit(
+            make_request(),
+            store,
+            now=now_utc(),
+            issue_new=lambda req, digest: make_permit(
+                grant_id="other-grant", binding_digest=digest
+            ),
+        )
+
+    assert store.get_nonterminal_permit_for_grant(GRANT_ID) is None
+    assert store.get_nonterminal_permit_for_grant("other-grant") is None
+
+
+def test_issue_new_persisting_a_different_binding_digest_is_rejected_before_storing() -> None:
+    """The stored digest is the retry-identity key; issue_new must persist the computed one."""
+    store = FakePermitStore()
+
+    with pytest.raises(ValueError, match="requested grant and binding digest"):
+        decide_permit(
+            make_request(),
+            store,
+            now=now_utc(),
+            issue_new=lambda req, digest: make_permit(binding_digest="e" * 64),
+        )
+
+    assert store.get_nonterminal_permit_for_grant(GRANT_ID) is None
