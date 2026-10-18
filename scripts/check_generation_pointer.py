@@ -169,14 +169,17 @@ def verify_generation(root: Path, generation: str, reviewed_sha: str) -> dict[st
     return record
 
 
-def load_reviewed(root: Path) -> dict[str, str]:
-    """Read the reviewed index: generation id to the reviewed record sha256."""
+def load_reviewed_index(root: Path) -> dict[str, Any]:
+    """Read the reviewed index: reviewed record digests plus the reviewed consumer-registry digest."""
     index = load_json(root, REVIEWED, "generation.index_missing")
     entries = index.get("generations")
+    registry = index.get("consumers_registry_sha256")
     if (
         index.get("schema") != 1
-        or set(index) != {"schema", "generations"}
+        or set(index) != {"schema", "generations", "consumers_registry_sha256"}
         or not isinstance(entries, dict)
+        or not isinstance(registry, str)
+        or not SHA256_PATTERN.match(registry)
     ):
         raise Refusal("generation.index_invalid", str(REVIEWED), "wrong shape")
     for key, digest in entries.items():
@@ -188,7 +191,20 @@ def load_reviewed(root: Path) -> dict[str, str]:
             raise Refusal(
                 "generation.index_invalid", str(REVIEWED), f"bad entry {key!r}"
             )
-    return dict(entries)
+    return {"generations": dict(entries), "consumers_registry_sha256": registry}
+
+
+def load_reviewed(root: Path) -> dict[str, str]:
+    """Read the reviewed index: generation id to the reviewed record sha256."""
+    return load_reviewed_index(root)["generations"]
+
+
+def registry_digest(root: Path) -> str:
+    """Raw sha256 of the consumer registry file; the registry is a reviewed input, not just data."""
+    path = root / CONSUMERS
+    if path.is_symlink() or not path.is_file():
+        raise Refusal("declaration.missing", str(CONSUMERS), "missing or not a regular file")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def resolve_pointer(root: Path, reviewed: dict[str, str]) -> dict[str, Any]:
@@ -334,8 +350,10 @@ def check_repository(root: Path) -> dict[str, Any]:
 
     report: dict[str, Any] = {"generations": {}, "consumers": [], "pointer": None}
     reviewed: dict[str, str] = {}
+    reviewed_registry = ""
     try:
-        reviewed = load_reviewed(root)
+        index = load_reviewed_index(root)
+        reviewed, reviewed_registry = index["generations"], index["consumers_registry_sha256"]
     except Refusal as error:
         note(error)
     records: dict[str, dict[str, Any]] = {}
@@ -360,6 +378,24 @@ def check_repository(root: Path) -> dict[str, Any]:
                     )
                 )
     try:
+        actual_registry = registry_digest(root)
+    except Refusal as error:
+        note(error)
+        return _finish(report, problems)
+    if not reviewed_registry:
+        note(Refusal("declaration.digest_mismatch", str(CONSUMERS), "no reviewed registry digest"))
+        return _finish(report, problems)
+    if actual_registry != reviewed_registry:
+        note(
+            Refusal(
+                "declaration.digest_mismatch",
+                str(CONSUMERS),
+                "the consumer registry differs from its reviewed digest",
+            )
+        )
+        return _finish(report, problems)
+    report["consumers_registry_sha256"] = actual_registry
+    try:
         declarations = load_json(root, CONSUMERS, "declaration.missing")
     except Refusal as error:
         duplicate = error.code == "json.invalid" and "duplicate" in error.detail
@@ -378,6 +414,9 @@ def check_repository(root: Path) -> dict[str, Any]:
         or not isinstance(entries, list)
     ):
         note(Refusal("declaration.invalid", str(CONSUMERS), "wrong shape or schema"))
+        return _finish(report, problems)
+    if not entries:
+        note(Refusal("declaration.invalid", str(CONSUMERS), "the registry declares no consumers"))
         return _finish(report, problems)
     seen: set[str] = set()
     pointer_cache: list[dict[str, Any] | Refusal] = []

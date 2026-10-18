@@ -5,6 +5,7 @@
   "generation": "m1-gen1",
   "from_generation": null,
   "previous_receipt_sha256": null,
+  "consumers_registry_sha256": "2308cb3332c94eedf4e2616127b869337097df6130f18bc2b8b5bde0c05ebeab",
   "recorded": "2026-10-18",
   "retroactive": true,
   "reason": "Recorded retroactively: generation 1 was the production generation before the generation-2 promotion.",

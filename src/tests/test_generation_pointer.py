@@ -37,8 +37,28 @@ def make_root(tmp_path: Path) -> Path:
     return root
 
 
-def run_cli(root: Path) -> tuple[int, str, dict[str, Any]]:
+def rebind_registry(root: Path) -> None:
+    """Treat the consumer registry as a reviewed change: update the reviewed index digest.
+
+    The declaration tests below mutate the registry to prove declaration-level refusals. They run
+    with the digest rebound so that those refusals, not the digest check, are what they observe.
+    The digest binding itself is proven separately with ``rebind=False``.
+    """
+    registry = root / "requirements" / "generation-consumers.json"
+    index_path = root / "requirements" / "generations" / "reviewed.json"
+    if not registry.is_file() or not index_path.is_file():
+        return
+    index = json.loads(index_path.read_text())
+    digest = hashlib.sha256(registry.read_bytes()).hexdigest()
+    if index.get("consumers_registry_sha256") != digest:
+        index["consumers_registry_sha256"] = digest
+        index_path.write_text(json.dumps(index, indent=2) + "\n")
+
+
+def run_cli(root: Path, rebind: bool = True) -> tuple[int, str, dict[str, Any]]:
     """Execute the check_generation_pointer script and return rc, stdout, and parsed JSON."""
+    if rebind:
+        rebind_registry(root)
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--root", str(root)],
         capture_output=True,
@@ -52,9 +72,9 @@ def run_cli(root: Path) -> tuple[int, str, dict[str, Any]]:
     return proc.returncode, proc.stdout, report
 
 
-def run(root: Path) -> tuple[int, dict[str, Any]]:
+def run(root: Path, rebind: bool = True) -> tuple[int, dict[str, Any]]:
     """Execute the check_generation_pointer script and return rc and parsed JSON."""
-    rc, _, report = run_cli(root)
+    rc, _, report = run_cli(root, rebind)
     return rc, report
 
 
@@ -516,10 +536,13 @@ def test_g2_16_purity_identical_stdout_and_unchanged_snapshot(
             encoding="utf-8",
         )
 
+    rebind_registry(
+        root
+    )  # the test's own mutation of the registry; the checker must write nothing
     snap_before = snapshot(root)
-    rc1, out1, rep1 = run_cli(root)
+    rc1, out1, rep1 = run_cli(root, rebind=False)
     snap_mid = snapshot(root)
-    rc2, out2, rep2 = run_cli(root)
+    rc2, out2, rep2 = run_cli(root, rebind=False)
     snap_after = snapshot(root)
 
     assert snap_before == snap_mid == snap_after
@@ -570,6 +593,7 @@ def test_g2_18_no_unsupported_lifecycle_claims(tmp_path: Path) -> None:
     assert set(report.keys()) == {
         "generations",
         "consumers",
+        "consumers_registry_sha256",
         "pointer",
         "problems",
         "ok",
@@ -637,4 +661,84 @@ def test_g2_09b_removing_a_pin_occurrence_is_a_count_refusal(tmp_path: Path) -> 
     assert rc == 1 and "pin.count" in codes(report), report["problems"]
     assert any(
         p["subject"].startswith("ci-production-install") for p in report["problems"]
+    )
+
+
+# --- The consumer registry is a reviewed input (review finding on PR 60) ---
+
+
+def write_registry(root: Path, data: dict[str, Any]) -> None:
+    (root / "requirements" / "generation-consumers.json").write_text(
+        json.dumps(data, indent=2) + "\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "registry",
+    [
+        {"schema": 1, "consumers": []},
+        {
+            "schema": 1,
+            "consumers": [
+                {"id": "x", "kind": "ci", "generation": "m1-gen2", "checks": []}
+            ],
+        },
+    ],
+    ids=["emptied", "replaced_by_an_unrelated_list"],
+)
+def test_g2_19_an_unreviewed_registry_is_refused_by_digest(
+    tmp_path: Path, registry: dict[str, Any]
+) -> None:
+    """Emptying or replacing the registry changes its digest, so nothing in it is trusted."""
+    root = make_root(tmp_path)
+    write_registry(root, registry)
+    rc, report = run(root, rebind=False)
+    assert rc == 1 and codes(report) == {"declaration.digest_mismatch"}, report[
+        "problems"
+    ]
+    assert report["consumers"] == [], (
+        "no declaration may be interpreted before the digest holds"
+    )
+
+
+def test_g2_19_a_deleted_registry_is_refused(tmp_path: Path) -> None:
+    root = make_root(tmp_path)
+    (root / "requirements" / "generation-consumers.json").unlink()
+    rc, report = run(root, rebind=False)
+    assert rc == 1 and "declaration.missing" in codes(report), report["problems"]
+
+
+def test_g2_19_a_registry_with_no_consumers_is_refused_even_when_its_digest_is_reviewed(
+    tmp_path: Path,
+) -> None:
+    """A nonempty-list rule is not the protection (the digest is), but it is still enforced."""
+    root = make_root(tmp_path)
+    write_registry(root, {"schema": 1, "consumers": []})
+    rc, report = run(root)  # digest rebound: only the shape rule can refuse
+    assert rc == 1 and "declaration.invalid" in codes(report), report["problems"]
+
+
+def test_g2_19_the_reviewed_index_must_carry_a_valid_registry_digest(
+    tmp_path: Path,
+) -> None:
+    root = make_root(tmp_path)
+    index_path = root / "requirements" / "generations" / "reviewed.json"
+    index = json.loads(index_path.read_text())
+    del index["consumers_registry_sha256"]
+    index_path.write_text(json.dumps(index, indent=2) + "\n")
+    rc, report = run(root, rebind=False)
+    assert rc == 1 and "generation.index_invalid" in codes(report), report["problems"]
+
+
+def test_g2_19_a_matching_reviewed_digest_is_what_lets_the_registry_be_read(
+    tmp_path: Path,
+) -> None:
+    root = make_root(tmp_path)
+    rc, report = run(root, rebind=False)
+    assert rc == 0 and report["ok"], report["problems"]
+    assert (
+        report["consumers_registry_sha256"]
+        == hashlib.sha256(
+            (root / "requirements" / "generation-consumers.json").read_bytes()
+        ).hexdigest()
     )

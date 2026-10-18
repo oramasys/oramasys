@@ -29,8 +29,8 @@ APPROVAL = {
     "evidence": "test evidence",
 }
 PINNED_RECEIPTS = {
-    "0001-activate-m1-gen1.json": "5aadf4444c01169dc800dcb8890b4feaafd5d826a5f00225e8c0896a346e1e35",
-    "0002-activate-m1-gen2.json": "7c82a734e716c495f8ea28b1ee3f22699aaa9bc187e14c311c738bec26b146b8",
+    "0001-activate-m1-gen1.json": "1f79f2208b976c521eceafe0cf07bdc70e29093d6c69e9e1f6335f3838de3758",
+    "0002-activate-m1-gen2.json": "4b08172675503caa581b761357301d08ee544e82f7fc7c1768cb4e9d5b2b85ac",
 }
 
 
@@ -69,6 +69,22 @@ def receipts(root: Path) -> list[Path]:
     return sorted((root / RECEIPTS).glob("*.json"))
 
 
+def registry_sha(root: Path) -> str:
+    """Raw sha256 of the consumer registry file in ``root``."""
+    return hashlib.sha256((root / CONSUMERS).read_bytes()).hexdigest()
+
+
+def rebind(root: Path, *, receipt: bool = True, index: bool = True) -> None:
+    """Record a *reviewed* registry change: new digest in the index and a registry receipt."""
+    if index:
+        data = json.loads((root / REVIEWED).read_text())
+        data["consumers_registry_sha256"] = registry_sha(root)
+        (root / REVIEWED).write_text(json.dumps(data, indent=2) + "\n")
+    if receipt:
+        active = json.loads((root / POINTER).read_text())["generation"]
+        append(root, "registry", active, None)
+
+
 def append(
     root: Path,
     kind: str,
@@ -88,6 +104,8 @@ def append(
         "generation": generation,
         "from_generation": origin,
         "previous_receipt_sha256": hashlib.sha256(last.read_bytes()).hexdigest(),
+        "consumers_registry_sha256": overrides.pop("consumers_registry_sha256", None)
+        or registry_sha(root),
         "recorded": "2026-10-18",
         "retroactive": False,
         "reason": "test",
@@ -112,10 +130,11 @@ def review(root: Path, generation: str) -> None:
 
 
 def declare(root: Path, generation: str) -> None:
-    """Make the first consumer declare a concrete generation."""
+    """Make the first consumer declare a concrete generation, as a reviewed registry change."""
     data = json.loads((root / CONSUMERS).read_text())
     data["consumers"][0]["generation"] = generation
     (root / CONSUMERS).write_text(json.dumps(data, indent=2) + "\n")
+    rebind(root)
 
 
 def test_the_real_history_is_sound_and_says_what_it_cannot_prove(
@@ -315,3 +334,106 @@ def test_validation_writes_nothing_and_is_repeatable(tmp_path: Path) -> None:
         before = snapshot(root)
         first, second = run(root), run(root)
         assert first == second and snapshot(root) == before
+
+
+REVIEWED_INDEX_SHA256 = (
+    "c096b9d41e7ea90ff8c3f927da4b6fb02ec79e2c228181e3315892357a28e92b"
+)
+
+
+def test_the_reviewed_index_is_pinned_and_binds_the_real_registry() -> None:
+    """The index is a reviewed input: its bytes are pinned, and it names the real registry digest."""
+    index_bytes = (ROOT / REVIEWED).read_bytes()
+    assert hashlib.sha256(index_bytes).hexdigest() == REVIEWED_INDEX_SHA256
+    assert json.loads(index_bytes)["consumers_registry_sha256"] == registry_sha(ROOT)
+
+
+def registry_attack(root: Path, registry: dict | None) -> None:
+    """Replace or delete the consumer registry, then append a chained retirement of m1-gen1."""
+    before = registry_sha(root)
+    if registry is None:
+        (root / CONSUMERS).unlink()
+        append(root, "retire", "m1-gen1", None, consumers_registry_sha256=before)
+        return
+    (root / CONSUMERS).write_text(json.dumps(registry, indent=2) + "\n")
+    append(root, "retire", "m1-gen1", None)
+
+
+@pytest.mark.parametrize(
+    ("registry", "expected"),
+    [
+        ({"schema": 1, "consumers": []}, "registry.mismatch"),
+        (
+            {
+                "schema": 1,
+                "consumers": [
+                    {"id": "x", "kind": "ci", "generation": "m1-gen2", "checks": []}
+                ],
+            },
+            "registry.mismatch",
+        ),
+        (None, "declaration.missing"),
+    ],
+    ids=["emptied", "replaced_by_an_unrelated_list", "deleted"],
+)
+def test_removing_or_replacing_the_registry_cannot_unlock_a_retirement(
+    tmp_path: Path, registry: dict | None, expected: str
+) -> None:
+    """The fail-open found in review: no registry means no declarations, so retire passed."""
+    root = make_root(tmp_path)
+    registry_attack(root, registry)
+    code, report = run(root)
+    assert code == 1 and expected in codes(report), report
+
+
+def test_a_reviewed_registry_change_with_its_receipt_is_accepted(
+    tmp_path: Path,
+) -> None:
+    root = make_root(tmp_path)
+    data = json.loads((root / CONSUMERS).read_text())
+    data["consumers"][1]["generation"] = "m1-gen2"
+    (root / CONSUMERS).write_text(json.dumps(data, indent=2) + "\n")
+    rebind(root)
+    code, report = run(root)
+    assert code == 0 and report["receipts"] == 3, report
+
+
+def test_a_registry_change_without_a_registry_receipt_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = make_root(tmp_path)
+    data = json.loads((root / CONSUMERS).read_text())
+    data["consumers"][1]["generation"] = "m1-gen2"
+    (root / CONSUMERS).write_text(json.dumps(data, indent=2) + "\n")
+    rebind(root, receipt=False)
+    assert "registry.mismatch" in codes(run(root)[1])
+
+
+def test_a_registry_receipt_without_the_reviewed_index_update_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = make_root(tmp_path)
+    data = json.loads((root / CONSUMERS).read_text())
+    data["consumers"][1]["generation"] = "m1-gen2"
+    (root / CONSUMERS).write_text(json.dumps(data, indent=2) + "\n")
+    rebind(root, index=False)
+    assert "registry.mismatch" in codes(run(root)[1])
+
+
+def test_a_receipt_that_disagrees_with_the_tracked_registry_digest_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = make_root(tmp_path)
+    append(root, "retire", "m1-gen1", None, consumers_registry_sha256="0" * 64)
+    assert "registry.chain" in codes(run(root)[1])
+
+
+def test_a_registry_receipt_must_name_the_active_generation_and_change_the_digest(
+    tmp_path: Path,
+) -> None:
+    root = make_root(tmp_path)
+    append(root, "registry", "m1-gen1", None)
+    assert "registry.generation" in codes(run(root)[1])
+    root2 = make_root(tmp_path / "second")
+    append(root2, "registry", "m1-gen2", None)
+    assert "transition.noop" in codes(run(root2)[1])
