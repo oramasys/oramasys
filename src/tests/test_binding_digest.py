@@ -23,6 +23,7 @@ EPOCH_FIELDS = ("configuration_policy_epoch", "authority_epoch")
 
 
 def _base_kwargs() -> dict[str, object]:
+    """Return a valid baseline set of the nine binding digest field values."""
     return {
         "grant_id": "grant-1",
         "grant_payload_digest": "a" * 64,
