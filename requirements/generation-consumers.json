@@ -1,0 +1,261 @@
+{
+  "schema": 1,
+  "consumers": [
+    {
+      "id": "package-dependencies",
+      "kind": "package",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": "pyproject.toml",
+          "pattern": "perpetua-core @ git\\+https://github\\.com/oramasys/perpetua-core\\.git@([0-9a-f]{40})",
+          "count": 1,
+          "role": "neutral-mechanics",
+          "field": "production_pin"
+        },
+        {
+          "type": "regex-pin",
+          "file": "pyproject.toml",
+          "pattern": "oramasys-telos @ git\\+https://github\\.com/oramasys/telos\\.git@([0-9a-f]{40})",
+          "count": 1,
+          "role": "endpoint-policy",
+          "field": "production_pin"
+        },
+        {
+          "type": "regex-pin",
+          "file": "pyproject.toml",
+          "pattern": "oramasys-agate @ git\\+https://github\\.com/oramasys/agate\\.git@([0-9a-f]{40})",
+          "count": 1,
+          "role": "hardware-eligibility",
+          "field": "production_pin"
+        },
+        {
+          "type": "regex-pin",
+          "file": "pyproject.toml",
+          "pattern": "oramasys-phylax @ git\\+https://github\\.com/oramasys/phylax\\.git@([0-9a-f]{40})",
+          "count": 1,
+          "role": "grant-authority",
+          "field": "candidate"
+        }
+      ]
+    },
+    {
+      "id": "production-core-lane",
+      "kind": "lane",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": "requirements/compatibility-core-production.txt",
+          "pattern": "^([0-9a-f]{40})\\s*$",
+          "count": 1,
+          "role": "neutral-mechanics",
+          "field": "production_pin"
+        }
+      ]
+    },
+    {
+      "id": "oracle-lane-py312",
+      "kind": "lane",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": "requirements/compatibility-oracles-py312.txt",
+          "pattern": "^oramasys-telos @ git\\+https://github\\.com/oramasys/telos\\.git@([0-9a-f]{40})\\s*$",
+          "count": 1,
+          "role": "endpoint-policy",
+          "field": "production_pin"
+        },
+        {
+          "type": "regex-pin",
+          "file": "requirements/compatibility-oracles-py312.txt",
+          "pattern": "^oramasys-agate @ git\\+https://github\\.com/oramasys/agate\\.git@([0-9a-f]{40})\\s*$",
+          "count": 1,
+          "role": "hardware-eligibility",
+          "field": "production_pin"
+        }
+      ]
+    },
+    {
+      "id": "phylax-verify-only-lane",
+      "kind": "lane",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": "requirements/compatibility-phylax-verify-only.txt",
+          "pattern": "^([0-9a-f]{40})\\s*$",
+          "count": 1,
+          "role": "grant-authority",
+          "field": "candidate"
+        }
+      ]
+    },
+    {
+      "id": "ci-production-install",
+      "kind": "ci",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/ci.yml",
+          "pattern": "perpetua-core\\.git@([0-9a-f]{40})",
+          "count": 1,
+          "role": "neutral-mechanics",
+          "field": "production_pin"
+        },
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/ci.yml",
+          "pattern": "verify_production_install\\.py\\\"\\s+([0-9a-f]{40})",
+          "count": 1,
+          "role": "neutral-mechanics",
+          "field": "production_pin"
+        },
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/ci.yml",
+          "pattern": "repository:\\s*diazMelgarejo/orama-system\\s*\\n\\s*ref:\\s*([0-9a-f]{40})",
+          "count": 1,
+          "expect": "identities.registry.ref"
+        }
+      ]
+    },
+    {
+      "id": "ci-core-gate-candidates",
+      "kind": "ci",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/t1-core-gate.yml",
+          "pattern": "CORE_GATE_CANDIDATE:\\s*([0-9a-f]{40})",
+          "count": 1,
+          "role": "neutral-mechanics",
+          "field": "candidate"
+        },
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/t1-core-gate.yml",
+          "pattern": "AGATE_CANDIDATE:\\s*([0-9a-f]{40})",
+          "count": 1,
+          "role": "hardware-eligibility",
+          "field": "candidate"
+        },
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/t1-core-gate.yml",
+          "pattern": "TELOS_CANDIDATE:\\s*([0-9a-f]{40})",
+          "count": 1,
+          "role": "endpoint-policy",
+          "field": "candidate"
+        }
+      ]
+    },
+    {
+      "id": "ci-registry-refs",
+      "kind": "ci",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/compatibility-oracles.yml",
+          "pattern": "repository:\\s*diazMelgarejo/orama-system\\s*\\n\\s*ref:\\s*([0-9a-f]{40})",
+          "count": 1,
+          "expect": "identities.registry.ref"
+        },
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/final-producers.yml",
+          "pattern": "repository:\\s*diazMelgarejo/orama-system\\s*\\n\\s*ref:\\s*([0-9a-f]{40})",
+          "count": 1,
+          "expect": "identities.registry.ref"
+        },
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/manifest-schema3.yml",
+          "pattern": "PRODUCER_REGISTRY_REF:\\s*([0-9a-f]{40})",
+          "count": 1,
+          "expect": "identities.registry.ref"
+        }
+      ]
+    },
+    {
+      "id": "final-producers-consumer-refs",
+      "kind": "ci",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "regex-pin",
+          "file": ".github/workflows/final-producers.yml",
+          "pattern": "repository:\\s*oramasys/oramasys\\s*\\n\\s*ref:\\s*([0-9a-f]{40})",
+          "count": 2,
+          "expect": "identities.consumer_commit"
+        }
+      ]
+    },
+    {
+      "id": "final-producers-install-plan",
+      "kind": "installer",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "json-value",
+          "file": "requirements/final-producers-install-plan.v1.json",
+          "path": "consumer.commit",
+          "expect": "identities.consumer_commit"
+        },
+        {
+          "type": "json-value",
+          "file": "requirements/final-producers-install-plan.v1.json",
+          "path": "producers.neutral-mechanics.commit",
+          "expect": "producers.neutral-mechanics.commit"
+        },
+        {
+          "type": "json-value",
+          "file": "requirements/final-producers-install-plan.v1.json",
+          "path": "producers.endpoint-policy.commit",
+          "expect": "producers.endpoint-policy.commit"
+        },
+        {
+          "type": "json-value",
+          "file": "requirements/final-producers-install-plan.v1.json",
+          "path": "producers.hardware-eligibility.commit",
+          "expect": "producers.hardware-eligibility.commit"
+        },
+        {
+          "type": "json-value",
+          "file": "requirements/final-producers-install-plan.v1.json",
+          "path": "producers.grant-authority.commit",
+          "expect": "producers.grant-authority.commit"
+        }
+      ]
+    },
+    {
+      "id": "qualification-manifest-identity",
+      "kind": "package",
+      "generation": "edge",
+      "checks": [
+        {
+          "type": "json-value",
+          "file": "requirements/compatibility-manifest.v3.json",
+          "path": "consumer.sha",
+          "expect": "identities.consumer_commit"
+        },
+        {
+          "type": "json-value",
+          "file": "requirements/compatibility-manifest.v3.json",
+          "path": "producer_registry.ref",
+          "expect": "identities.registry.ref"
+        },
+        {
+          "type": "file-sha256",
+          "file": "src/tests/fixtures/graph-ownership-registry.json",
+          "expect": "identities.registry.sha256"
+        }
+      ]
+    }
+  ]
+}

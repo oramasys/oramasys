@@ -170,6 +170,8 @@ def test_the_pinned_generations_are_present() -> None:
 def test_every_present_generation_is_intact_and_pinned() -> None:
     """A new generation is a reviewed addition to EXPECT, never an unpinned folder."""
     for folder in sorted(p for p in GENERATIONS.iterdir() if p.is_dir()):
+        if folder.name == "transitions":
+            continue  # G3 receipts: validated by test_generation_transitions, not generations
         assert folder.name in EXPECT, f"{folder.name} has no pinned expectations"
         assert verify_generation(folder) == [], folder.name
 
@@ -308,9 +310,17 @@ def test_every_mutation_names_the_check_that_must_refuse_it() -> None:
     }
 
 
-def test_nothing_at_runtime_or_in_ci_consumes_generations_or_a_pointer() -> None:
-    """G1 is data only: no install, CI, runtime, script or package-file behaviour reads them."""
-    needles = ("requirements/generations", "ACTIVE-GENERATION")
+# G2 deliberately admits exactly these two read-only checkers. Everything else stays barred from
+# reading a generation or the pointer: no install, runtime, package-file or other workflow path.
+CHECKERS = {
+    "scripts/check_generation_pointer.py",
+    "scripts/check_generation_transitions.py",
+}
+
+
+def test_only_the_two_read_only_checkers_consume_generations_or_the_pointer() -> None:
+    """G1's data-only rule, evolved deliberately by G2: only the declared checkers read them."""
+    needles = ("requirements/generations", "ACTIVE-GENERATION", "generation-consumers")
     scanned = [
         *(ROOT / ".github").rglob("*"),
         *(ROOT / "scripts").rglob("*.py"),
@@ -319,9 +329,18 @@ def test_nothing_at_runtime_or_in_ci_consumes_generations_or_a_pointer() -> None
         *ROOT.glob("requirements/*.txt"),
     ]
     for path in scanned:
-        if path.is_file():
+        relative = path.relative_to(ROOT).as_posix()
+        if path.is_file() and relative not in CHECKERS:
             text = path.read_text(encoding="utf-8", errors="ignore")
-            assert not any(n in text for n in needles), (
-                f"{path.relative_to(ROOT)} reads a generation"
-            )
-    assert not (ROOT / "requirements" / "ACTIVE-GENERATION.json").exists()
+            assert not any(n in text for n in needles), f"{relative} reads a generation"
+
+
+def test_ci_runs_the_checkers_and_nothing_installs_from_a_generation() -> None:
+    """The CI entrypoint names the two scripts; no workflow installs or activates from a pointer."""
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "python scripts/check_generation_pointer.py" in ci
+    for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
+        text = workflow.read_text(encoding="utf-8")
+        assert "pip install" not in "".join(
+            line for line in text.splitlines() if "generation" in line
+        ), workflow.name

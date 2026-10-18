@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "seq": 2,
+  "kind": "activate",
+  "generation": "m1-gen2",
+  "from_generation": "m1-gen1",
+  "previous_receipt_sha256": "5aadf4444c01169dc800dcb8890b4feaafd5d826a5f00225e8c0896a346e1e35",
+  "recorded": "2026-10-18",
+  "retroactive": true,
+  "reason": "Recorded retroactively: the generation-2 pins were merged to main (oramasys PRs 53 and 55) after operator approval and acceptance of run 39070456148. Serving, T3, T4, T5 and remote autonomy stay off.",
+  "approval": {
+    "repository": "oramasys/oramasys",
+    "pull_request": 55,
+    "evidence": "freeze approval comment 6241262040 on PR 55; hosted run 39070456148; merge commit 3a447d6a"
+  }
+}

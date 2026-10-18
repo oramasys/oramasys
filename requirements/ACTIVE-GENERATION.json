@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "generation": "m1-gen2",
+  "record_sha256": "661371f533c9a9f3ec1d9de070580ffaef95076db79597d90de22a81290efb17",
+  "transition_receipt": "requirements/generations/transitions/0002-activate-m1-gen2.json"
+}
