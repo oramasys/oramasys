@@ -2,11 +2,6 @@
 
 Covers the four explicit replay/crash test cases from the C2 spec, plus the
 "no existing permit" issuance path, using an in-memory fake PermitStore.
-
-This test imports ``orama.graph.binding_digest``, which is being implemented
-by a parallel agent in a separate worktree and does not exist here yet.
-Collection (``pytest --collect-only``) succeeds; execution awaits
-integration of that module.
 """
 from __future__ import annotations
 
