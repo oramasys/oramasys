@@ -76,6 +76,10 @@ def _run(name: str, expect: str | None, body) -> bool:
 
 def main() -> int:
     def spend(a, ledger, c, *, units=3, kind="release", basis=None, state="unknown"):
+        """Open an unknown-disposition hold, issue a grant against it, and consume the grant.
+
+        Returns the consumer's outcome (or refusal code), the ledger, and the issued grant.
+        """
         epoch, hold = _unknown(ledger, units=3, state=state)
         g = _issue(a, ledger, epoch, hold, kind=kind, units=units, basis=basis)
         return c.consume(g.to_wire(), caller_principal=PRINCIPAL), ledger, g

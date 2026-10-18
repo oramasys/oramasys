@@ -87,6 +87,7 @@ def test_fleet_binding_ceremony(tmp_path, monkeypatch):
 
 
 def _sign_event(privkey, event: dict) -> dict:
+    """Return a copy of `event` with `pubkey`, `id`, and a Schnorr `sig` from `privkey` filled in."""
     event = dict(event)
     event["pubkey"] = privkey.public_key.format(compressed=True)[1:].hex()
     event_id = compute_event_id(event)

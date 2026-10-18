@@ -59,6 +59,7 @@ def test_sums_every_testsuite_in_the_report() -> None:
 
 
 def test_manifest_rejects_a_cell_without_the_result_gate_fields() -> None:
+    """Manifest check raises when a cell is missing its required `max_skipped` gate field."""
     from tests.test_compatibility_manifest import check
     broken = copy.deepcopy(MANIFEST)
     del broken["cells"][0]["max_skipped"]

@@ -18,6 +18,7 @@ FIXTURE = {
 
 @pytest.fixture
 def client(monkeypatch):
+    """TestClient for a locally-insecure (loopback-only) oramasys app instance."""
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.setenv("ORAMA_LISTEN_HOST", "localhost")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
