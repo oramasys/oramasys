@@ -313,10 +313,15 @@ def test_nothing_at_runtime_or_in_ci_consumes_generations_or_a_pointer() -> None
     needles = ("requirements/generations", "ACTIVE-GENERATION")
     scanned = [
         *(ROOT / ".github").rglob("*"),
-        *(ROOT / "scripts").rglob("*.py"),
+        *(ROOT / "scripts").rglob("*"),
         *(ROOT / "src" / "orama").rglob("*.py"),
         ROOT / "pyproject.toml",
         *ROOT.glob("requirements/*.txt"),
+        *ROOT.glob("requirements/*.in"),
+        *(
+            ROOT / name
+            for name in ("Makefile", "tox.ini", "noxfile.py", "setup.cfg", "setup.py")
+        ),
     ]
     for path in scanned:
         if path.is_file():
