@@ -59,7 +59,6 @@ def test_sums_every_testsuite_in_the_report() -> None:
 
 
 def test_manifest_rejects_a_cell_without_the_result_gate_fields() -> None:
-    from orama.compat.manifest import validate_manifest
     from tests.test_compatibility_manifest import check
     broken = copy.deepcopy(MANIFEST)
     del broken["cells"][0]["max_skipped"]

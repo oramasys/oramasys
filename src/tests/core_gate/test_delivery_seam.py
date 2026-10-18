@@ -15,8 +15,6 @@ import pytest
 async def test_admission_gate_refuses_when_bounded_observer_unhealthy(tmp_path):
     """AdmissionGate fails closed when BoundedObserver marks delivery unhealthy."""
     from orama.graph.admission import (
-        AdmissionContext,
-        AdmissionProviders,
         admit_artifact,
     )
     from orama.graph.bounded_observer import BoundedObserver
@@ -86,7 +84,7 @@ async def test_critical_delivery_failure_during_an_inflight_batch_reservation(tm
     automatic release), and the holds the ledger reserved stay exactly as
     reserved -- no silent release or relabeling triggered by the observer.
     """
-    from orama.graph.admission import AdmissionProviders, admit_artifact
+    from orama.graph.admission import admit_artifact
     from orama.graph.bounded_observer import BoundedObserver
     from orama.graph.execution_guard import AdmissionGate, StepLedger, StopSignal
     from orama.graph import execution_guard

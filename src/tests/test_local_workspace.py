@@ -21,7 +21,8 @@ def client(monkeypatch):
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.setenv("ORAMA_LISTEN_HOST", "localhost")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
-    from orama.api.server import create_app; app = create_app()
+    from orama.api.server import create_app
+    app = create_app()
     return TestClient(app, base_url="http://localhost")
 
 

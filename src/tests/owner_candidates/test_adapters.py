@@ -15,7 +15,6 @@ import pytest
 
 from orama.graph.admission import (
     AdmissionContext,
-    AdmissionProviders,
     AdmissionRequirements,
     ArtifactBinding,
     admit_artifact,
