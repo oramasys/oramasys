@@ -339,6 +339,7 @@ def test_ci_runs_the_checkers_and_nothing_installs_from_a_generation() -> None:
     """The CI entrypoint names the two scripts; no workflow installs or activates from a pointer."""
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "python scripts/check_generation_pointer.py" in ci
+    assert "python scripts/check_generation_transitions.py" in ci
     for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
         text = workflow.read_text(encoding="utf-8")
         assert "pip install" not in "".join(

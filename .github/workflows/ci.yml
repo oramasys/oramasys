@@ -44,9 +44,10 @@ jobs:
         run: python -I "$GITHUB_WORKSPACE/scripts/verify_production_install.py" 6d75cfe08af95992dddffab13ae3019aa9c41350
       - name: Enforce Telos network authority
         run: python scripts/check_telos_network_authority.py src/orama
-      - name: Check generation pointer consistency (read only)
+      - name: Check generation pointer and transition history (read only)
         run: |
           python scripts/check_generation_pointer.py
+          python scripts/check_generation_transitions.py
       - name: Test with coverage
         run: python -m pytest src/tests --cov=orama --cov-report=term-missing --cov-fail-under=80
       - name: Compile smoke
