@@ -12,17 +12,20 @@ _SCRIPT = re.compile(r"<script\b[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE
 
 
 def _csp_hash(text: str) -> str:
+    """Return the CSP SHA-256 source expression for one inline block."""
     digest = hashlib.sha256(text.encode("utf-8")).digest()
     return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
 
 
 def _src(name: str, blocks: list[str]) -> str:
+    """Build one CSP source directive from matching inline blocks."""
     if not blocks:
         return f"{name} 'none'"
     return f"{name} " + " ".join(_csp_hash(block) for block in blocks)
 
 
 def shell_headers(html: str) -> dict[str, str]:
+    """Build restrictive response headers for the data-free portal shell."""
     csp = "; ".join(
         (
             "default-src 'none'",
@@ -44,5 +47,6 @@ def shell_headers(html: str) -> dict[str, str]:
 
 
 def render_shell() -> tuple[str, dict[str, str]]:
+    """Load the portal shell and its content-derived security headers."""
     html = _PAGE.read_text(encoding="utf-8")
     return html, shell_headers(html)

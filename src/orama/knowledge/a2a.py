@@ -12,6 +12,7 @@ _NO_TASK = "No task exists: read-only searches return a direct Message"
 
 
 def agent_card(base_url: str) -> dict[str, Any]:
+    """Build the public A2A card for the read-only documentation agent."""
     base = base_url.rstrip("/")
     return {
         "name": "Orama Knowledge Gateway",
@@ -37,6 +38,7 @@ def agent_card(base_url: str) -> dict[str, Any]:
 
 
 def _text_from_message(params: Any) -> str:
+    """Extract and join text parts from an A2A message parameter."""
     message = params.get("message", {}) if isinstance(params, dict) else {}
     parts = message.get("parts", []) if isinstance(message, dict) else []
     texts: list[str] = []
@@ -51,6 +53,7 @@ def _text_from_message(params: Any) -> str:
 
 
 async def dispatch(body: dict[str, Any]) -> dict[str, Any]:
+    """Route supported A2A methods to the read-only documentation service."""
     request_id = body.get("id")
     method = body.get("method")
     if method == "message/send":
@@ -61,6 +64,7 @@ async def dispatch(body: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _message_send(request_id: Any, params: Any) -> dict[str, Any]:
+    """Search documentation and return a direct A2A message result."""
     try:
         query = _text_from_message(params)
     except ValueError:

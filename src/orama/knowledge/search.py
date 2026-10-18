@@ -26,6 +26,7 @@ class SearchUnavailable(Exception):
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read a positive integer setting, falling back on absent or invalid input."""
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return default
@@ -36,6 +37,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
+    """Read a bounded positive float setting, falling back on invalid input."""
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return default
@@ -46,14 +48,17 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _max_files_scan() -> int:
+    """Return the configured cap on Markdown files examined per search."""
     return _env_int("ORAMA_KNOWLEDGE_MAX_FILES_SCAN", 2000)
 
 
 def _max_concurrent_searches() -> int:
+    """Return the configured cap on concurrent documentation searches."""
     return _env_int("ORAMA_KNOWLEDGE_MAX_CONCURRENT_SEARCHES", 4)
 
 
 def _search_timeout_s() -> float:
+    """Return the configured per-search timeout in seconds."""
     return _env_float("ORAMA_KNOWLEDGE_SEARCH_TIMEOUT_S", 8.0)
 
 
@@ -61,11 +66,13 @@ _slots = threading.BoundedSemaphore(_max_concurrent_searches())
 
 
 def _fold(text: str) -> str:
+    """Normalize text for accent-insensitive comparison."""
     decomposed = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
 def _fold_align(text: str) -> tuple[str, list[int]]:
+    """Normalize text while retaining folded-character source offsets."""
     chars: list[str] = []
     origins: list[int] = []
     for index, char in enumerate(text):
@@ -81,6 +88,7 @@ def _fold_align(text: str) -> tuple[str, list[int]]:
 
 
 def _excerpt(text: str, terms: tuple[str, ...]) -> str:
+    """Return a compact normalized excerpt centered on the earliest term."""
     folded, origins = _fold_align(text)
     folded = folded.lower()
     starts = [folded.find(term) for term in terms]
@@ -101,6 +109,7 @@ def _excerpt(text: str, terms: tuple[str, ...]) -> str:
 
 
 def docs_root() -> Path:
+    """Resolve the configured documentation tree or the checkout default."""
     configured = os.getenv("ORAMA_DOCS_ROOT", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
@@ -112,6 +121,7 @@ def docs_root() -> Path:
 def search_docs(
     query: str, limit: int = 8, deadline: float | None = None
 ) -> list[dict[str, Any]]:
+    """Search bounded Markdown files and return stable ranked result records."""
     terms = tuple(dict.fromkeys(word.lower() for word in _WORD.findall(_fold(query))))
     if not terms:
         return []
@@ -162,12 +172,14 @@ def search_docs(
 
 
 def _release_when_done(fut: asyncio.Future, slot: threading.BoundedSemaphore) -> None:
+    """Release a search slot and consume worker exceptions after completion."""
     slot.release()
     if not fut.cancelled():
         fut.exception()
 
 
 async def bounded_search(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Run one bounded search without releasing its slot on caller timeout."""
     slot = _slots
     if not slot.acquire(blocking=False):
         raise SearchUnavailable(_BUSY_DETAIL)

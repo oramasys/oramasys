@@ -11,14 +11,17 @@ QUERY_INVALID = "query must be a string of 2 to 200 characters"
 
 
 def rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
+    """Build a JSON-RPC error envelope for one request identifier."""
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
 def rpc_result(request_id: Any, result: Any) -> dict[str, Any]:
+    """Build a JSON-RPC success envelope for one request identifier."""
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
 async def rpc_body(request: Request) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Parse one request body into an object or a JSON-RPC parse error."""
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
@@ -29,6 +32,7 @@ async def rpc_body(request: Request) -> tuple[dict[str, Any] | None, dict[str, A
 
 
 def bounded_query(query: Any, *, already_stripped: bool = False) -> str:
+    """Validate a bounded search query and preserve its caller-selected form."""
     if not isinstance(query, str):
         raise ValueError(QUERY_INVALID)
     candidate = query.strip() if not already_stripped else query

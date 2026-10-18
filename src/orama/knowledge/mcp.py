@@ -24,6 +24,7 @@ _SEARCH_DOCS_TOOL = {
 
 
 def _hello() -> dict[str, Any]:
+    """Build the static MCP initialization result."""
     return {
         "protocolVersion": PROTOCOL,
         "capabilities": {"tools": {"listChanged": False}},
@@ -32,6 +33,7 @@ def _hello() -> dict[str, Any]:
 
 
 def _with_meta(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach server metadata to a successful JSON-RPC result."""
     result = payload.get("result")
     if isinstance(result, dict):
         meta = dict(result.get("_meta") or {})
@@ -41,6 +43,7 @@ def _with_meta(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
+    """Read one optional header from a generic mapping."""
     getter = getattr(headers, "get", None)
     if getter is None:
         return None
@@ -48,6 +51,7 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
 
 
 async def dispatch(body: dict[str, Any], headers: Mapping[str, str]) -> dict[str, Any] | None:
+    """Route a validated MCP request or accept the initialized notification."""
     request_id = body.get("id")
     method = body.get("method")
     if _header(headers, "Mcp-Protocol-Version") != PROTOCOL:
@@ -68,6 +72,7 @@ async def dispatch(body: dict[str, Any], headers: Mapping[str, str]) -> dict[str
 async def _call_tool(
     request_id: Any, body: dict[str, Any], headers: Mapping[str, str]
 ) -> dict[str, Any]:
+    """Validate and execute the sole read-only MCP tool."""
     params = body.get("params", {})
     if not isinstance(params, dict):
         return rpc_error(request_id, -32602, "Invalid params")
