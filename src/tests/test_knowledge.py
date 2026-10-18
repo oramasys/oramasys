@@ -354,6 +354,7 @@ async def test_a2a_message_send_and_task_methods(docs_root, bearer_env):
 
 
 async def test_a2a_id_less_dispatch_success_returns_empty_202(docs_root, bearer_env):
+    """An id-less A2A request that dispatches successfully gets an empty HTTP 202."""
     async with await _client() as client:
         resp = await client.post(
             "/api/a2a",
@@ -375,6 +376,7 @@ async def test_a2a_id_less_dispatch_success_returns_empty_202(docs_root, bearer_
 
 
 async def test_a2a_id_less_dispatch_failure_returns_400(docs_root, bearer_env):
+    """An id-less A2A request whose dispatch fails returns the error body as HTTP 400."""
     async with await _client() as client:
         resp = await client.post(
             "/api/a2a",
