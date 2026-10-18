@@ -34,7 +34,11 @@ async def mcp(request: Request) -> Response:
     if error is not None or body is None:
         return JSONResponse(error or rpc_error(None, -32600, "Invalid Request"))
     result = await mcp_mod.dispatch(body, request.headers)
-    return Response(status_code=202) if result is None else JSONResponse(result)
+    if result is None:
+        return Response(status_code=202)
+    if "id" not in body and "error" in result:
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
 
 
 @router.post("/api/a2a", tags=["knowledge"])

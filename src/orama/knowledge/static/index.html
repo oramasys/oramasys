@@ -37,14 +37,15 @@
     const tokenEl = document.getElementById("token");
     const statusEl = document.getElementById("status");
     const hitsEl = document.getElementById("hits");
-    let submittedQuery = null;
+    let searchRequestId = 0;
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const query = queryEl.value;
       const trimmed = query.trim();
       if (trimmed.length < 2 || query.length > MAX_QUERY) return;
-      submittedQuery = trimmed;
+      const requestId = ++searchRequestId;
+      const isCurrent = () => requestId === searchRequestId;
       statusEl.textContent = "Searching…";
       hitsEl.replaceChildren();
       const headers = {};
@@ -54,17 +55,18 @@
       try {
         response = await fetch("/api/knowledge/search?q=" + encodeURIComponent(trimmed), { headers });
       } catch {
-        if (submittedQuery !== queryEl.value.trim()) return;
+        if (!isCurrent()) return;
         statusEl.textContent = "Search failed.";
         return;
       }
-      if (submittedQuery !== queryEl.value.trim()) return;
+      if (!isCurrent()) return;
       if (response.status === 401) {
         statusEl.textContent = "Enter the control-plane token";
         return;
       }
       if (response.status === 503) {
         const body = await response.json().catch(() => ({}));
+        if (!isCurrent()) return;
         statusEl.textContent = typeof body.detail === "string" ? body.detail : "Service unavailable";
         return;
       }
@@ -73,7 +75,7 @@
         return;
       }
       const data = await response.json();
-      if (data.query !== submittedQuery) return;
+      if (!isCurrent() || data.query !== trimmed) return;
       const hits = Array.isArray(data.hits) ? data.hits : [];
       if (hits.length === 0) {
         statusEl.textContent = "No matching documentation.";

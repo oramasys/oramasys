@@ -184,6 +184,26 @@ async def test_mcp_initialized_notification_202(docs_root, bearer_env):
     assert resp.content == b""
 
 
+async def test_mcp_rejected_notification_returns_http_error(docs_root, bearer_env):
+    """An unaccepted id-less JSON-RPC message must not look accepted to HTTP clients."""
+    async with await _client() as client:
+        resp = await client.post(
+            "/api/mcp",
+            headers={
+                **_auth(),
+                "Mcp-Protocol-Version": "2026-07-28",
+                "Mcp-Method": "not-supported",
+            },
+            json={"jsonrpc": "2.0", "method": "not-supported"},
+        )
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32601, "message": "Method not found"},
+    }
+
+
 async def test_mcp_protocol_errors(docs_root, bearer_env):
     async with await _client() as client:
         missing = await client.post(
