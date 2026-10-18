@@ -43,13 +43,18 @@ async def mcp(request: Request) -> Response:
     return JSONResponse(result)
 
 
-@router.post("/api/a2a", tags=["knowledge"])
-async def a2a(request: Request) -> dict[str, Any]:
-    """Dispatch one A2A JSON-RPC request through the shared parser."""
+@router.post("/api/a2a", tags=["knowledge"], response_class=Response)
+async def a2a(request: Request) -> Response:
+    """Dispatch one A2A JSON-RPC request and map id-less requests to HTTP status."""
     body, error = await rpc_body(request)
     if error is not None or body is None:
-        return error or rpc_error(None, -32600, "Invalid Request")
-    return await a2a_mod.dispatch(body)
+        return JSONResponse(error or rpc_error(None, -32600, "Invalid Request"))
+    result = await a2a_mod.dispatch(body)
+    if "id" not in body:
+        if "error" in result:
+            return JSONResponse(result, status_code=400)
+        return Response(status_code=202)
+    return JSONResponse(result)
 
 
 @router.get("/.well-known/agent-card.json", tags=["knowledge"])

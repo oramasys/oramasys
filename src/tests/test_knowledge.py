@@ -204,6 +204,39 @@ async def test_mcp_rejected_notification_returns_http_error(docs_root, bearer_en
     }
 
 
+async def test_mcp_id_less_requests_rejected_before_handlers(docs_root, bearer_env):
+    """id-less initialize/discover/tools-list/tools-call must 400 without running handlers."""
+    cases = [
+        (
+            {"Mcp-Protocol-Version": "2026-07-28", "Mcp-Method": "initialize"},
+            {"jsonrpc": "2.0", "method": "initialize", "params": {}},
+        ),
+        (
+            {"Mcp-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover"},
+            {"jsonrpc": "2.0", "method": "server/discover", "params": {}},
+        ),
+        (
+            {"Mcp-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"},
+            {"jsonrpc": "2.0", "method": "tools/list"},
+        ),
+        (
+            {**_MCP_HEADERS},
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {"name": "search_docs", "arguments": {"query": "Amplifier"}},
+            },
+        ),
+    ]
+    async with await _client() as client:
+        for headers, payload in cases:
+            resp = await client.post("/api/mcp", headers={**_auth(), **headers}, json=payload)
+            assert resp.status_code == 400
+            body = resp.json()
+            assert body["id"] is None
+            assert body["error"]["code"] == -32600
+
+
 async def test_mcp_protocol_errors(docs_root, bearer_env):
     async with await _client() as client:
         missing = await client.post(
@@ -318,6 +351,51 @@ async def test_a2a_message_send_and_task_methods(docs_root, bearer_env):
     assert tasks_cancel.json()["error"]["code"] == -32001
     assert push.json()["error"]["code"] == -32601
     assert bad_part.json()["error"]["code"] == -32602
+
+
+async def test_a2a_id_less_dispatch_success_returns_empty_202(docs_root, bearer_env):
+    async with await _client() as client:
+        resp = await client.post(
+            "/api/a2a",
+            headers=_auth(),
+            json={
+                "jsonrpc": "2.0",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "messageId": "m-noid",
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": "Amplifier Principle"}],
+                    }
+                },
+            },
+        )
+    assert resp.status_code == 202
+    assert resp.content == b""
+
+
+async def test_a2a_id_less_dispatch_failure_returns_400(docs_root, bearer_env):
+    async with await _client() as client:
+        resp = await client.post(
+            "/api/a2a",
+            headers=_auth(),
+            json={"jsonrpc": "2.0", "method": "tasks/get", "params": {}},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32001
+
+
+async def test_a2a_with_id_behavior_unchanged(docs_root, bearer_env):
+    """Requests that include an id must still return the full JSON-RPC envelope at 200."""
+    async with await _client() as client:
+        resp = await client.post(
+            "/api/a2a",
+            headers=_auth(),
+            json={"jsonrpc": "2.0", "id": "has-id", "method": "tasks/get", "params": {}},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "has-id"
+    assert resp.json()["error"]["code"] == -32001
 
 
 def test_symlink_escape_is_not_indexed(tmp_path, monkeypatch):

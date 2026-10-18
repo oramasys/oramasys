@@ -8,6 +8,7 @@ from orama.knowledge.jsonrpc import QUERY_INVALID, bounded_query, rpc_error, rpc
 from orama.knowledge.search import SearchUnavailable, bounded_search
 
 PROTOCOL = "2026-07-28"
+_ID_REQUIRED_METHODS = {"initialize", "server/discover", "tools/list", "tools/call"}
 _SERVER_INFO = {"name": "orama-knowledge", "version": "1.0.0"}
 _SERVER_INFO_META = "io.modelcontextprotocol/serverInfo"
 _SEARCH_DOCS_TOOL = {
@@ -51,7 +52,10 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
 
 
 async def dispatch(body: dict[str, Any], headers: Mapping[str, str]) -> dict[str, Any] | None:
-    """Route a validated MCP request or accept the initialized notification."""
+    """Route a validated MCP request, rejecting id-less requests before their handlers run.
+
+    `notifications/initialized` is accepted without an id as the sole carve-out.
+    """
     request_id = body.get("id")
     method = body.get("method")
     if _header(headers, "Mcp-Protocol-Version") != PROTOCOL:
@@ -60,6 +64,8 @@ async def dispatch(body: dict[str, Any], headers: Mapping[str, str]) -> dict[str
         return rpc_error(request_id, -32600, "Mcp-Method header must match the JSON-RPC method")
     if method == "notifications/initialized":
         return None
+    if "id" not in body and method in _ID_REQUIRED_METHODS:
+        return rpc_error(None, -32600, "Invalid Request: id is required")
     if method in {"initialize", "server/discover"}:
         return _with_meta(rpc_result(request_id, _hello()))
     if method == "tools/list":
