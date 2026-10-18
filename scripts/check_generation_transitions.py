@@ -69,6 +69,7 @@ AUTHORIZATION = "structural only; approval references are not verified offline"
 
 
 def _is_int(value: object) -> bool:
+    """Return whether ``value`` is an integer but not Python's boolean subtype."""
     return isinstance(value, int) and not isinstance(value, bool)
 
 

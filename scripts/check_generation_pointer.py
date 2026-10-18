@@ -44,11 +44,13 @@ class Refusal(Exception):
     """A typed refusal: a stable code, the subject it concerns and a short detail."""
 
     def __init__(self, code: str, subject: str, detail: str) -> None:
+        """Initialize the refusal and retain its stable machine-readable fields."""
         super().__init__(f"{code}: {subject}: {detail}")
         self.code, self.subject, self.detail = code, subject, detail
 
 
 def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object while refusing duplicate member names."""
     keys = [key for key, _ in pairs]
     if len(set(keys)) != len(keys):
         raise ValueError("duplicate JSON key")
@@ -56,6 +58,7 @@ def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _reject_constant(name: str) -> None:
+    """Reject non-finite JSON constants accepted by Python's permissive parser."""
     raise ValueError(f"non-finite constant {name}")
 
 
@@ -344,6 +347,7 @@ def check_repository(root: Path) -> dict[str, Any]:
     problems: list[dict[str, str]] = []
 
     def note(error: Refusal) -> None:
+        """Append a stable refusal record without stopping the remaining checks."""
         problems.append(
             {"code": error.code, "subject": error.subject, "detail": error.detail}
         )
@@ -493,6 +497,7 @@ def check_repository(root: Path) -> dict[str, Any]:
 
 
 def _finish(report: dict[str, Any], problems: list[dict[str, str]]) -> dict[str, Any]:
+    """Attach normalized problem records and derive the aggregate success flag."""
     report["problems"] = problems
     report["ok"] = not problems
     return report

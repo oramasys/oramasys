@@ -53,6 +53,7 @@ def run(root: Path) -> tuple[int, dict]:
 
 
 def codes(report: dict) -> list[str]:
+    """Extract ordered stable refusal codes from a validator report."""
     return [problem["code"] for problem in report["problems"]]
 
 
@@ -66,6 +67,7 @@ def snapshot(root: Path) -> dict[str, str]:
 
 
 def receipts(root: Path) -> list[Path]:
+    """Return receipt files in their lexical sequence order."""
     return sorted((root / RECEIPTS).glob("*.json"))
 
 
@@ -140,6 +142,7 @@ def declare(root: Path, generation: str) -> None:
 def test_the_real_history_is_sound_and_says_what_it_cannot_prove(
     tmp_path: Path,
 ) -> None:
+    """The retained history replays while disclosing its offline authorization limit."""
     code, report = run(ROOT)
     assert code == 0 and report["ok"], report
     assert (
@@ -151,6 +154,7 @@ def test_the_real_history_is_sound_and_says_what_it_cannot_prove(
 
 
 def test_the_real_receipts_are_pinned_so_history_cannot_be_rewritten() -> None:
+    """Pinned receipt hashes make retrospective edits detectable."""
     for name, digest in PINNED_RECEIPTS.items():
         assert (
             hashlib.sha256((ROOT / RECEIPTS / name).read_bytes()).hexdigest() == digest
@@ -158,6 +162,7 @@ def test_the_real_receipts_are_pinned_so_history_cannot_be_rewritten() -> None:
 
 
 def test_a_missing_first_receipt_breaks_the_sequence(tmp_path: Path) -> None:
+    """A receipt chain must start at its retained first transition."""
     root = make_root(tmp_path)
     receipts(root)[0].unlink()
     code, report = run(root)
@@ -165,6 +170,7 @@ def test_a_missing_first_receipt_breaks_the_sequence(tmp_path: Path) -> None:
 
 
 def test_editing_an_old_receipt_breaks_the_chain(tmp_path: Path) -> None:
+    """Changing a retained receipt invalidates its successor hash link."""
     root = make_root(tmp_path)
     first = receipts(root)[0]
     body = json.loads(first.read_text())
@@ -175,6 +181,7 @@ def test_editing_an_old_receipt_breaks_the_chain(tmp_path: Path) -> None:
 
 
 def test_a_renamed_receipt_is_refused(tmp_path: Path) -> None:
+    """Receipt filenames are part of the closed transition representation."""
     root = make_root(tmp_path)
     second = receipts(root)[1]
     second.rename(second.with_name("0003-activate-m1-gen2.json"))
@@ -195,6 +202,7 @@ def test_a_renamed_receipt_is_refused(tmp_path: Path) -> None:
 def test_a_receipt_with_the_wrong_shape_is_refused(
     tmp_path: Path, change: dict
 ) -> None:
+    """Closed receipt keys and value types reject malformed transitions."""
     root = make_root(tmp_path)
     last = receipts(root)[-1]
     body = json.loads(last.read_text())
@@ -204,6 +212,7 @@ def test_a_receipt_with_the_wrong_shape_is_refused(
 
 
 def test_a_duplicate_key_in_a_receipt_is_refused(tmp_path: Path) -> None:
+    """Duplicate JSON members cannot produce an ambiguous transition record."""
     root = make_root(tmp_path)
     last = receipts(root)[-1]
     last.write_text(
@@ -215,6 +224,7 @@ def test_a_duplicate_key_in_a_receipt_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_symlinked_receipt_is_refused(tmp_path: Path) -> None:
+    """Receipt paths must resolve to retained regular files, not symlinks."""
     root = make_root(tmp_path)
     last = receipts(root)[-1]
     target = tmp_path / "real.json"
@@ -224,24 +234,28 @@ def test_a_symlinked_receipt_is_refused(tmp_path: Path) -> None:
 
 
 def test_no_receipts_is_refused(tmp_path: Path) -> None:
+    """An empty transition directory cannot establish an active generation."""
     root = make_root(tmp_path)
     shutil.rmtree(root / RECEIPTS)
     assert codes(run(root)[1]) == ["receipt.missing"]
 
 
 def test_activating_an_unreviewed_generation_is_refused(tmp_path: Path) -> None:
+    """Only reviewed generations may become active through a transition."""
     root = make_root(tmp_path)
     append(root, "activate", "m1-gen9", "m1-gen2")
     assert codes(run(root)[1]) == ["transition.unreviewed"]
 
 
 def test_activating_from_the_wrong_generation_is_refused(tmp_path: Path) -> None:
+    """An activation must name the generation currently active before it."""
     root = make_root(tmp_path)
     append(root, "activate", "m1-gen1", None)
     assert codes(run(root)[1]) == ["transition.from"]
 
 
 def test_activating_the_already_active_generation_is_refused(tmp_path: Path) -> None:
+    """No-op activation records are not valid lifecycle transitions."""
     root = make_root(tmp_path)
     append(root, "activate", "m1-gen2", "m1-gen2")
     assert codes(run(root)[1]) == ["transition.noop"]
@@ -250,6 +264,7 @@ def test_activating_the_already_active_generation_is_refused(tmp_path: Path) -> 
 def test_a_rollback_to_a_previously_active_generation_is_a_receipt_not_a_state(
     tmp_path: Path,
 ) -> None:
+    """Rollback is represented as a transition receipt rather than a generation state."""
     root = make_root(tmp_path)
     append(root, "rollback", "m1-gen1", "m1-gen2")
     code, report = run(root)
@@ -259,6 +274,7 @@ def test_a_rollback_to_a_previously_active_generation_is_a_receipt_not_a_state(
 
 
 def test_a_rollback_without_moving_the_pointer_is_refused(tmp_path: Path) -> None:
+    """A rollback receipt and the active pointer must move together."""
     root = make_root(tmp_path)
     append(root, "rollback", "m1-gen1", "m1-gen2", move=False)
     assert codes(run(root)[1]) == ["pointer.mismatch"]
@@ -267,6 +283,7 @@ def test_a_rollback_without_moving_the_pointer_is_refused(tmp_path: Path) -> Non
 def test_a_rollback_to_a_generation_that_was_never_active_is_refused(
     tmp_path: Path,
 ) -> None:
+    """Rollback targets must have been active earlier in the replayed history."""
     root = make_root(tmp_path)
     review(root, "m1-gen3")
     append(root, "rollback", "m1-gen3", "m1-gen2")
@@ -274,6 +291,7 @@ def test_a_rollback_to_a_generation_that_was_never_active_is_refused(
 
 
 def test_the_pointer_must_name_the_last_move(tmp_path: Path) -> None:
+    """The active pointer must cite the final retained transition receipt."""
     root = make_root(tmp_path)
     pointer = json.loads((root / POINTER).read_text())
     pointer["transition_receipt"] = (
@@ -284,12 +302,14 @@ def test_the_pointer_must_name_the_last_move(tmp_path: Path) -> None:
 
 
 def test_retiring_the_active_generation_is_refused(tmp_path: Path) -> None:
+    """The currently active generation cannot be retired."""
     root = make_root(tmp_path)
     append(root, "retire", "m1-gen2", None)
     assert codes(run(root)[1]) == ["retire.active"]
 
 
 def test_retiring_a_declared_generation_is_refused(tmp_path: Path) -> None:
+    """A consumer-declared generation remains protected from retirement."""
     root = make_root(tmp_path)
     declare(root, "m1-gen1")
     append(root, "retire", "m1-gen1", None)
@@ -297,6 +317,7 @@ def test_retiring_a_declared_generation_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_retirement_carries_no_from_generation(tmp_path: Path) -> None:
+    """Retirement is not a pointer move and therefore has no predecessor generation."""
     root = make_root(tmp_path)
     append(root, "retire", "m1-gen1", "m1-gen2")
     assert codes(run(root)[1]) == ["transition.from"]
@@ -305,6 +326,7 @@ def test_a_retirement_carries_no_from_generation(tmp_path: Path) -> None:
 def test_retiring_an_inactive_undeclared_generation_works_and_is_final(
     tmp_path: Path,
 ) -> None:
+    """An unused inactive generation may retire and cannot later be restored."""
     root = make_root(tmp_path)
     append(root, "retire", "m1-gen1", None)
     code, report = run(root)
@@ -314,6 +336,7 @@ def test_retiring_an_inactive_undeclared_generation_works_and_is_final(
 
 
 def test_a_retired_generation_cannot_be_activated(tmp_path: Path) -> None:
+    """Retirement permanently excludes a generation from later activation."""
     root = make_root(tmp_path)
     append(root, "retire", "m1-gen1", None)
     append(root, "activate", "m1-gen1", "m1-gen2")
@@ -321,6 +344,7 @@ def test_a_retired_generation_cannot_be_activated(tmp_path: Path) -> None:
 
 
 def test_a_consumer_cannot_declare_a_retired_generation(tmp_path: Path) -> None:
+    """Consumer declarations cannot revive a retired generation."""
     root = make_root(tmp_path)
     append(root, "retire", "m1-gen1", None)
     declare(root, "m1-gen1")
@@ -328,6 +352,7 @@ def test_a_consumer_cannot_declare_a_retired_generation(tmp_path: Path) -> None:
 
 
 def test_validation_writes_nothing_and_is_repeatable(tmp_path: Path) -> None:
+    """Validation is pure and returns identical reports for identical retained inputs."""
     root = make_root(tmp_path)
     for damage in (lambda: None, lambda: receipts(root)[0].unlink()):
         damage()
@@ -389,6 +414,7 @@ def test_removing_or_replacing_the_registry_cannot_unlock_a_retirement(
 def test_a_reviewed_registry_change_with_its_receipt_is_accepted(
     tmp_path: Path,
 ) -> None:
+    """A registry change is valid only when its reviewed digest and receipt agree."""
     root = make_root(tmp_path)
     data = json.loads((root / CONSUMERS).read_text())
     data["consumers"][1]["generation"] = "m1-gen2"
@@ -401,6 +427,7 @@ def test_a_reviewed_registry_change_with_its_receipt_is_accepted(
 def test_a_registry_change_without_a_registry_receipt_is_refused(
     tmp_path: Path,
 ) -> None:
+    """Changing the registry without its transition receipt is rejected."""
     root = make_root(tmp_path)
     data = json.loads((root / CONSUMERS).read_text())
     data["consumers"][1]["generation"] = "m1-gen2"
@@ -412,6 +439,7 @@ def test_a_registry_change_without_a_registry_receipt_is_refused(
 def test_a_registry_receipt_without_the_reviewed_index_update_is_refused(
     tmp_path: Path,
 ) -> None:
+    """A registry receipt cannot authorize bytes absent from the reviewed index."""
     root = make_root(tmp_path)
     data = json.loads((root / CONSUMERS).read_text())
     data["consumers"][1]["generation"] = "m1-gen2"
@@ -423,6 +451,7 @@ def test_a_registry_receipt_without_the_reviewed_index_update_is_refused(
 def test_a_receipt_that_disagrees_with_the_tracked_registry_digest_is_refused(
     tmp_path: Path,
 ) -> None:
+    """Each receipt must chain the registry digest currently tracked by the index."""
     root = make_root(tmp_path)
     append(root, "retire", "m1-gen1", None, consumers_registry_sha256="0" * 64)
     assert "registry.chain" in codes(run(root)[1])
@@ -431,6 +460,7 @@ def test_a_receipt_that_disagrees_with_the_tracked_registry_digest_is_refused(
 def test_a_registry_receipt_must_name_the_active_generation_and_change_the_digest(
     tmp_path: Path,
 ) -> None:
+    """Registry receipts bind the active generation and must advance the digest."""
     root = make_root(tmp_path)
     append(root, "registry", "m1-gen1", None)
     assert "registry.generation" in codes(run(root)[1])

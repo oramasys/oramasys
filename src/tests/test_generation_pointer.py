@@ -668,6 +668,7 @@ def test_g2_09b_removing_a_pin_occurrence_is_a_count_refusal(tmp_path: Path) -> 
 
 
 def write_registry(root: Path, data: dict[str, Any]) -> None:
+    """Replace the fixture consumer registry with deterministic JSON bytes."""
     (root / "requirements" / "generation-consumers.json").write_text(
         json.dumps(data, indent=2) + "\n"
     )
@@ -702,6 +703,7 @@ def test_g2_19_an_unreviewed_registry_is_refused_by_digest(
 
 
 def test_g2_19_a_deleted_registry_is_refused(tmp_path: Path) -> None:
+    """A missing registry is refused before any consumer declaration is interpreted."""
     root = make_root(tmp_path)
     (root / "requirements" / "generation-consumers.json").unlink()
     rc, report = run(root, rebind=False)
@@ -721,6 +723,7 @@ def test_g2_19_a_registry_with_no_consumers_is_refused_even_when_its_digest_is_r
 def test_g2_19_the_reviewed_index_must_carry_a_valid_registry_digest(
     tmp_path: Path,
 ) -> None:
+    """The reviewed index cannot omit the digest binding the consumer registry."""
     root = make_root(tmp_path)
     index_path = root / "requirements" / "generations" / "reviewed.json"
     index = json.loads(index_path.read_text())
@@ -733,6 +736,7 @@ def test_g2_19_the_reviewed_index_must_carry_a_valid_registry_digest(
 def test_g2_19_a_matching_reviewed_digest_is_what_lets_the_registry_be_read(
     tmp_path: Path,
 ) -> None:
+    """Only a matching reviewed digest permits the registry to become input."""
     root = make_root(tmp_path)
     rc, report = run(root, rebind=False)
     assert rc == 0 and report["ok"], report["problems"]
