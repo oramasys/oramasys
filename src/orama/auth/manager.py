@@ -1,7 +1,7 @@
 """AuthManager: optional providers first, Bearer always last / grandfathered."""
 from __future__ import annotations
 
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from orama.auth.protocol import AuthProvider, AuthResult
 from orama.auth.providers.bearer import BearerTokenProvider
