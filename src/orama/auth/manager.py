@@ -1,7 +1,7 @@
 """AuthManager: optional providers first, Bearer always last / grandfathered."""
 from __future__ import annotations
 
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from orama.auth.protocol import AuthProvider, AuthResult
 from orama.auth.providers.bearer import BearerTokenProvider
@@ -16,6 +16,7 @@ class AuthManager:
     """
 
     def __init__(self, providers: Sequence[AuthProvider] | None = None) -> None:
+        """Initialize configured providers while retaining Bearer as a fallback."""
         if providers is None:
             self._providers: list[AuthProvider] = [BearerTokenProvider()]
         else:
@@ -25,6 +26,7 @@ class AuthManager:
 
     @property
     def providers(self) -> tuple[AuthProvider, ...]:
+        """Return configured providers in their authentication precedence order."""
         return tuple(self._providers)
 
     def authenticate_outbound(self) -> Mapping[str, str]:
@@ -96,5 +98,6 @@ def build_default_auth_manager() -> AuthManager:
 
 
 def configured_provider_names(manager: AuthManager | None = None) -> list[str]:
+    """Return the names of providers that are currently configured."""
     mgr = manager or build_default_auth_manager()
     return [p.name for p in mgr.providers if p.is_configured()]

@@ -62,7 +62,8 @@ async def test_run_response_has_result() -> None:
 
 async def test_import_boundary_oramasys_does_not_import_back():
     """oramasys must not be imported by perpetua_core."""
-    import subprocess, sys
+    import subprocess
+    import sys
     result = subprocess.run(
         [sys.executable, "-c", "import perpetua_core"],
         capture_output=True, text=True

@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.check_telos_network_authority import scan_tree
+from scripts.check_telos_network_authority import scan_tree  # noqa: E402
 
 
 def _write(tmp_path: Path, relative: str, content: str) -> Path:
