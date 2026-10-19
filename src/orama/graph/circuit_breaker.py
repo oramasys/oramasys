@@ -42,14 +42,24 @@ class CircuitBreaker:
         self.state: State = "closed"
         self._failures = 0
         self._opened_at = 0.0
+        self._probe_started_at: float | None = None
         self._non_closed_since: float | None = None
 
     def allow(self) -> bool:
         """Return whether a call may proceed; admit exactly one probe per elapsed interval."""
         if self.state == "closed":
             return True
-        if self.state == "open" and self._clock() - self._opened_at >= self._probe_interval:
+        now = self._clock()
+        if self.state == "open" and now - self._opened_at >= self._probe_interval:
             self.state = "half_open"
+            self._probe_started_at = now
+            return True
+        if (
+            self.state == "half_open"
+            and self._probe_started_at is not None
+            and now - self._probe_started_at >= self._probe_interval
+        ):
+            self._probe_started_at = now
             return True
         return False
 
@@ -68,6 +78,7 @@ class CircuitBreaker:
         """An authenticated, usable response resets the count and closes the breaker."""
         self.state = "closed"
         self._failures = 0
+        self._probe_started_at = None
         self._non_closed_since = None
 
     def record_signed_refusal(self) -> None:
@@ -83,5 +94,6 @@ class CircuitBreaker:
         now = self._clock()
         self.state = "open"
         self._opened_at = now
+        self._probe_started_at = None
         if self._non_closed_since is None:
             self._non_closed_since = now

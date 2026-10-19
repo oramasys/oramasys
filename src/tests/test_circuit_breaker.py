@@ -104,6 +104,25 @@ def test_half_open_failure_reopens_and_restarts_interval() -> None:
     assert cb.allow() is True
     assert cb.state == "half_open"
 
+
+def test_unresolved_half_open_probe_expires_and_allows_one_replacement() -> None:
+    """A lost probe is replaced only after its interval, without resetting the open duration."""
+    clock = FakeClock(1000.0)
+    cb = CircuitBreaker(clock=clock, threshold=1, probe_interval=15.0, alert_after=30.0)
+    cb.record_failure()
+    clock.advance(15.0)
+    assert cb.allow() is True
+    assert cb.state == "half_open"
+    assert cb.allow() is False
+
+    clock.advance(14.999)
+    assert cb.allow() is False
+    clock.advance(0.001)
+    assert cb.allow() is True
+    assert cb.state == "half_open"
+    assert cb.allow() is False
+    assert cb.alert_due() is True
+
     # Probe fails -> reopens
     cb.record_failure()
     assert cb.state == "open"

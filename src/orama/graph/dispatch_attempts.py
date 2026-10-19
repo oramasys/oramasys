@@ -867,6 +867,25 @@ class SqliteAttemptStore:
                 raise AttemptStateError("the fence must be committed before attesting")
             if committed is not None or attempt.state == "authorized":
                 raise AttemptStateError("step 4.3 committed for the attempt; it cannot be abandoned")
+            stored = db.execute(
+                "SELECT permit_id, attestation_digest, attestation FROM abandon_attestations"
+                " WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if stored is not None:
+                try:
+                    kept = json.loads(stored[2])
+                except json.JSONDecodeError as error:
+                    raise AttemptStateError("stored abandon attestation is invalid") from error
+                if not isinstance(kept, dict) or _sha256_hex(canonical_bytes(kept)) != stored[1]:
+                    raise AttemptStateError("stored abandon attestation is invalid")
+                if (
+                    stored[0] != permit_id
+                    or kept.get("cause") != cause
+                    or kept.get("consumer_fencing_epoch") != fencing_epoch
+                ):
+                    raise AttemptStateError("a different attestation already exists for the attempt")
+                return kept
             body = {
                 "attempt_id": attempt_id, "permit_id": permit_id, "cause": cause,
                 "consumer_fencing_epoch": fencing_epoch,
@@ -876,15 +895,6 @@ class SqliteAttemptStore:
                 "no_intent_exists": True,
             }
             digest = _sha256_hex(canonical_bytes(body))
-            stored = db.execute(
-                "SELECT permit_id, attestation_digest, attestation FROM abandon_attestations"
-                " WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-            if stored is not None:
-                if stored[0] != permit_id or stored[1] != digest:
-                    raise AttemptStateError("a different attestation already exists for the attempt")
-                return json.loads(stored[2])
             db.execute(
                 "INSERT INTO abandon_attestations (attempt_id, permit_id, attestation_digest,"
                 " attestation, created_at) VALUES (?, ?, ?, ?, ?)",

@@ -364,6 +364,14 @@ def test_the_attestation_has_the_eight_issuer_fields_and_is_kept_idempotently(tm
         h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 2, NOW)
 
 
+def test_an_attestation_retry_keeps_its_original_fence_evidence_after_state_changes(tmp_path: Path) -> None:
+    """An identical retry returns the durable first attestation, not one rebuilt from mutable state."""
+    h = fenced(tmp_path)
+    first = h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW)
+    h.store.record_unavailable(ATTEMPT)
+    assert h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW) == first
+
+
 def test_the_authenticated_outcome_ends_the_attempt_and_authorizes_release(tmp_path: Path) -> None:
     h = fenced(tmp_path)
     attestation = h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW)

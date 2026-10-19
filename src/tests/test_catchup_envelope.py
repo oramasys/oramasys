@@ -198,3 +198,27 @@ def test_precedence_range_beats_gap() -> None:
     with pytest.raises(CatchupRefused) as exc_info:
         validate_catchup(envelope, requested_acked_through=10, r_f=25)
     assert exc_info.value.reason == "catchup_range"
+
+
+def test_precedence_malformed_event_beats_range() -> None:
+    """A malformed bounded event is refused before an independently invalid range."""
+    envelope = {
+        "from_version": 20,
+        "through_version": 25,
+        "events": [{"version": None}],
+    }
+    with pytest.raises(CatchupRefused) as exc_info:
+        validate_catchup(envelope, requested_acked_through=10, r_f=25)
+    assert exc_info.value.reason == "catchup_malformed"
+
+
+def test_precedence_too_large_beats_an_unbounded_event_shape_scan() -> None:
+    """An oversized envelope is refused without scanning each event for malformed content."""
+    envelope = {
+        "from_version": 11,
+        "through_version": 75,
+        "events": [{"version": None}] + [{"version": version} for version in range(12, 76)],
+    }
+    with pytest.raises(CatchupRefused) as exc_info:
+        validate_catchup(envelope, requested_acked_through=10, r_f=75)
+    assert exc_info.value.reason == "catchup_too_large"

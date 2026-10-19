@@ -11,7 +11,7 @@ PR to `main`; the open items below stay closed until the operator decides them.
 | Piece | Where | Contract |
 |-------|-------|----------|
 | Request validators | `dispatch_consumer_wire.py` | The 12-field permit request and 8-field finalization request, validated like the issuer wires |
-| Catch-up envelope | `catchup_envelope.py` | Exactly `from_version`, `through_version`, `events`; refusals in order `catchup_malformed`, `catchup_too_large` (more than 64), `catchup_range`, `catchup_gap`; an empty envelope only when already at `R_f` |
+| Catch-up envelope | `catchup_envelope.py` | Exactly `from_version`, `through_version`, `events`; header shape is checked first, an over-limit envelope is refused as `catchup_too_large` without scanning its contents, then bounded event shape, range, and contiguity refuse as `catchup_malformed`, `catchup_range`, and `catchup_gap`; an empty envelope is valid only when already at `R_f` |
 | Window and deadline | `finalization_window.py` | A finalization is requested only with at least 15 s left (exactly 15.0 allowed); deadlines read an injected monotonic clock |
 | Circuit breaker | `circuit_breaker.py` | Opens on the 5th consecutive authenticated failure, one probe per 15 s, closes only on a usable response, a signed refusal is not a failure, alert after 120 s |
 | Availability gate | `issuer_availability.py` | Deadline, then window (finalization only), then breaker; a refusal is the visible status `dispatch.issuer_unavailable`; bounded identical-retry delay |

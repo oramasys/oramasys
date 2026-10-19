@@ -51,8 +51,12 @@ def validate_catchup(
     )
     if not _is_int(from_version) or not _is_int(through_version) or not isinstance(events, list):
         raise CatchupRefused("catchup_malformed")
+    # Refuse an oversized envelope before inspecting its unbounded contents.
+    # Once the bound holds, validating every version shape preserves the documented
+    # malformed-before-range precedence without turning validation into a DoS vector.
     if len(events) > max_events:
         raise CatchupRefused("catchup_too_large")
+    versions = [_event_version(event) for event in events]
     if events:
         in_range = (
             from_version == requested_acked_through + 1
@@ -65,9 +69,9 @@ def validate_catchup(
         )
     if not in_range:
         raise CatchupRefused("catchup_range")
-    for index, event in enumerate(events):
-        if _event_version(event) != from_version + index:
+    for index, version in enumerate(versions):
+        if version != from_version + index:
             raise CatchupRefused("catchup_gap")
-    if events and _event_version(events[-1]) != through_version:
+    if versions and versions[-1] != through_version:
         raise CatchupRefused("catchup_gap")
     return events
