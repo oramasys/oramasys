@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, TypeAlias
 
 from orama.graph.dispatch_consumer_wire import (
@@ -88,6 +89,22 @@ class OperatorAuthority(Protocol):
 
 class OperatorRefused(Exception):
     """The operator port did not authorize the call; nothing was read or written."""
+
+
+class IssuerOutcomeAuthenticator(Protocol):
+    """Trusted adapter bound to the expected issuer and its authenticated response evidence."""
+
+    def verify(self, outcome: str, record: Mapping[str, str]) -> bool:
+        """Authenticate the exact outcome and complete record against issuer response evidence.
+
+        Matching identifiers alone is insufficient. Implementations must verify a signed response
+        or bind these values to a response obtained over an authenticated issuer channel.
+        """
+        ...
+
+
+class IssuerOutcomeRefused(Exception):
+    """Issuer response authentication failed; no abandonment or release was recorded."""
 
 
 class ClockQuarantined(Exception):
@@ -505,6 +522,7 @@ class SqliteAttemptStore:
         *,
         governed: bool = False,
         clock_skew_tolerance: timedelta = timedelta(0),
+        abandon_authenticator: IssuerOutcomeAuthenticator | None = None,
     ) -> None:
         """Open (creating privately) the WAL-mode store and its schema.
 
@@ -516,6 +534,9 @@ class SqliteAttemptStore:
         before dispatch is quarantined. The specification leaves the value to signed policy, so the
         default is zero (any backward step quarantines); a value above ``MAX_CLOCK_SKEW_TOLERANCE``
         is refused as a misconfiguration guard. A tolerated step never lowers the high-water mark.
+
+        ``abandon_authenticator`` must bind responses to the expected issuer and verify their
+        complete contents. Without it, abandonment outcomes are refused before any write.
         """
         if (
             not isinstance(clock_skew_tolerance, timedelta)
@@ -524,6 +545,7 @@ class SqliteAttemptStore:
         ):
             raise ValueError("clock_skew_tolerance must be a timedelta from zero to five minutes")
         self._clock_skew = clock_skew_tolerance
+        self._abandon_authenticator = abandon_authenticator
         prepared = prepare_private_store(path)
         self._governed = governed
         self._lock = threading.Lock()
@@ -748,6 +770,11 @@ class SqliteAttemptStore:
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
             if self._governed:
+                clock = db.execute(
+                    "SELECT quarantined FROM clock_high_water WHERE id = 1"
+                ).fetchone()
+                if clock is None or clock[0]:
+                    raise ClockQuarantined("clock_quarantined")
                 consume_reservation(db, attempt.reservation_id, attempt_id, scope, now)
             try:
                 permit = validate_permit_wire(permit_wire)
@@ -910,11 +937,23 @@ class SqliteAttemptStore:
         The record must name this attempt and permit and carry the digest of the attestation this
         store built. The outcome authorizes the reservation release (``release_authorized``);
         performing the release belongs to the reservation owner and reads this record. Idempotent
-        for an identical retry.
+        for the same immutable disposition, including Phylax's ``abandon.already_abandoned``
+        retry response. The injected authenticator must authenticate every response, including retries.
         """
         _require_aware(now)
         if outcome not in _ABANDON_OUTCOMES:
             raise AttemptStateError("unknown abandon outcome")
+        fields = {"attempt_id", "permit_id", "attestation_digest", "disposition_ref", "recorded_at"}
+        authenticated_record = dict(record)
+        if set(authenticated_record) != fields:
+            raise AttemptStateError("the abandon record has invalid fields")
+        for name, value in authenticated_record.items():
+            _require_text(name, value)
+        if self._abandon_authenticator is None or self._abandon_authenticator.verify(
+            outcome, MappingProxyType(authenticated_record)
+        ) is not True:
+            raise IssuerOutcomeRefused("issuer abandon outcome is not authenticated")
+        record = authenticated_record
         with self._immediate() as db:
             sent = db.execute(
                 "SELECT permit_id, attestation_digest FROM abandon_attestations WHERE attempt_id = ?",
@@ -933,11 +972,13 @@ class SqliteAttemptStore:
             _require_text("disposition_ref", reference)
             _require_text("recorded_at", issuer_at)
             existing = db.execute(
-                "SELECT attestation_digest, disposition_ref FROM abandon_outcomes WHERE attempt_id = ?",
+                "SELECT permit_id, attestation_digest, disposition_ref, issuer_recorded_at"
+                " FROM abandon_outcomes WHERE attempt_id = ?",
                 (attempt_id,),
             ).fetchone()
             if existing is not None:
-                if tuple(existing) != (sent[1], reference):
+                # Both success labels refer to the same immutable Phylax disposition.
+                if tuple(existing) != (sent[0], sent[1], reference, issuer_at):
                     raise AttemptStateError("a different abandon outcome is already recorded")
                 return
             db.execute(

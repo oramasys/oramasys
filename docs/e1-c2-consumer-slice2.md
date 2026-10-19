@@ -42,6 +42,17 @@ PR to `main`; the open items below stay closed until the operator decides them.
 ## Limits and open items
 - Performing the reservation release belongs to the reservation owner; this store only records
   `release_authorized` after the authenticated abandon outcome.
+- `SqliteAttemptStore(abandon_authenticator=...)` requires a trusted `IssuerOutcomeAuthenticator`
+  bound to the expected issuer. Its `verify(outcome, record)` must authenticate the complete response
+  using issuer evidence or an authenticated response channel; matching the attestation identifiers is
+  insufficient. The store gives it a frozen snapshot of the five string-valued record fields, checks
+  every response including retries, and refuses when the port is absent or rejects. Production
+  transport wiring remains a serving prerequisite. No new signature format is introduced.
+- Abandonment retries preserve the first receipt and require the same permit, attestation digest,
+  disposition reference and issuer timestamp. Phylax's `abandon.recorded` and
+  `abandon.already_abandoned` are equivalent success responses for that immutable disposition.
+- Governed authorization rechecks durable clock quarantine under the authorization write lock,
+  before reservation consumption, so a quarantine committed after observation still blocks dispatch.
 - Revocation and cascade event body shapes, the effect grant v2 parser, retention and signed checkpoints, and a
   real operator authenticator are not built: the specification leaves them open or unfrozen.
 - The shared interop probe is unchanged; extending it with abandon and successor scenarios needs both slice-2

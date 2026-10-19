@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from orama.graph.dispatch_attempts import (
     AttemptStateError,
     AuthorizationRefused,
     ClockQuarantined,
+    IssuerOutcomeRefused,
     OperatorRefused,
     SqliteAttemptStore,
 )
@@ -58,9 +60,19 @@ class Clock:
         return self.now
 
 
+class FakeIssuerAuthenticator:
+    """Test-only authenticated issuer boundary; production has no permissive default."""
+
+    def verify(self, outcome: str, record: Mapping[str, str]) -> bool:
+        """Accept fixture responses standing in for authenticated issuer transport."""
+        return True
+
+
 def harness(tmp_path: Path, *, governed: bool = True) -> Harness:
     path = db_path(tmp_path)
-    store = SqliteAttemptStore(path, governed=governed)
+    store = SqliteAttemptStore(
+        path, governed=governed, abandon_authenticator=FakeIssuerAuthenticator()
+    )
     store.create_attempt(ATTEMPT, GRANT, RESERVATION)
     if governed:
         store.propose("proposal-1", SCOPE, NOW)
@@ -146,6 +158,35 @@ def test_the_clock_mark_advances_and_tolerates_equal_time(tmp_path: Path) -> Non
     store.observe_clock(NOW)
     store.observe_clock(NOW)
     store.observe_clock(NOW + timedelta(seconds=5))
+
+
+def test_quarantine_committed_between_observation_and_authorization_blocks_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second connection's quarantine wins before any authorization writes commit."""
+    h = harness(tmp_path)
+    ready(h, vector_flow())
+    peer = SqliteAttemptStore(h.path, governed=True)
+    observe = h.store.observe_clock
+
+    def quarantine_after_observation(now: datetime) -> None:
+        """Force the interleaving between the two independent transactions."""
+        observe(now)
+        with pytest.raises(ClockQuarantined):
+            peer.observe_clock(now - timedelta(seconds=1))
+
+    before = snapshot(h.path)
+    monkeypatch.setattr(h.store, "observe_clock", quarantine_after_observation)
+    try:
+        with pytest.raises(ClockQuarantined, match="clock_quarantined"):
+            authorize(h)
+        after = snapshot(h.path)
+        for table in before.keys() - {"clock_high_water"}:
+            assert after[table] == before[table]
+        assert peer._db.execute("SELECT quarantined FROM clock_high_water").fetchone()[0] == 1
+    finally:
+        peer.close()
+        h.store.close()
 
 
 def test_a_backward_step_quarantines_and_survives_a_restart(tmp_path: Path) -> None:
@@ -395,11 +436,85 @@ def test_an_identical_outcome_retry_is_idempotent_and_a_different_one_conflicts(
     attestation = h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW)
     record = issuer_record(h, attestation)
     h.store.record_abandon_outcome(ATTEMPT, "abandon.recorded", record, NOW)
+    h.store.record_abandon_outcome(ATTEMPT, "abandon.recorded", record, NOW)
     h.store.record_abandon_outcome(ATTEMPT, "abandon.already_abandoned", record, NOW)
     with pytest.raises(AttemptStateError, match="different abandon outcome"):
         h.store.record_abandon_outcome(ATTEMPT, "abandon.recorded", {**record, "disposition_ref": "op-2"}, NOW)
     count = sqlite3.connect(h.path).execute("SELECT COUNT(*) FROM abandon_outcomes").fetchone()[0]
     assert count == 1
+    assert h.store.abandon_outcome(ATTEMPT)["outcome"] == "abandon.recorded"
+
+
+def test_an_outcome_retry_cannot_change_the_issuer_timestamp(tmp_path: Path) -> None:
+    """A retry label may change, but the issuer's durable disposition may not."""
+    h = fenced(tmp_path)
+    attestation = h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW)
+    record = issuer_record(h, attestation)
+    h.store.record_abandon_outcome(ATTEMPT, "abandon.recorded", record, NOW)
+    original = h.store.abandon_outcome(ATTEMPT)
+    with pytest.raises(AttemptStateError, match="different abandon outcome"):
+        h.store.record_abandon_outcome(
+            ATTEMPT, "abandon.already_abandoned",
+            {**record, "recorded_at": "2026-10-19T04:00:02.000000Z"}, NOW,
+        )
+    assert h.store.abandon_outcome(ATTEMPT) == original
+
+
+def test_authentication_is_bound_to_the_exact_response_and_runs_again_on_retry(tmp_path: Path) -> None:
+    """A verified response cannot authorize altered fields or bypass retry authentication."""
+    h = fenced(tmp_path)
+    attestation = h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW)
+    record = issuer_record(h, attestation)
+
+    class BoundIssuer:
+        """Model an adapter holding an independently authenticated issuer response."""
+
+        calls = 0
+
+        def verify(self, outcome: str, received: Mapping[str, str]) -> bool:
+            """Bind the accepted status and complete immutable response to trusted evidence."""
+            self.calls += 1
+            return outcome == "abandon.recorded" and received == record
+
+    adapter = BoundIssuer()
+    h.store._abandon_authenticator = adapter
+    with pytest.raises(IssuerOutcomeRefused):
+        h.store.record_abandon_outcome(
+            ATTEMPT, "abandon.recorded", {**record, "disposition_ref": "forged"}, NOW,
+        )
+    assert h.store.abandon_outcome(ATTEMPT) is None
+    h.store.record_abandon_outcome(ATTEMPT, "abandon.recorded", record, NOW)
+    with pytest.raises(IssuerOutcomeRefused):
+        h.store.record_abandon_outcome(ATTEMPT, "abandon.already_abandoned", record, NOW)
+    assert adapter.calls == 3
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_missing_or_rejecting_issuer_authentication_preserves_the_attempt(
+    tmp_path: Path, configured: bool,
+) -> None:
+    """Copied attestation fields cannot create release authority without issuer authentication."""
+    class RejectIssuer:
+        """Reject every response as unauthenticated."""
+
+        def verify(self, outcome: str, record: Mapping[str, str]) -> bool:
+            """Refuse the unverified response."""
+            return False
+
+    h = fenced(tmp_path)
+    attestation = h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW)
+    record = issuer_record(h, attestation)
+    h.store.close()
+    store = SqliteAttemptStore(
+        h.path, governed=True, abandon_authenticator=RejectIssuer() if configured else None,
+    )
+    with pytest.raises(IssuerOutcomeRefused):
+        store.record_abandon_outcome(
+            ATTEMPT, "abandon.recorded", record, NOW,
+        )
+    assert store.abandon_outcome(ATTEMPT) is None
+    assert store.get_attempt(ATTEMPT).state != "abandoned"
+    store.close()
 
 
 @pytest.mark.parametrize(
@@ -419,7 +534,7 @@ def test_an_outcome_that_does_not_match_the_attestation_sent_is_refused(tmp_path
 
 def test_an_outcome_needs_a_built_attestation_and_a_known_outcome_name(tmp_path: Path) -> None:
     h = fenced(tmp_path)
-    with pytest.raises(AttemptStateError, match="no attestation"):
+    with pytest.raises(AttemptStateError, match="invalid fields"):
         h.store.record_abandon_outcome(ATTEMPT, "abandon.recorded", {}, NOW)
     attestation = h.store.build_abandon_attestation(ATTEMPT, PERMIT_ID, "loss", 1, NOW)
     with pytest.raises(AttemptStateError, match="unknown abandon outcome"):
