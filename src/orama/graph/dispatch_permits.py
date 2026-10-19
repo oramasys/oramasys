@@ -26,6 +26,10 @@ identity/freshness/expiry, and a later retry's value is ignored.
 
 This module is a pure reference model: it is NOT an authority store.
 
+It also does NOT enforce the wire limits (safe-integer cap, 64-hex digests,
+1024-byte text) or the seven-code refusal vocabulary; the conformance validators
+are ``dispatch_consumer_wire.py`` and the issuer's wire module.
+
 Collaborator contract: the store must return any existing permit of the
 requested grant, and ``issue_new`` must return a permit for that grant carrying
 the digest it was handed. These are the ports' own documented postconditions.
