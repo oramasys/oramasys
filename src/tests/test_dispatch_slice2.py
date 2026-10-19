@@ -413,3 +413,54 @@ def test_retry_delays_are_bounded_exponential_and_never_overrun_the_budget() -> 
 def test_bad_retry_arguments_raise(kwargs: dict) -> None:
     with pytest.raises(ValueError):
         next_retry_delay(**kwargs)
+
+
+# ------------------------------------------------- signed-policy clock skew (default zero)
+
+
+def test_the_default_skew_is_zero_so_any_backward_step_quarantines(tmp_path: Path) -> None:
+    store = SqliteAttemptStore(db_path(tmp_path))
+    store.observe_clock(NOW)
+    with pytest.raises(ClockQuarantined):
+        store.observe_clock(NOW - timedelta(microseconds=1))
+
+
+def test_a_backward_step_within_the_skew_is_tolerated_and_never_lowers_the_mark(tmp_path: Path) -> None:
+    skew = timedelta(seconds=2)
+    store = SqliteAttemptStore(db_path(tmp_path), clock_skew_tolerance=skew)
+    store.observe_clock(NOW)
+    store.observe_clock(NOW - skew)  # exactly at the boundary: tolerated
+    store.observe_clock(NOW - timedelta(seconds=1))
+    # the mark stayed at NOW, so the boundary is still measured from NOW
+    with pytest.raises(ClockQuarantined) as excinfo:
+        store.observe_clock(NOW - skew - timedelta(microseconds=1))
+    assert excinfo.value.reason == "clock_regressed"
+
+
+def test_a_forward_step_still_advances_the_mark_under_a_skew(tmp_path: Path) -> None:
+    skew = timedelta(seconds=2)
+    store = SqliteAttemptStore(db_path(tmp_path), clock_skew_tolerance=skew)
+    store.observe_clock(NOW)
+    store.observe_clock(NOW + timedelta(seconds=10))
+    store.observe_clock(NOW + timedelta(seconds=8))  # within skew of the new mark
+    with pytest.raises(ClockQuarantined):
+        store.observe_clock(NOW + timedelta(seconds=7, microseconds=999_999))
+
+
+@pytest.mark.parametrize("bad", [timedelta(seconds=-1), 2, 2.5, "2s", None, timedelta(days=1)])
+def test_a_negative_or_non_timedelta_or_unbounded_skew_is_refused(tmp_path: Path, bad: object) -> None:
+    with pytest.raises(ValueError, match="clock_skew_tolerance"):
+        SqliteAttemptStore(db_path(tmp_path), clock_skew_tolerance=bad)  # type: ignore[arg-type]
+
+
+def test_the_skew_does_not_relax_an_existing_quarantine(tmp_path: Path) -> None:
+    path = db_path(tmp_path)
+    store = SqliteAttemptStore(path)
+    store.observe_clock(NOW)
+    with pytest.raises(ClockQuarantined):
+        store.observe_clock(NOW - timedelta(seconds=5))
+    store.close()
+    lenient = SqliteAttemptStore(path, clock_skew_tolerance=timedelta(minutes=4))
+    with pytest.raises(ClockQuarantined) as excinfo:
+        lenient.observe_clock(NOW)
+    assert excinfo.value.reason == "clock_quarantined"

@@ -53,6 +53,7 @@ AUTHORIZATION_RULES: Final[frozenset[str]] = frozenset(
 _BUSY_TIMEOUT_SECONDS: Final = 30.0
 _LIVE_STATES: Final = frozenset({"created", "transmitted"})
 _MAX_LIFETIME: Final = timedelta(seconds=90)
+MAX_CLOCK_SKEW_TOLERANCE: Final = timedelta(minutes=5)
 _DIVERGENCE_REASONS: Final = frozenset({"divergence", "event_digest_mismatch"})
 _OUTBOX_REQUIRED: Final = (
     "permit_id", "permit_digest", "finalization_digest", "r_p", "r_f", "authority_pair",
@@ -484,13 +485,31 @@ def _write_authorization(
 class SqliteAttemptStore:
     """Durable consumer attempt store; every write is one ``BEGIN IMMEDIATE`` transaction."""
 
-    def __init__(self, path: Path | str, *, governed: bool = False) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        governed: bool = False,
+        clock_skew_tolerance: timedelta = timedelta(0),
+    ) -> None:
         """Open (creating privately) the WAL-mode store and its schema.
 
         ``governed`` makes ``authorize_dispatch`` require a matching, live, unused reservation
         for the attempt's reservation id. It defaults to False only so slice-1 callers keep
         working; any serving path must construct the store with ``governed=True``.
+
+        ``clock_skew_tolerance`` is the signed-policy skew a backward clock step may stay within
+        before dispatch is quarantined. The specification leaves the value to signed policy, so the
+        default is zero (any backward step quarantines); a value above ``MAX_CLOCK_SKEW_TOLERANCE``
+        is refused as a misconfiguration guard. A tolerated step never lowers the high-water mark.
         """
+        if (
+            not isinstance(clock_skew_tolerance, timedelta)
+            or clock_skew_tolerance < timedelta(0)
+            or clock_skew_tolerance > MAX_CLOCK_SKEW_TOLERANCE
+        ):
+            raise ValueError("clock_skew_tolerance must be a timedelta from zero to five minutes")
+        self._clock_skew = clock_skew_tolerance
         prepared = prepare_private_store(path)
         self._governed = governed
         self._lock = threading.Lock()
@@ -748,11 +767,13 @@ class SqliteAttemptStore:
                 db.execute("INSERT INTO clock_high_water (id, utc) VALUES (1, ?)", (stamp,))
             elif row[1]:
                 raise ClockQuarantined("clock_quarantined")
-            elif now < datetime.fromisoformat(row[0]):
-                db.execute("UPDATE clock_high_water SET quarantined = 1 WHERE id = 1")
-                regressed = True
             else:
-                db.execute("UPDATE clock_high_water SET utc = ? WHERE id = 1", (stamp,))
+                mark = datetime.fromisoformat(row[0])
+                if now < mark - self._clock_skew:
+                    db.execute("UPDATE clock_high_water SET quarantined = 1 WHERE id = 1")
+                    regressed = True
+                elif now > mark:
+                    db.execute("UPDATE clock_high_water SET utc = ? WHERE id = 1", (stamp,))
         if regressed:
             raise ClockQuarantined("clock_regressed")
 

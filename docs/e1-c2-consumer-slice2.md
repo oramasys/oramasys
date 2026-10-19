@@ -25,6 +25,11 @@ PR to `main`; the open items below stay closed until the operator decides them.
     nothing" invariant therefore excludes the clock mark.
 20. The retry delay is `min(4 s, 0.5 s * 2^failures)` and is refused when it exceeds the remaining budget; the
     numbers are starting values, not safety boundaries.
+21. The clock mark's skew is the constructor argument `clock_skew_tolerance` (signed policy supplies the value).
+    The default is zero, so any backward step quarantines (fail closed). A tolerated step never lowers the
+    mark, a step one microsecond past the tolerance quarantines, an existing quarantine is never relaxed by a
+    larger tolerance, and a value outside zero to five minutes is refused as a misconfiguration guard. The
+    five-minute ceiling is a sanity bound, not a recommended value.
 
 ## Limits and open items
 - Performing the reservation release belongs to the reservation owner; this store only records
@@ -33,3 +38,9 @@ PR to `main`; the open items below stay closed until the operator decides them.
   real operator authenticator are not built: the specification leaves them open or unfrozen.
 - The shared interop probe is unchanged; extending it with abandon and successor scenarios needs both slice-2
   PRs merged and a paired pin bump.
+
+## Decisions needed before serving is enabled
+- **Skew value:** a signed-policy `clock_skew_tolerance` for time-sync corrections, restored virtual
+  machines and brief clock jumps. Until one is chosen the store is strict (zero).
+- **Who clears a clock quarantine:** `clear_clock_quarantine` needs a named reconciliation reference; the
+  role that may call it, and how that role is authenticated, are not specified yet.
