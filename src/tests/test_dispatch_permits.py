@@ -98,6 +98,7 @@ def test_no_existing_permit_issues_and_stores_new_permit() -> None:
     calls: list[tuple[PermitRequest, str]] = []
 
     def issue_new(req: PermitRequest, digest: str) -> DispatchPermit:
+        """Record the call and return a permit for the request."""
         calls.append((req, digest))
         return make_permit(binding_digest=digest)
 

@@ -668,6 +668,7 @@ def test_threaded_race_between_fence_and_authorize_has_exactly_one_winner(
         outcome: dict[str, Any] = {}
 
         def do_fence() -> None:
+            """Fence the attempt once both racers are released."""
             barrier.wait()
             try:
                 fencer.fence(ATTEMPT)
@@ -678,6 +679,7 @@ def test_threaded_race_between_fence_and_authorize_has_exactly_one_winner(
                 outcome["fence"] = error
 
         def do_authorize() -> None:
+            """Authorize the attempt once both racers are released."""
             barrier.wait()
             try:
                 authorizer.authorize_dispatch(
