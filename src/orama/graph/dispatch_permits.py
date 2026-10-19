@@ -3,24 +3,34 @@
 Per the C2 permit-replay spec: a unique ``grant_id`` stops a second row but
 does not prove that a repeat request is the same request. The issuer
 therefore persists a binding digest, computed over 9 immutable request
-fields, alongside the permit. On any request for a grant that already has a
-nonterminal permit, the issuer recomputes the digest and compares it with the
-stored one:
+fields, alongside the permit. On any request for a grant that already has ANY
+permit (terminal or not), the issuer recomputes the digest and compares it
+with the stored one. Retry identity is the binding digest AND ``attempt_id``;
+``attempt_id`` is deliberately not part of the nine-field digest:
 
-- Equal and not expired: an identical retry. The stored permit is returned
-  unchanged, including its original ``issued_at``, ``expires_at`` and
+- Equal binding, equal ``attempt_id`` and not expired: an identical retry.
+  The stored permit is returned unchanged, including its original ``issued_at``, ``expires_at`` and
   ``requested_at``.
 - Equal but expired: NOT treated as an identical retry (see
   ``ExpiredPermit`` below) -- an expired stored permit is never revived.
-- Different: a conflicting request for the same grant. Refused with the
-  closed permit refusal ``permit.conflict``. The stored permit is NOT
-  returned, nothing is created or changed.
+- Different binding, or a NEW ``attempt_id``: a conflicting request for the
+  same grant. Refused with the closed permit refusal ``permit.conflict``. The
+  stored permit is NOT returned, nothing is created or changed. This holds
+  even when the stored permit is terminal (expired/abandoned): terminal
+  history is never hidden, so an ordinary request cannot mint a second permit.
+  Successor issuance belongs to the attested replacement path, not here.
 
 ``requested_at`` is excluded from the binding digest: it is the consumer's
 own clock reading, recorded on the first request only, never used for
 identity/freshness/expiry, and a later retry's value is ignored.
 
-Collaborator contract: the store must return the nonterminal permit of the
+This module is a pure reference model: it is NOT an authority store.
+
+It also does NOT enforce the wire limits (safe-integer cap, 64-hex digests,
+1024-byte text) or the seven-code refusal vocabulary; the conformance validators
+are ``dispatch_consumer_wire.py`` and the issuer's wire module.
+
+Collaborator contract: the store must return any existing permit of the
 requested grant, and ``issue_new`` must return a permit for that grant carrying
 the digest it was handed. These are the ports' own documented postconditions.
 ``decide_permit`` fails closed with ``ValueError`` (never a permit) when either is
@@ -70,6 +80,7 @@ class DispatchPermit:
     binding_digest: str
     reservation_id: str
     request_digest: str
+    attempt_id: str
     r_p: str
     consumer_acked_through: str
     requested_at: datetime
@@ -93,6 +104,8 @@ class DispatchPermit:
             raise ValueError("reservation_id is required")
         if not self.request_digest.strip():
             raise ValueError("request_digest is required")
+        if not self.attempt_id.strip():
+            raise ValueError("attempt_id is required")
         if not self.r_p.strip():
             raise ValueError("r_p is required")
         if not self.consumer_acked_through.strip():
@@ -115,8 +128,9 @@ class DispatchPermit:
 class PermitRequest:
     """The request-time inputs needed to decide/issue a permit.
 
-    Bundles the 9 immutable binding-digest fields plus ``requested_at``,
-    which is excluded from the binding digest and ignored on retry.
+    Bundles the 9 immutable binding-digest fields plus ``attempt_id`` (retry
+    identity, not in the digest) and ``requested_at`` (excluded from the
+    binding digest and ignored on retry).
     """
 
     grant_id: str
@@ -128,7 +142,13 @@ class PermitRequest:
     ledger_store_id: str
     configuration_policy_epoch: int
     authority_epoch: int
+    attempt_id: str
     requested_at: datetime
+
+    def __post_init__(self) -> None:
+        """Fail closed on a blank attempt_id."""
+        if not isinstance(self.attempt_id, str) or not self.attempt_id.strip():
+            raise ValueError("attempt_id is required")
 
     def binding_fields(self) -> BindingDigestFields:
         """Project the 9 immutable fields into the shared digest input type."""
@@ -148,12 +168,12 @@ class PermitRequest:
 class PermitStore(Protocol):
     """Issuer storage port for dispatch permits, injectable for testing."""
 
-    def get_nonterminal_permit_for_grant(self, grant_id: str) -> DispatchPermit | None:
-        """Return the grant's nonterminal (issued/finalized) permit, if any."""
+    def get_permit_for_grant(self, grant_id: str) -> DispatchPermit | None:
+        """Return any existing permit for the grant (terminal or not), if any."""
         ...
 
     def insert_permit(self, permit: DispatchPermit) -> None:
-        """Persist a brand-new permit for a grant with no nonterminal permit."""
+        """Persist a brand-new permit for a grant that has no permit at all."""
         ...
 
 
@@ -181,31 +201,25 @@ def decide_permit(
 ) -> DispatchPermit:
     """Decide and return the dispatch permit for ``request``.
 
-    - No nonterminal permit exists for ``request.grant_id``: ``issue_new`` is
+    - No permit of any state exists for ``request.grant_id``: ``issue_new`` is
       called with the request and the freshly computed binding digest to
       construct and persist a brand-new permit, which is returned.
-    - A nonterminal permit exists with a matching binding digest and it is
-      not expired (``expires_at`` compared against ``now``): the existing
-      permit is returned UNCHANGED, including its original ``requested_at``.
-      ``issue_new`` is never called in this path.
-    - A nonterminal permit exists with a matching binding digest but it IS
-      expired: raises ``ExpiredPermit`` carrying the stored permit. This is
-      deliberately not treated as an identical retry.
-    - A nonterminal permit exists with a DIFFERENT binding digest: raises
-      ``PermitRefused("permit.conflict")``. The stored permit is not
-      returned and ``issue_new`` is never called.
+    - A permit exists with equal binding digest AND equal ``attempt_id``, is
+      nonterminal and not expired: the existing permit is returned UNCHANGED.
+    - Same identity but the stored state is ``expired`` or ``expires_at`` has
+      passed: raises ``ExpiredPermit`` (never revived).
+    - Same identity but the stored permit is ``abandoned``: ``permit.conflict``.
+    - A different binding digest, or a NEW ``attempt_id`` (terminal or not):
+      ``PermitRefused("permit.conflict")``; nothing is returned or created.
 
     Collaborator guards raise ``ValueError`` and return or store nothing: the
-    store returning a permit for a different grant or a terminal (``expired`` /
-    ``abandoned``) permit, or ``issue_new`` returning a permit whose
-    ``grant_id`` or ``binding_digest`` is not the requested grant's and the
-    digest it was handed. They run before any protocol decision, so a
-    collaborator bug is never misreported as ``permit.conflict``. The stored
-    digest is the retry identity key, so persisting a different one would
-    silently break later comparisons.
+    store returning a permit for a different grant, or ``issue_new`` returning
+    a permit whose ``grant_id``, ``binding_digest`` or ``attempt_id`` is not
+    the requested one. They run before any protocol decision, so a
+    collaborator bug is never misreported as ``permit.conflict``.
     """
     digest = compute_binding_digest(request.binding_fields())
-    existing = store.get_nonterminal_permit_for_grant(request.grant_id)
+    existing = store.get_permit_for_grant(request.grant_id)
 
     if existing is None:
         permit = issue_new(request, digest)
@@ -213,21 +227,21 @@ def decide_permit(
             raise ValueError(
                 "issue_new must return a permit for the requested grant and binding digest"
             )
+        if permit.attempt_id != request.attempt_id:
+            raise ValueError("issue_new must return a permit carrying the request attempt_id")
         store.insert_permit(permit)
         return permit
 
     if existing.grant_id != request.grant_id:
         raise ValueError("PermitStore returned a permit for a different grant")
 
-    if existing.state not in NONTERMINAL_PERMIT_STATES:
-        raise ValueError(
-            "PermitStore returned a terminal permit; only nonterminal permits may be returned"
-        )
-
-    if existing.binding_digest != digest:
+    if existing.binding_digest != digest or existing.attempt_id != request.attempt_id:
         raise PermitRefused("permit.conflict")
 
-    if existing.expires_at <= now:
+    if existing.state == "expired" or existing.expires_at <= now:
         raise ExpiredPermit(existing)
+
+    if existing.state not in NONTERMINAL_PERMIT_STATES:
+        raise PermitRefused("permit.conflict")
 
     return existing
