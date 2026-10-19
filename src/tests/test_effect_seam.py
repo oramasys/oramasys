@@ -48,6 +48,13 @@ SCOPE = EffectScope(
 LIVE_UNTIL = NOW + timedelta(hours=1)
 
 
+def quiet_snapshot(path: Path) -> dict:
+    """Snapshot every table except the clock mark, which a governed store advances on purpose."""
+    snap = snapshot(path)
+    snap.pop("clock_high_water", None)
+    return snap
+
+
 def governed(tmp_path: Path) -> Harness:
     """Open a governed store with the vector attempt, proposal and reservation in place."""
     path = db_path(tmp_path)
@@ -146,11 +153,11 @@ def test_a_governed_store_refuses_dispatch_without_a_scope(tmp_path: Path) -> No
     """Governed authorization requires a scope and leaves storage unchanged when absent."""
     h = governed(tmp_path)
     ready(h, vector_flow())
-    before = snapshot(h.path)
+    before = quiet_snapshot(h.path)
     with pytest.raises(ReservationRefused) as excinfo:
         authorize(h, None)
     assert excinfo.value.reason == "scope_required"
-    assert snapshot(h.path) == before
+    assert quiet_snapshot(h.path) == before
 
 
 def test_a_governed_store_refuses_dispatch_when_no_reservation_exists(tmp_path: Path) -> None:
@@ -174,11 +181,11 @@ def test_any_changed_scope_field_is_refused_and_leaves_the_reservation_unused(
 ) -> None:
     """A caller cannot alter any one scope dimension while retaining the reservation."""
     ready(h, vector_flow())
-    before = snapshot(h.path)
+    before = quiet_snapshot(h.path)
     with pytest.raises(ReservationRefused) as excinfo:
         authorize(h, replace(SCOPE, **{field: "changed"}))
     assert excinfo.value.reason == "scope_mismatch"
-    assert snapshot(h.path) == before
+    assert quiet_snapshot(h.path) == before
 
 
 # -------------------------------------------------------------- expiry, revocation

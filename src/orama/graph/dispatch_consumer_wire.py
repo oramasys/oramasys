@@ -178,6 +178,20 @@ def _validate_object(obj: object, expected: frozenset[str]) -> dict[str, Any]:
     return dict(obj)
 
 
+PERMIT_REQUEST_FIELDS: Final = frozenset(_PERMIT_REQUEST_FIELDS)
+FINALIZATION_REQUEST_FIELDS: Final = frozenset(_FINALIZATION_REQUEST_FIELDS)
+
+
+def validate_permit_request_wire(obj: object) -> dict[str, Any]:
+    """Validate the 12-field permit request the consumer sends and return a plain dict copy."""
+    return _validate_object(obj, PERMIT_REQUEST_FIELDS)
+
+
+def validate_finalization_request_wire(obj: object) -> dict[str, Any]:
+    """Validate the 8-field finalization request the consumer sends and return a plain dict copy."""
+    return _validate_object(obj, FINALIZATION_REQUEST_FIELDS)
+
+
 def validate_permit_wire(obj: object) -> dict[str, Any]:
     """Validate the 21-field permit wire and return a plain dict copy."""
     return _validate_object(obj, PERMIT_WIRE_FIELDS)
