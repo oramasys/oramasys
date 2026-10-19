@@ -17,7 +17,11 @@ provider transport, retry of `unknown`, serving and production pin promotion sta
 | One send | `outbox.send_started`, `begin_send` | The single allowed send is marked durably before it starts. A second send is refused (`send_already_started`); an outcome cannot be recorded before a send (`send_not_started`). |
 
 ## Limits that remain
-- `governed` defaults to False so slice-1 callers keep working; every serving path must pass `governed=True`.
+- `governed` defaults to False so the slice-1 callers, tests and the byte-identical interop probe keep
+  working. A test (`test_no_product_code_builds_an_attempt_store_without_governed_true`) fails if any
+  module under `src/orama` builds the store without a literal `governed=True`, so a forgotten switch
+  on a product path cannot merge silently. Flipping the default to True, with the probe and the
+  slice-1 tests updated, is a precondition for enabling serving.
 - Nothing here proves a provider applied or refused an effect. `confirmed` and `failed` record an evidence
   reference supplied by a later reconciliation step that does not exist yet.
 - Reconciliation, provider transport and the issuer-side revoke-versus-consume race are out of scope.

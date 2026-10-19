@@ -338,3 +338,49 @@ def test_an_outbox_created_before_the_outcome_columns_is_migrated(tmp_path: Path
 def test_the_proposal_schema_is_part_of_the_store_schema() -> None:
     assert len(PROPOSAL_SCHEMA) == 2
     assert record_proposal and reserve  # public API stays importable
+
+
+# ------------------------------------------------ governed must be explicit on any product path
+
+SRC_ROOT = Path(__file__).resolve().parents[1] / "orama"
+
+
+def ungoverned_constructions(source: str) -> list[int]:
+    """Return line numbers of ``SqliteAttemptStore(...)`` calls lacking ``governed=True``."""
+    import ast
+
+    lines: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name != "SqliteAttemptStore":
+            continue
+        governed = [kw for kw in node.keywords if kw.arg == "governed"]
+        explicit = (
+            len(governed) == 1
+            and isinstance(governed[0].value, ast.Constant)
+            and governed[0].value.value is True
+        )
+        if not explicit:
+            lines.append(node.lineno)
+    return lines
+
+
+def test_the_scanner_flags_a_store_built_without_governed_true() -> None:
+    assert ungoverned_constructions("SqliteAttemptStore(path)") == [1]
+    assert ungoverned_constructions("m.SqliteAttemptStore(path, governed=False)") == [1]
+    assert ungoverned_constructions("SqliteAttemptStore(path, governed=flag)") == [1]
+    assert ungoverned_constructions("SqliteAttemptStore(path, governed=True)") == []
+
+
+def test_no_product_code_builds_an_attempt_store_without_governed_true() -> None:
+    offenders = {
+        str(path.relative_to(SRC_ROOT)): lines
+        for path in sorted(SRC_ROOT.rglob("*.py"))
+        if path.name != "dispatch_attempts.py"
+        for lines in [ungoverned_constructions(path.read_text(encoding="utf-8"))]
+        if lines
+    }
+    assert offenders == {}, f"serving paths must pass governed=True: {offenders}"
