@@ -241,3 +241,31 @@ def test_parse_timestamp_is_strict_and_utc() -> None:
     assert parsed.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
     with pytest.raises(WireError):
         parse_timestamp("2026-10-19T04:01:31Z")
+
+
+FULLWIDTH_TIME = "２０２６-10-19T04:00:00.000000Z"
+
+
+def test_fullwidth_digit_timestamps_are_refused_everywhere() -> None:
+    """Only ASCII digits form a timestamp (event wire has no timestamp field)."""
+    with pytest.raises(WireError):
+        parse_timestamp(FULLWIDTH_TIME)
+    with pytest.raises(WireError):
+        validate_permit_wire(_mutated(PERMIT, issued_at=FULLWIDTH_TIME))
+    with pytest.raises(WireError):
+        validate_finalization_wire(_mutated(FINALIZATION, expires_at=FULLWIDTH_TIME))
+
+
+@pytest.mark.parametrize("kind", [["finalization"], {"k": 1}, 7, None, b"finalization"])
+def test_event_kind_that_is_not_a_string_raises_wire_error(kind: Any) -> None:
+    """An unhashable or non-text kind is a WireError, never a raw TypeError."""
+    with pytest.raises(WireError):
+        validate_event_wire(_mutated(EVENTS[1], kind=kind))
+
+
+def test_canonical_bytes_turns_nan_into_a_wire_error() -> None:
+    """NaN in an event body is a WireError through the validator and canonical_bytes."""
+    with pytest.raises(WireError):
+        canonical_bytes({"a": float("nan")})
+    with pytest.raises(WireError):
+        validate_event_wire(_mutated(EVENTS[1], kind="revocation", body={"x": float("nan")}))

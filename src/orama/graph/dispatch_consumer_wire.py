@@ -70,7 +70,7 @@ _NONNEGATIVE_INTEGER_FIELDS: Final = frozenset(
 _TIMESTAMP_FIELDS: Final = frozenset({"requested_at", "issued_at", "expires_at"})
 _SIGNATURE_FIELDS: Final = frozenset({"issuer_signature", "signature"})
 _DIGEST_RE: Final = re.compile(r"[0-9a-f]{64}")
-_TIMESTAMP_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z")
+_TIMESTAMP_RE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z")
 
 
 class WireError(ValueError):
@@ -102,7 +102,7 @@ def canonical_bytes(obj: Mapping[str, Any]) -> bytes:
             dict(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
-    except TypeError as error:
+    except (TypeError, ValueError) as error:
         raise WireError("object is not JSON serializable") from error
 
 
@@ -190,7 +190,7 @@ def validate_finalization_wire(obj: object) -> dict[str, Any]:
 
 def _validate_event_body(kind: object, body: object) -> None:
     """Validate an event body for its kind (a finalization body is exactly one field)."""
-    if kind not in EVENT_KINDS:
+    if not isinstance(kind, str) or kind not in EVENT_KINDS:
         raise WireError("unknown event kind")
     if not isinstance(body, Mapping):
         raise WireError("event body must be an object")
