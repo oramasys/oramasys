@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
@@ -43,7 +44,13 @@ class ReservationRefused(Exception):
 
 @dataclass(frozen=True)
 class EffectScope:
-    """The six dimensions a single-use approval is bound to; cross-purpose reuse is refused."""
+    """The six dimensions a single-use approval is bound to; cross-purpose reuse is refused.
+
+    Two fields map onto the issuer's permit, which is how a reservation is tied to the permit that
+    authorizes it: ``operation_digest`` is the permit's ``request_digest`` and ``artifact_identity``
+    is the permit's ``artifact_digest`` (consumer-asserted). The other four are consumer-side scope.
+    ``bind_scope_to_permit`` enforces the mapping at dispatch.
+    """
 
     principal: str
     graph_id: str
@@ -81,6 +88,21 @@ def _load_scope(db: sqlite3.Connection, proposal_id: str) -> EffectScope:
     if row is None:
         raise ReservationRefused("proposal_unknown")
     return EffectScope(*row)
+
+
+def bind_scope_to_permit(scope: EffectScope | None, permit: Mapping[str, object]) -> None:
+    """Refuse unless the reservation's scope names the operation and artifact the permit authorizes.
+
+    The permit is already bound to the reservation by id (rule 1), so this ties the reservation's
+    CONTENT to the permit: a reservation made for one operation or artifact cannot authorize a permit
+    for another, even when the caller presents the reserved scope.
+    """
+    if (
+        scope is None
+        or scope.operation_digest != permit["request_digest"]
+        or scope.artifact_identity != permit["artifact_digest"]
+    ):
+        raise ReservationRefused("scope_not_bound_to_permit")
 
 
 def record_proposal(

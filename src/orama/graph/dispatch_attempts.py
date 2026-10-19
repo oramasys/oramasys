@@ -35,6 +35,7 @@ from orama.graph.effect_outcomes import OutcomeRefused, check_transition
 from orama.graph.effect_proposals import (
     PROPOSAL_SCHEMA,
     EffectScope,
+    bind_scope_to_permit,
     consume_reservation,
     record_proposal,
     reserve,
@@ -694,6 +695,8 @@ class SqliteAttemptStore:
             except WireError as error:
                 raise AuthorizationRefused("rule1", "malformed_wire") from error
             _check_rule1(db, attempt, permit, now, verifier, expected)
+            if self._governed:
+                bind_scope_to_permit(scope, permit)
             _check_acks(db, issuer_id, permit)
             if revocations.revoked(grant_id=attempt.grant_id, issuer_id=issuer_id):
                 raise AuthorizationRefused("rule4", "grant_revoked")

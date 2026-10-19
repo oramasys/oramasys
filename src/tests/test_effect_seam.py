@@ -43,7 +43,7 @@ from tests.test_dispatch_attempts import (
 PROPOSAL = "proposal-0001"
 SCOPE = EffectScope(
     principal="principal-1", graph_id="graph-1", policy_hash="a" * 64,
-    operation_digest="b" * 64, artifact_identity="artifact-1", destination="dest-1",
+    operation_digest="b" * 64, artifact_identity="c" * 64, destination="dest-1",
 )
 LIVE_UNTIL = NOW + timedelta(hours=1)
 
@@ -384,3 +384,44 @@ def test_no_product_code_builds_an_attempt_store_without_governed_true() -> None
         if lines
     }
     assert offenders == {}, f"serving paths must pass governed=True: {offenders}"
+
+
+# ------------------------------------------- the reservation scope is bound to the permit
+
+
+def reserved_for(tmp_path: Path, scope: EffectScope) -> Harness:
+    """A governed store whose reservation was made for ``scope`` (not necessarily the permit's)."""
+    path = db_path(tmp_path)
+    store = SqliteAttemptStore(path, governed=True)
+    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store.propose(PROPOSAL, scope, NOW)
+    store.reserve(RESERVATION, PROPOSAL, scope, LIVE_UNTIL, NOW)
+    return Harness(store, path, FakeVerifier(), FakeGates(), FakeRevocations())
+
+
+@pytest.mark.parametrize("field", ["operation_digest", "artifact_identity"])
+def test_a_reservation_made_for_another_operation_or_artifact_cannot_authorize_the_permit(
+    tmp_path: Path, field: str
+) -> None:
+    other = replace(SCOPE, **{field: "9" * 64})
+    h = reserved_for(tmp_path, other)
+    ready(h, vector_flow())
+    before = snapshot(h.path)
+    with pytest.raises(ReservationRefused) as excinfo:
+        authorize(h, other)  # the caller presents the reserved scope, but the permit is for another
+    assert excinfo.value.reason == "scope_not_bound_to_permit"
+    assert snapshot(h.path) == before
+    unused = sqlite3.connect(h.path).execute("SELECT consumed_attempt_id FROM reservations").fetchone()
+    assert unused == (None,)
+
+
+def test_the_mapping_is_operation_digest_to_request_digest_and_artifact_identity_to_artifact_digest(
+    h: Harness,
+) -> None:
+    permit = vector_flow().permit
+    assert (SCOPE.operation_digest, SCOPE.artifact_identity) == (
+        permit["request_digest"], permit["artifact_digest"],
+    )
+    authorized(h)
+    row = sqlite3.connect(h.path).execute("SELECT consumed_attempt_id FROM reservations").fetchone()
+    assert row == (ATTEMPT,)
