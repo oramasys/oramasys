@@ -45,7 +45,7 @@ from tests.test_dispatch_attempts import (
     vector_flow,
 )
 
-SCOPE = EffectScope("p-1", "g-1", "a" * 64, "b" * 64, "artifact-1", "dest-1")
+SCOPE = EffectScope("p-1", "g-1", "a" * 64, "b" * 64, "c" * 64, "dest-1")  # permit request/artifact digests
 PERMIT_ID = "permit-vector-0001"
 
 

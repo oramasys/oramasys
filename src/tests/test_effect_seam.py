@@ -442,11 +442,11 @@ def test_a_reservation_made_for_another_operation_or_artifact_cannot_authorize_t
     other = replace(SCOPE, **{field: "9" * 64})
     h = reserved_for(tmp_path, other)
     ready(h, vector_flow())
-    before = snapshot(h.path)
+    before = quiet_snapshot(h.path)
     with pytest.raises(ReservationRefused) as excinfo:
         authorize(h, other)  # the caller presents the reserved scope, but the permit is for another
     assert excinfo.value.reason == "scope_not_bound_to_permit"
-    assert snapshot(h.path) == before
+    assert quiet_snapshot(h.path) == before
     unused = sqlite3.connect(h.path).execute("SELECT consumed_attempt_id FROM reservations").fetchone()
     assert unused == (None,)
 
