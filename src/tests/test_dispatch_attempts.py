@@ -20,11 +20,13 @@ import pytest
 from orama.graph.dispatch_attempts import (
     AUTHORIZATION_RULES,
     AttemptAlreadyCommitted,
+    AttemptRecord,
     AttemptStateError,
     AuthorizationRefused,
     EventRefused,
     ExpectedBinding,
     SqliteAttemptStore,
+    _check_finalization,
     sender_precondition,
 )
 from orama.graph.dispatch_consumer_wire import (
@@ -48,8 +50,9 @@ GRANT = "grant-vector-0001"
 RESERVATION = "res-vector-0001"
 EXPECTED = ExpectedBinding(
     request_digest="b" * 64, artifact_digest="c" * 64,
-    configuration_policy_epoch=3, authority_epoch=5,
+    configuration_policy_epoch=3, authority_epoch=5, ledger_store_id="vector-ledger",
 )
+DIVERGENCE_REFUSALS = {("rule5", "divergence"), ("rule5", "event_digest_mismatch")}
 OUTBOX_COLUMNS = (
     "permit_id", "permit_digest", "finalization_digest", "r_p", "r_f", "authority_pair",
     "acked_through",
@@ -96,13 +99,16 @@ class FakeGates:
 
 @dataclass
 class FakeRevocations:
-    """Revocation port: a grant is revoked once added to the set."""
+    """Revocation port: a grant or a whole issuer is revoked once added to its set."""
 
     revoked_grants: set[str] = field(default_factory=set)
+    revoked_issuers: set[str] = field(default_factory=set)
+    seen: list[tuple[str, str]] = field(default_factory=list)
 
-    def revoked(self, grant_id: str) -> bool:
-        """Report whether an acknowledged event revokes the grant."""
-        return grant_id in self.revoked_grants
+    def revoked(self, *, grant_id: str, issuer_id: str) -> bool:
+        """Report whether an acknowledged event revokes the grant or the issuer."""
+        self.seen.append((grant_id, issuer_id))
+        return grant_id in self.revoked_grants or issuer_id in self.revoked_issuers
 
 
 @dataclass(frozen=True)
@@ -208,9 +214,14 @@ class Harness:
         before = snapshot(self.path)
         with pytest.raises(AuthorizationRefused) as excinfo:
             self.authorize(flow, now)
-        assert excinfo.value.rule in AUTHORIZATION_RULES
-        assert snapshot(self.path) == before, "a refused authorization wrote something"
-        return excinfo.value
+        refusal = excinfo.value
+        assert refusal.rule in AUTHORIZATION_RULES
+        after = snapshot(self.path)
+        if (refusal.rule, refusal.reason) in DIVERGENCE_REFUSALS:
+            before.pop("issuer_divergence")
+            after.pop("issuer_divergence")
+        assert after == before, "a refused authorization wrote something"
+        return refusal
 
     def refused_rule(self, flow: Flow, now: datetime = NOW) -> str:
         """Authorize, require a refusal, prove nothing was written, return the rule."""
@@ -932,3 +943,183 @@ def test_all_refusals_seen_use_the_closed_rule_set(harness: Harness) -> None:
 
     assert seen == {"rule1", "rule2", "rule4", "rule6"}
     assert seen <= AUTHORIZATION_RULES
+
+
+# ------------------------------------------------- F1 ledger binding (rules 1 and 5)
+
+
+def test_rule1_refuses_a_permit_for_another_ledger(harness: Harness) -> None:
+    """A permit whose ledger differs from the expected one fails rule 1 permit_binding."""
+    flow = build_flow(permit_changes={"ledger_store_id": "ledger-other"})
+    ready(harness, flow)
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule1", "permit_binding")
+
+
+def test_rule5_refuses_a_finalization_for_another_ledger(harness: Harness) -> None:
+    """A finalization whose ledger differs fails rule 5 finalization_binding."""
+    flow = build_flow(fin_changes={"ledger_store_id": "ledger-other"})
+    ready(harness, flow)
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule5", "finalization_binding")
+
+
+def test_rule5_checks_the_expected_ledger_itself() -> None:
+    """Even if permit and finalization agree, a ledger other than expected is refused."""
+    flow = build_flow(
+        permit_changes={"ledger_store_id": "ledger-other"},
+        fin_changes={"ledger_store_id": "ledger-other"},
+    )
+    attempt = AttemptRecord(ATTEMPT, GRANT, RESERVATION, "created", False, False, None)
+    db = sqlite3.connect(":memory:")
+
+    with pytest.raises(AuthorizationRefused) as excinfo:
+        _check_finalization(
+            db, attempt, flow.permit, flow.fin, NOW, FakeVerifier(), ISSUER, EXPECTED
+        )
+
+    assert (excinfo.value.rule, excinfo.value.reason) == ("rule5", "finalization_binding")
+
+
+# ------------------------------------------------- F2 revocation port
+
+
+def test_rule4_refuses_an_issuer_wide_revocation(harness: Harness) -> None:
+    """A revocation of the whole issuer (not the grant) refuses under rule 4."""
+    flow = vector_flow()
+    ready(harness, flow)
+    harness.revocations.revoked_issuers.add(ISSUER)
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule4", "grant_revoked")
+    assert harness.revocations.seen[-1] == (GRANT, ISSUER)
+
+
+# ------------------------------------------------- F3 persisted divergence
+
+
+def _plant_fork(harness: Harness) -> Flow:
+    """Hold version 2 with another digest, so a good R_f=2 finalization is a fork."""
+    flow = build_flow()
+    ready(harness, flow)
+    conn = sqlite3.connect(harness.path)
+    conn.execute("INSERT INTO issuer_cascade_ack VALUES (?, 2, ?, 'x')", (ISSUER, "5" * 64))
+    conn.commit()
+    conn.close()
+    return flow
+
+
+def test_divergence_refusal_persists_the_flag_and_blocks_later_authorize(
+    harness: Harness,
+) -> None:
+    """A rule 5 divergence refusal records the flag after rollback; later flows are refused."""
+    flow = _plant_fork(harness)
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule5", "divergence")
+    assert harness.store.is_diverged(ISSUER) is True
+    again = harness.refused(build_flow())
+    assert (again.rule, again.reason) == ("rule5", "divergence_or_gap")
+    assert harness.store.get_attempt(ATTEMPT).state == "created"  # type: ignore[union-attr]
+
+
+def test_event_digest_mismatch_refusal_persists_the_flag(harness: Harness) -> None:
+    """A rebuilt wrapper that differs from the signed digest also flags the issuer."""
+    flow = build_flow(fin_changes={"revocation_event_digest": "1" * 64})
+    ready(harness, flow)
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule5", "event_digest_mismatch")
+    assert harness.store.is_diverged(ISSUER) is True
+    again = harness.refused(build_flow())
+    assert (again.rule, again.reason) == ("rule5", "divergence_or_gap")
+
+
+def test_other_refusals_never_flag_divergence_or_write(harness: Harness) -> None:
+    """Gate, signature and replay refusals write nothing, divergence flag included."""
+    flow = vector_flow()
+    ready(harness, flow)
+    harness.gates.ok = False
+    harness.refused(flow)
+    harness.gates.ok = True
+    harness.verifier.finalization_ok = False
+    harness.refused(flow)
+    harness.verifier.finalization_ok = True
+    harness.revocations.revoked_grants.add(GRANT)
+    harness.refused(flow)
+
+    assert harness.store.is_diverged(ISSUER) is False
+
+
+# ------------------------------------------------- F4 lifetime caps
+
+_T0 = "2026-10-19T04:00:00.000000Z"
+
+
+@pytest.mark.parametrize(
+    ("expires", "passes"),
+    [
+        ("2026-10-19T04:01:30.000000Z", True),
+        ("2026-10-19T04:01:30.000001Z", False),
+        ("2026-10-19T04:00:00.000000Z", False),
+    ],
+    ids=["exactly-90s", "90s-plus-1us", "expires-equals-issued"],
+)
+def test_rule1_permit_lifetime_cap_boundaries(
+    harness: Harness, expires: str, passes: bool
+) -> None:
+    """A permit lives strictly more than 0 and at most 90 seconds."""
+    flow = build_flow(
+        permit_changes={"issued_at": _T0, "expires_at": expires},
+        fin_changes={"expires_at": expires if passes else "2026-10-19T04:01:31.000000Z"},
+    )
+    ready(harness, flow)
+    if passes:
+        harness.authorize(flow)
+        return
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule1", "lifetime_exceeds_cap")
+
+
+@pytest.mark.parametrize(
+    ("issued", "expires"),
+    [
+        ("2026-10-19T04:00:01.000000Z", "2026-10-19T04:01:31.000001Z"),
+        ("2026-10-19T04:00:31.000000Z", "2026-10-19T04:00:31.000000Z"),
+    ],
+    ids=["90s-plus-1us", "expires-equals-issued"],
+)
+def test_rule5_finalization_lifetime_cap(harness: Harness, issued: str, expires: str) -> None:
+    """A finalization over 90 seconds or not after issued_at is refused under rule 5."""
+    permit_expiry = {
+        "issued_at": "2026-10-19T04:00:02.000000Z", "expires_at": "2026-10-19T04:01:32.000000Z",
+    }
+    flow = build_flow(
+        permit_changes=permit_expiry,
+        fin_changes={"issued_at": issued, "expires_at": expires},
+    )
+    ready(harness, flow)
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule5", "lifetime_exceeds_cap")
+
+
+def test_rule5_finalization_may_end_with_the_permit_but_not_after(harness: Harness) -> None:
+    """Finalization expiry equal to the permit expiry passes; one microsecond later is refused."""
+    flow = build_flow(fin_changes={"expires_at": "2026-10-19T04:01:31.000001Z"})
+    ready(harness, flow)
+
+    refusal = harness.refused(flow)
+
+    assert (refusal.rule, refusal.reason) == ("rule5", "finalization_outlives_permit")
+    harness.authorize(build_flow())

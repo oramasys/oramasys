@@ -13,7 +13,7 @@ import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, TypeAlias
 
@@ -40,6 +40,8 @@ AUTHORIZATION_RULES: Final[frozenset[str]] = frozenset(
 )
 _BUSY_TIMEOUT_SECONDS: Final = 30.0
 _LIVE_STATES: Final = frozenset({"created", "transmitted"})
+_MAX_LIFETIME: Final = timedelta(seconds=90)
+_DIVERGENCE_REASONS: Final = frozenset({"divergence", "event_digest_mismatch"})
 _OUTBOX_REQUIRED: Final = (
     "permit_id", "permit_digest", "finalization_digest", "r_p", "r_f", "authority_pair",
     "acked_through",
@@ -49,13 +51,19 @@ _OUTBOX_REQUIRED: Final = (
 class AuthorizationRefused(Exception):
     """Step 4.3 refusal naming the failing rule from the closed rule set."""
 
-    def __init__(self, rule: AuthorizationRule, reason: str) -> None:
-        """Record the failing rule (validated against the closed set) and a reason."""
+    def __init__(
+        self,
+        rule: AuthorizationRule,
+        reason: str,
+        fork: tuple[int, str, str] | None = None,
+    ) -> None:
+        """Record the failing rule (validated against the closed set), reason, fork."""
         if rule not in AUTHORIZATION_RULES:
             raise ValueError(f"invalid authorization rule {rule!r}")
         super().__init__(f"{rule}: {reason}")
         self.rule = rule
         self.reason = reason
+        self.fork = fork
 
 
 class AttemptStateError(Exception):
@@ -78,8 +86,12 @@ class EventRefused(Exception):
 class RevocationPort(Protocol):
     """Consumer view of acknowledged issuer events that revoke a grant."""
 
-    def revoked(self, grant_id: str) -> bool:
-        """Return True if any acknowledged event, of any version, revokes the grant."""
+    def revoked(self, *, grant_id: str, issuer_id: str) -> bool:
+        """Return True if any acknowledged event of any version revokes the grant.
+
+        An implementation MUST also return True when any acknowledged event of any
+        version revokes the grant's approval chain or the issuer.
+        """
         ...
 
 
@@ -107,6 +119,7 @@ class ExpectedBinding:
     artifact_digest: str
     configuration_policy_epoch: int
     authority_epoch: int
+    ledger_store_id: str
 
     def authority_pair(self) -> str:
         """Return the effective authority pair as one stable string."""
@@ -206,6 +219,13 @@ def _require_unexpired(rule: AuthorizationRule, expires_at: str, now: datetime) 
         raise AuthorizationRefused(rule, "expired")
 
 
+def _require_lifetime(rule: AuthorizationRule, issued_at: str, expires_at: str) -> None:
+    """Refuse a lifetime that is not positive or exceeds the 90 second cap."""
+    lifetime = parse_timestamp(expires_at) - parse_timestamp(issued_at)
+    if lifetime <= timedelta(0) or lifetime > _MAX_LIFETIME:
+        raise AuthorizationRefused(rule, "lifetime_exceeds_cap")
+
+
 def _load_attempt(db: sqlite3.Connection, attempt_id: str) -> AttemptRecord:
     """Load an attempt row or fail closed on an unknown attempt."""
     row = db.execute(
@@ -236,6 +256,7 @@ def _check_rule1(
         permit["grant_id"] == attempt.grant_id
         and permit["attempt_id"] == attempt.attempt_id
         and permit["reservation_id"] == attempt.reservation_id
+        and permit["ledger_store_id"] == expected.ledger_store_id
         and permit["request_digest"] == expected.request_digest
         and permit["artifact_digest"] == expected.artifact_digest
         and (permit["configuration_policy_epoch"], permit["authority_epoch"])
@@ -243,6 +264,7 @@ def _check_rule1(
     )
     if not bound:
         raise AuthorizationRefused("rule1", "permit_binding")
+    _require_lifetime("rule1", permit["issued_at"], permit["expires_at"])
     _require_unexpired("rule1", permit["expires_at"], now)
     seen = db.execute(
         "SELECT 1 FROM dispatch_intents WHERE permit_id = ?", (permit["permit_id"],)
@@ -269,6 +291,7 @@ def _check_finalization(
     now: datetime,
     verifier: SignatureVerifier,
     issuer_id: str,
+    expected: ExpectedBinding,
 ) -> None:
     """Rule 5 binding, freshness and ordering checks (before the event is built)."""
     if not verifier.verify_finalization(
@@ -281,10 +304,14 @@ def _check_finalization(
         and fin["attempt_id"] == attempt.attempt_id
         and fin["reservation_id"] == attempt.reservation_id
         and fin["ledger_store_id"] == permit["ledger_store_id"]
+        and fin["ledger_store_id"] == expected.ledger_store_id
         and fin["authority_epoch"] == permit["authority_epoch"]
     )
     if not bound:
         raise AuthorizationRefused("rule5", "finalization_binding")
+    _require_lifetime("rule5", fin["issued_at"], fin["expires_at"])
+    if parse_timestamp(fin["expires_at"]) > parse_timestamp(permit["expires_at"]):
+        raise AuthorizationRefused("rule5", "finalization_outlives_permit")
     _require_unexpired("rule5", fin["expires_at"], now)
     digest = _fin_digest(fin)
     if db.execute(
@@ -314,16 +341,29 @@ def _check_event(
     body = {"finalization_id": fin["finalization_id"]}
     computed = event_digest(r_f, "finalization", body, previous)
     if computed != fin["revocation_event_digest"]:
-        raise AuthorizationRefused("rule5", "event_digest_mismatch")
+        raise AuthorizationRefused(
+            "rule5", "event_digest_mismatch", (r_f, computed, fin["revocation_event_digest"])
+        )
     stored = _stored_digest(db, issuer_id, r_f)
     if stored is not None and stored != computed:
-        raise AuthorizationRefused("rule5", "divergence")
+        raise AuthorizationRefused("rule5", "divergence", (r_f, stored, computed))
     if stored is None:
         db.execute(
             "INSERT INTO issuer_cascade_ack (issuer_id, version, event_digest, applied_at)"
             " VALUES (?, ?, ?, ?)",
             (issuer_id, r_f, computed, _now_text(now)),
         )
+
+
+def _record_fork(
+    db: sqlite3.Connection, issuer_id: str, fork: tuple[int, str, str], now: datetime
+) -> None:
+    """Record an issuer divergence flag (idempotent per issuer)."""
+    db.execute(
+        "INSERT OR IGNORE INTO issuer_divergence (issuer_id, version,"
+        " stored_digest, offered_digest, flagged_at) VALUES (?, ?, ?, ?, ?)",
+        (issuer_id, *fork, _now_text(now)),
+    )
 
 
 def _check_rule6(
@@ -521,11 +561,7 @@ class SqliteAttemptStore:
                     raise EventRefused("malformed") from error
                 fork = self._ingest_one(db, issuer_id, event, verifier, now)
                 if fork is not None:
-                    db.execute(
-                        "INSERT OR IGNORE INTO issuer_divergence (issuer_id, version,"
-                        " stored_digest, offered_digest, flagged_at) VALUES (?, ?, ?, ?, ?)",
-                        (issuer_id, *fork, _now_text(now)),
-                    )
+                    _record_fork(db, issuer_id, fork, now)
                     break
         if fork is not None:
             raise EventRefused("divergence")
@@ -582,6 +618,34 @@ class SqliteAttemptStore:
         """Step 4.3: check the six rules and write intent, use and outbox atomically."""
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
+        try:
+            self._authorize_in_transaction(
+                attempt_id, permit_wire, finalization_wire, now,
+                verifier, gates, revocations, issuer_id, expected,
+            )
+        except AuthorizationRefused as refusal:
+            if (
+                refusal.rule == "rule5"
+                and refusal.reason in _DIVERGENCE_REASONS
+                and refusal.fork is not None
+            ):
+                with self._immediate() as db:
+                    _record_fork(db, issuer_id, refusal.fork, now)
+            raise
+
+    def _authorize_in_transaction(
+        self,
+        attempt_id: str,
+        permit_wire: Mapping[str, Any],
+        finalization_wire: Mapping[str, Any],
+        now: datetime,
+        verifier: SignatureVerifier,
+        gates: GatePort,
+        revocations: RevocationPort,
+        issuer_id: str,
+        expected: ExpectedBinding,
+    ) -> None:
+        """Run the six rules inside one rolled-back-on-refusal transaction."""
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
             try:
@@ -591,9 +655,9 @@ class SqliteAttemptStore:
                 raise AuthorizationRefused("rule1", "malformed_wire") from error
             _check_rule1(db, attempt, permit, now, verifier, expected)
             _check_acks(db, issuer_id, permit)
-            if revocations.revoked(attempt.grant_id):
+            if revocations.revoked(grant_id=attempt.grant_id, issuer_id=issuer_id):
                 raise AuthorizationRefused("rule4", "grant_revoked")
-            _check_finalization(db, attempt, permit, fin, now, verifier, issuer_id)
+            _check_finalization(db, attempt, permit, fin, now, verifier, issuer_id, expected)
             _check_event(db, fin, issuer_id, now)
             pair = expected.authority_pair()
             _check_rule6(db, attempt, gates, pair, now)
