@@ -60,6 +60,7 @@ class EffectScope:
     destination: str
 
     def __post_init__(self) -> None:
+        """Reject blank scope dimensions before the value becomes a durable binding."""
         for name in SCOPE_FIELDS:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -80,6 +81,7 @@ def _stamp(moment: datetime) -> str:
 
 
 def _load_scope(db: sqlite3.Connection, proposal_id: str) -> EffectScope:
+    """Load the proposal's immutable scope or refuse an unknown proposal identifier."""
     row = db.execute(
         "SELECT principal, graph_id, policy_hash, operation_digest, artifact_identity,"
         " destination FROM effect_proposals WHERE proposal_id = ?",

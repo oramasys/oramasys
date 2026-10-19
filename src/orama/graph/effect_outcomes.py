@@ -28,6 +28,7 @@ class OutcomeRefused(Exception):
     """An outcome write or a send was refused; ``reason`` is a stable machine-readable code."""
 
     def __init__(self, reason: str) -> None:
+        """Store the stable refusal reason for callers and tests."""
         super().__init__(reason)
         self.reason = reason
 

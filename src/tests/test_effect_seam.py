@@ -69,10 +69,12 @@ def authorize(h: Harness, scope: EffectScope | None, now=NOW) -> None:
 
 @pytest.fixture
 def h(tmp_path: Path) -> Harness:
+    """Provide a fresh governed harness with its matching proposal and reservation."""
     return governed(tmp_path)
 
 
 def authorized(h: Harness) -> None:
+    """Advance a governed harness through readiness and the authorized step 4.3 transaction."""
     ready(h, vector_flow())
     authorize(h, SCOPE)
 
@@ -81,6 +83,7 @@ def authorized(h: Harness) -> None:
 
 
 def test_a_proposal_stores_scope_only_and_precedes_any_grant(tmp_path: Path) -> None:
+    """A proposal persists its scope without creating attempts or consuming a grant."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path, governed=True)
     store.propose(PROPOSAL, SCOPE, NOW)
@@ -94,6 +97,7 @@ def test_a_proposal_stores_scope_only_and_precedes_any_grant(tmp_path: Path) -> 
 def test_recording_the_same_proposal_is_idempotent_but_a_different_scope_is_refused(
     tmp_path: Path,
 ) -> None:
+    """A repeated identical proposal is idempotent, while a changed scope conflicts."""
     store = SqliteAttemptStore(db_path(tmp_path), governed=True)
     store.propose(PROPOSAL, SCOPE, NOW)
     store.propose(PROPOSAL, SCOPE, NOW)
@@ -104,6 +108,7 @@ def test_recording_the_same_proposal_is_idempotent_but_a_different_scope_is_refu
 
 @pytest.mark.parametrize("field", SCOPE_FIELDS)
 def test_a_scope_requires_every_field(field: str) -> None:
+    """Every member of the six-field scope must contain non-blank text."""
     with pytest.raises(ValueError, match=field):
         replace(SCOPE, **{field: "  "})
 
@@ -112,6 +117,7 @@ def test_a_scope_requires_every_field(field: str) -> None:
 
 
 def test_a_reservation_for_an_unknown_proposal_is_refused(tmp_path: Path) -> None:
+    """A reservation cannot be created before its durable proposal exists."""
     store = SqliteAttemptStore(db_path(tmp_path), governed=True)
     with pytest.raises(ReservationRefused) as excinfo:
         store.reserve(RESERVATION, "no-such-proposal", SCOPE, LIVE_UNTIL, NOW)
@@ -119,6 +125,7 @@ def test_a_reservation_for_an_unknown_proposal_is_refused(tmp_path: Path) -> Non
 
 
 def test_a_reservation_must_carry_the_proposals_own_scope(tmp_path: Path) -> None:
+    """Reservation creation rejects a scope that differs from the proposal it names."""
     store = SqliteAttemptStore(db_path(tmp_path), governed=True)
     store.propose(PROPOSAL, SCOPE, NOW)
     with pytest.raises(ReservationRefused) as excinfo:
@@ -127,6 +134,7 @@ def test_a_reservation_must_carry_the_proposals_own_scope(tmp_path: Path) -> Non
 
 
 def test_a_reservation_that_is_already_expired_is_refused(tmp_path: Path) -> None:
+    """A reservation must expire strictly after the instant it is recorded."""
     store = SqliteAttemptStore(db_path(tmp_path), governed=True)
     store.propose(PROPOSAL, SCOPE, NOW)
     with pytest.raises(ReservationRefused) as excinfo:
@@ -135,6 +143,7 @@ def test_a_reservation_that_is_already_expired_is_refused(tmp_path: Path) -> Non
 
 
 def test_a_governed_store_refuses_dispatch_without_a_scope(tmp_path: Path) -> None:
+    """Governed authorization requires a scope and leaves storage unchanged when absent."""
     h = governed(tmp_path)
     ready(h, vector_flow())
     before = snapshot(h.path)
@@ -145,6 +154,7 @@ def test_a_governed_store_refuses_dispatch_without_a_scope(tmp_path: Path) -> No
 
 
 def test_a_governed_store_refuses_dispatch_when_no_reservation_exists(tmp_path: Path) -> None:
+    """Governed authorization refuses an attempt whose reservation has not been recorded."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path, governed=True)
     store.create_attempt(ATTEMPT, GRANT, RESERVATION)
@@ -162,6 +172,7 @@ def test_a_governed_store_refuses_dispatch_when_no_reservation_exists(tmp_path: 
 def test_any_changed_scope_field_is_refused_and_leaves_the_reservation_unused(
     h: Harness, field: str
 ) -> None:
+    """A caller cannot alter any one scope dimension while retaining the reservation."""
     ready(h, vector_flow())
     before = snapshot(h.path)
     with pytest.raises(ReservationRefused) as excinfo:
@@ -174,6 +185,7 @@ def test_any_changed_scope_field_is_refused_and_leaves_the_reservation_unused(
 
 
 def test_an_expired_reservation_is_refused_at_the_boundary(h: Harness) -> None:
+    """Authorization at the exact expiry boundary refuses the reservation."""
     ready(h, vector_flow())
     with pytest.raises(ReservationRefused) as excinfo:
         authorize(h, SCOPE, now=LIVE_UNTIL)
@@ -181,6 +193,7 @@ def test_an_expired_reservation_is_refused_at_the_boundary(h: Harness) -> None:
 
 
 def test_a_revoked_grant_is_refused_and_the_reservation_stays_unused(h: Harness) -> None:
+    """A revocation rolls back the reservation consumption performed before rule four."""
     ready(h, vector_flow())
     h.revocations.revoked_grants.add(GRANT)
     with pytest.raises(AuthorizationRefused) as excinfo:
@@ -196,6 +209,7 @@ def test_a_revoked_grant_is_refused_and_the_reservation_stays_unused(h: Harness)
 
 
 def test_exactly_one_of_two_racing_consumers_wins(tmp_path: Path) -> None:
+    """The reservation's single-use update permits exactly one concurrent consumer."""
     path = db_path(tmp_path)
     first = SqliteAttemptStore(path, governed=True)
     second = SqliteAttemptStore(path, governed=True)
@@ -205,6 +219,7 @@ def test_exactly_one_of_two_racing_consumers_wins(tmp_path: Path) -> None:
     results: list[str] = []
 
     def race(store: SqliteAttemptStore, attempt: str) -> None:
+        """Compete for the same reservation after both workers reach the barrier."""
         barrier.wait()
         try:
             with store._immediate() as db:
@@ -223,6 +238,7 @@ def test_exactly_one_of_two_racing_consumers_wins(tmp_path: Path) -> None:
 
 
 def test_the_authorize_transaction_consumes_the_reservation_exactly_once(h: Harness) -> None:
+    """A successful step 4.3 transaction consumes the reservation exactly once."""
     authorized(h)
     row = sqlite3.connect(h.path).execute("SELECT consumed_attempt_id FROM reservations").fetchone()
     assert row == (ATTEMPT,)
@@ -236,6 +252,7 @@ def test_the_authorize_transaction_consumes_the_reservation_exactly_once(h: Harn
 
 
 def test_authorization_leaves_the_effect_unknown_with_no_send_started(h: Harness) -> None:
+    """Authorization records an unknown effect but has not started external delivery."""
     authorized(h)
     row = h.store.outbox_row(ATTEMPT)
     assert row is not None
@@ -245,6 +262,7 @@ def test_authorization_leaves_the_effect_unknown_with_no_send_started(h: Harness
 def test_restart_after_commit_before_send_keeps_unknown_and_one_send_available(
     tmp_path: Path,
 ) -> None:
+    """A restart preserves unknown state and permits only the one original send."""
     h = governed(tmp_path)
     authorized(h)
     h.store.close()
@@ -260,6 +278,7 @@ def test_restart_after_commit_before_send_keeps_unknown_and_one_send_available(
 
 
 def test_a_second_dispatch_of_an_unknown_attempt_is_refused(h: Harness) -> None:
+    """An unknown outcome never authorizes a second send for the same attempt."""
     authorized(h)
     h.store.begin_send(ATTEMPT)
     with pytest.raises(OutcomeRefused) as excinfo:
@@ -270,6 +289,7 @@ def test_a_second_dispatch_of_an_unknown_attempt_is_refused(h: Harness) -> None:
 
 
 def test_a_send_needs_an_authorized_outbox_row(h: Harness) -> None:
+    """The sender cannot run before authorization has created its complete outbox row."""
     from orama.graph.dispatch_attempts import AttemptStateError
 
     with pytest.raises(AttemptStateError):
@@ -280,6 +300,7 @@ def test_a_send_needs_an_authorized_outbox_row(h: Harness) -> None:
 
 
 def test_an_outcome_cannot_be_recorded_before_a_send_started(h: Harness) -> None:
+    """Settlement evidence is accepted only after the durable send-start marker exists."""
     authorized(h)
     with pytest.raises(OutcomeRefused) as excinfo:
         h.store.record_outcome(ATTEMPT, "confirmed", "provider-receipt-1")
@@ -288,6 +309,7 @@ def test_an_outcome_cannot_be_recorded_before_a_send_started(h: Harness) -> None
 
 @pytest.mark.parametrize("outcome", ["confirmed", "failed"])
 def test_unknown_settles_only_with_an_evidence_reference(h: Harness, outcome: str) -> None:
+    """Confirmed and failed outcomes require a non-empty provider evidence reference."""
     authorized(h)
     h.store.begin_send(ATTEMPT)
     with pytest.raises(OutcomeRefused) as excinfo:
@@ -300,6 +322,7 @@ def test_unknown_settles_only_with_an_evidence_reference(h: Harness, outcome: st
 
 
 def test_a_settled_outcome_is_terminal_and_never_returns_to_unknown(h: Harness) -> None:
+    """A settled outcome is terminal and cannot be rewritten to any later state."""
     authorized(h)
     h.store.begin_send(ATTEMPT)
     h.store.record_outcome(ATTEMPT, "failed", "provider-receipt-1")
@@ -310,6 +333,7 @@ def test_a_settled_outcome_is_terminal_and_never_returns_to_unknown(h: Harness) 
 
 
 def test_the_outbox_check_constraint_rejects_any_other_outcome(h: Harness) -> None:
+    """SQLite itself constrains outbox outcomes to the closed three-state vocabulary."""
     authorized(h)
     with pytest.raises(sqlite3.IntegrityError):
         sqlite3.connect(h.path).execute("UPDATE outbox SET outcome = 'applied'")
@@ -319,6 +343,7 @@ def test_the_outbox_check_constraint_rejects_any_other_outcome(h: Harness) -> No
 
 
 def test_an_outbox_created_before_the_outcome_columns_is_migrated(tmp_path: Path) -> None:
+    """Opening an older database adds the outcome columns required by the new lifecycle."""
     path = db_path(tmp_path)
     SqliteAttemptStore(path).close()
     conn = sqlite3.connect(path)
@@ -336,6 +361,7 @@ def test_an_outbox_created_before_the_outcome_columns_is_migrated(tmp_path: Path
 
 
 def test_the_proposal_schema_is_part_of_the_store_schema() -> None:
+    """The shared proposal schema remains publicly importable and has its two expected tables."""
     assert len(PROPOSAL_SCHEMA) == 2
     assert record_proposal and reserve  # public API stays importable
 
@@ -369,6 +395,7 @@ def ungoverned_constructions(source: str) -> list[int]:
 
 
 def test_the_scanner_flags_a_store_built_without_governed_true() -> None:
+    """The AST guard rejects omitted, false, and dynamic governed constructor arguments."""
     assert ungoverned_constructions("SqliteAttemptStore(path)") == [1]
     assert ungoverned_constructions("m.SqliteAttemptStore(path, governed=False)") == [1]
     assert ungoverned_constructions("SqliteAttemptStore(path, governed=flag)") == [1]
@@ -376,6 +403,7 @@ def test_the_scanner_flags_a_store_built_without_governed_true() -> None:
 
 
 def test_no_product_code_builds_an_attempt_store_without_governed_true() -> None:
+    """Every product construction outside the store implementation explicitly enables governance."""
     offenders = {
         str(path.relative_to(SRC_ROOT)): lines
         for path in sorted(SRC_ROOT.rglob("*.py"))
@@ -403,6 +431,7 @@ def reserved_for(tmp_path: Path, scope: EffectScope) -> Harness:
 def test_a_reservation_made_for_another_operation_or_artifact_cannot_authorize_the_permit(
     tmp_path: Path, field: str
 ) -> None:
+    """A reservation for another operation or artifact cannot authorize the vector permit."""
     other = replace(SCOPE, **{field: "9" * 64})
     h = reserved_for(tmp_path, other)
     ready(h, vector_flow())
@@ -418,6 +447,7 @@ def test_a_reservation_made_for_another_operation_or_artifact_cannot_authorize_t
 def test_the_mapping_is_operation_digest_to_request_digest_and_artifact_identity_to_artifact_digest(
     h: Harness,
 ) -> None:
+    """The two cross-repository digest mappings are explicit and consumed atomically."""
     permit = vector_flow().permit
     assert (SCOPE.operation_digest, SCOPE.artifact_identity) == (
         permit["request_digest"], permit["artifact_digest"],
