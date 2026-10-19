@@ -31,6 +31,14 @@ from orama.graph.dispatch_consumer_wire import (
     validate_finalization_wire,
     validate_permit_wire,
 )
+from orama.graph.effect_outcomes import OutcomeRefused, check_transition
+from orama.graph.effect_proposals import (
+    PROPOSAL_SCHEMA,
+    EffectScope,
+    consume_reservation,
+    record_proposal,
+    reserve,
+)
 from orama.graph.private_store import prepare_private_store
 
 AuthorizationRule: TypeAlias = Literal["rule1", "rule2", "rule3", "rule4", "rule5", "rule6"]
@@ -162,7 +170,18 @@ _SCHEMA: Final = (
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, permit_id TEXT NOT NULL,"
     " permit_digest TEXT NOT NULL, finalization_digest TEXT NOT NULL, r_p INTEGER NOT NULL,"
     " r_f INTEGER NOT NULL, authority_pair TEXT NOT NULL, acked_through INTEGER NOT NULL,"
-    " payload TEXT)",
+    " payload TEXT,"
+    " outcome TEXT NOT NULL DEFAULT 'unknown' CHECK (outcome IN"
+    " ('confirmed', 'failed', 'unknown')),"
+    " outcome_evidence TEXT,"
+    " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
+    *PROPOSAL_SCHEMA,
+)
+_OUTBOX_T3_COLUMNS: Final = (
+    ("outcome", "TEXT NOT NULL DEFAULT 'unknown' CHECK (outcome IN"
+     " ('confirmed', 'failed', 'unknown'))"),
+    ("outcome_evidence", "TEXT"),
+    ("send_started", "INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1))"),
 )
 
 
@@ -439,9 +458,15 @@ def _write_authorization(
 class SqliteAttemptStore:
     """Durable consumer attempt store; every write is one ``BEGIN IMMEDIATE`` transaction."""
 
-    def __init__(self, path: Path | str) -> None:
-        """Open (creating privately) the WAL-mode store and its schema."""
+    def __init__(self, path: Path | str, *, governed: bool = False) -> None:
+        """Open (creating privately) the WAL-mode store and its schema.
+
+        ``governed`` makes ``authorize_dispatch`` require a matching, live, unused reservation
+        for the attempt's reservation id. It defaults to False only so slice-1 callers keep
+        working; any serving path must construct the store with ``governed=True``.
+        """
         prepared = prepare_private_store(path)
+        self._governed = governed
         self._lock = threading.Lock()
         self._db = sqlite3.connect(
             str(prepared),
@@ -453,6 +478,14 @@ class SqliteAttemptStore:
         self._db.execute("PRAGMA synchronous=FULL")
         for statement in _SCHEMA:
             self._db.execute(statement)
+        self._migrate_outbox()
+
+    def _migrate_outbox(self) -> None:
+        """Add the T3 outcome columns to an outbox created before they existed."""
+        present = {row[1] for row in self._db.execute("PRAGMA table_info(outbox)")}
+        for name, definition in _OUTBOX_T3_COLUMNS:
+            if name not in present:
+                self._db.execute(f"ALTER TABLE outbox ADD COLUMN {name} {definition}")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -614,14 +647,18 @@ class SqliteAttemptStore:
         revocations: RevocationPort,
         issuer_id: str,
         expected: ExpectedBinding,
+        scope: EffectScope | None = None,
     ) -> None:
-        """Step 4.3: check the six rules and write intent, use and outbox atomically."""
+        """Step 4.3: check the six rules and write intent, use and outbox atomically.
+
+        A governed store also consumes the attempt's reservation in the same transaction.
+        """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
         try:
             self._authorize_in_transaction(
                 attempt_id, permit_wire, finalization_wire, now,
-                verifier, gates, revocations, issuer_id, expected,
+                verifier, gates, revocations, issuer_id, expected, scope,
             )
         except AuthorizationRefused as refusal:
             if (
@@ -644,10 +681,13 @@ class SqliteAttemptStore:
         revocations: RevocationPort,
         issuer_id: str,
         expected: ExpectedBinding,
+        scope: EffectScope | None,
     ) -> None:
         """Run the six rules inside one rolled-back-on-refusal transaction."""
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
+            if self._governed:
+                consume_reservation(db, attempt.reservation_id, attempt_id, scope, now)
             try:
                 permit = validate_permit_wire(permit_wire)
                 fin = validate_finalization_wire(finalization_wire)
@@ -662,6 +702,59 @@ class SqliteAttemptStore:
             pair = expected.authority_pair()
             _check_rule6(db, attempt, gates, pair, now)
             _write_authorization(db, attempt, permit, fin, issuer_id, pair, now)
+
+    def propose(self, proposal_id: str, scope: EffectScope, now: datetime) -> None:
+        """Durably record a proposal; it carries no authorization state."""
+        _require_text("proposal_id", proposal_id)
+        _require_aware(now)
+        with self._immediate() as db:
+            record_proposal(db, proposal_id, scope, now)
+
+    def reserve(
+        self,
+        reservation_id: str,
+        proposal_id: str,
+        scope: EffectScope,
+        expires_at: datetime,
+        now: datetime,
+    ) -> None:
+        """Bind the proposal's scope to a single-use, expiring reservation."""
+        _require_text("reservation_id", reservation_id)
+        _require_aware(now)
+        _require_aware(expires_at)
+        with self._immediate() as db:
+            reserve(db, reservation_id, proposal_id, scope, expires_at, now)
+
+    def begin_send(self, attempt_id: str) -> None:
+        """Durably mark the one allowed send as started; a second send is always refused."""
+        with self._immediate() as db:
+            row = db.execute(
+                "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise AttemptStateError("no authorized outbox row for the attempt")
+            if row[0]:
+                raise OutcomeRefused("send_already_started")
+            db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+
+    def record_outcome(
+        self, attempt_id: str, outcome: str, evidence_ref: str | None = None
+    ) -> None:
+        """Settle ``unknown`` to ``confirmed`` or ``failed`` with an evidence reference."""
+        with self._immediate() as db:
+            row = db.execute(
+                "SELECT outcome, send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise AttemptStateError("no authorized outbox row for the attempt")
+            current, started = row
+            if not started:
+                raise OutcomeRefused("send_not_started")
+            check_transition(current, outcome, evidence_ref)
+            db.execute(
+                "UPDATE outbox SET outcome = ?, outcome_evidence = ? WHERE attempt_id = ?",
+                (outcome, evidence_ref, attempt_id),
+            )
 
     def outbox_row(self, attempt_id: str) -> dict[str, Any] | None:
         """Return the outbox row for the attempt as a dict, or None."""
