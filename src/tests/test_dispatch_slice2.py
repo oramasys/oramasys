@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,6 +13,7 @@ from orama.graph.dispatch_attempts import (
     AttemptStateError,
     AuthorizationRefused,
     ClockQuarantined,
+    OperatorRefused,
     SqliteAttemptStore,
 )
 from orama.graph.dispatch_consumer_wire import (
@@ -21,7 +22,7 @@ from orama.graph.dispatch_consumer_wire import (
     validate_permit_request_wire,
 )
 from orama.graph.effect_outcomes import OutcomeRefused
-from orama.graph.effect_proposals import EffectScope
+from orama.graph.effect_proposals import EffectScope, ReservationRefused
 from orama.graph.finalization_window import Deadline
 from orama.graph.issuer_availability import (
     ISSUER_UNAVAILABLE_STATUS,
@@ -161,16 +162,120 @@ def test_a_backward_step_quarantines_and_survives_a_restart(tmp_path: Path) -> N
     assert still.value.reason == "clock_quarantined"
 
 
-def test_the_quarantine_clears_only_with_a_named_reconciliation(tmp_path: Path) -> None:
-    store = SqliteAttemptStore(db_path(tmp_path))
-    store.observe_clock(NOW)
+class Operator:
+    """Operator authority port: returns a fixed reference, or None to deny."""
+
+    def __init__(self, reference: str | None = "operator-ref-1") -> None:
+        self.reference = reference
+        self.calls: list[tuple[str, str]] = []
+
+    def authorize(self, operation: str, *, subject: str) -> str | None:
+        self.calls.append((operation, subject))
+        return self.reference
+
+
+def quarantined(tmp_path: Path, mark: timedelta = timedelta(hours=2)) -> Harness:
+    """A governed store with a live reservation whose clock mark stepped backward."""
+    h = harness(tmp_path)
+    h.store.observe_clock(NOW + mark)
     with pytest.raises(ClockQuarantined):
-        store.observe_clock(NOW - timedelta(seconds=1))
-    for bad in ("", "  "):
-        with pytest.raises(ValueError):
-            store.clear_clock_quarantine(bad, NOW)
-    store.clear_clock_quarantine("operator-ref-1", NOW - timedelta(seconds=1))
-    store.observe_clock(NOW)
+        h.store.observe_clock(NOW)
+    return h
+
+
+def clear(h: Harness, *, operator: Operator | None = None, evidence: str = "ntp-attested-1",
+          accepted: object = NOW) -> None:
+    h.store.clear_clock_quarantine(
+        operator=operator or Operator(), trusted_time_evidence=evidence, accepted_at=accepted,  # type: ignore[arg-type]
+        now=NOW,
+    )
+
+
+def reconciliations(h: Harness) -> list[tuple]:
+    conn = sqlite3.connect(h.path)
+    try:
+        return conn.execute(
+            "SELECT reconciled_by, trusted_time_evidence, previous_utc, accepted_utc, expired_reservations"
+            " FROM clock_reconciliations ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("reference", [None, "", "   "])
+def test_an_unauthenticated_operator_cannot_clear_the_quarantine(tmp_path: Path, reference) -> None:
+    h = quarantined(tmp_path)
+    with pytest.raises(OperatorRefused):
+        clear(h, operator=Operator(reference))
+    assert reconciliations(h) == []
+    with pytest.raises(ClockQuarantined) as still:
+        h.store.observe_clock(NOW + timedelta(hours=3))
+    assert still.value.reason == "clock_quarantined"
+
+
+@pytest.mark.parametrize("evidence", ["", "  ", None])
+def test_trusted_time_evidence_is_required(tmp_path: Path, evidence) -> None:
+    h = quarantined(tmp_path)
+    with pytest.raises(ValueError):
+        clear(h, evidence=evidence)
+    assert reconciliations(h) == []
+
+
+def test_there_must_be_a_quarantine_to_clear(tmp_path: Path) -> None:
+    h = harness(tmp_path)
+    h.store.observe_clock(NOW)
+    with pytest.raises(AttemptStateError, match="no clock quarantine"):
+        clear(h)
+    assert reconciliations(h) == []
+
+
+def test_the_reconciliation_records_both_timestamps_the_evidence_and_the_operator(tmp_path: Path) -> None:
+    h = quarantined(tmp_path)
+    operator = Operator("operator-ref-9")
+    clear(h, operator=operator, evidence="roughtime-receipt-77", accepted=NOW + timedelta(minutes=30))
+    ((who, evidence, previous, accepted, expired),) = reconciliations(h)
+    assert (who, evidence, expired) == ("operator-ref-9", "roughtime-receipt-77", 1)
+    assert datetime.fromisoformat(previous) == NOW + timedelta(hours=2)
+    assert datetime.fromisoformat(accepted) == NOW + timedelta(minutes=30)
+    assert operator.calls == [("clear_clock_quarantine", "clock")]
+    h.store.observe_clock(NOW + timedelta(minutes=31))  # dispatch may resume from the accepted time
+
+
+def test_the_accepted_time_may_be_earlier_than_the_poisoned_mark(tmp_path: Path) -> None:
+    h = quarantined(tmp_path)
+    clear(h, accepted=NOW - timedelta(minutes=5))
+    with pytest.raises(ClockQuarantined):
+        h.store.observe_clock(NOW - timedelta(minutes=6))
+
+
+def test_reconciliation_never_revives_a_reservation_that_expired_at_the_old_mark(tmp_path: Path) -> None:
+    h = quarantined(tmp_path)  # the mark reached NOW+2h; the reservation expired at NOW+1h
+    clear(h, accepted=NOW)  # trusted time says it is only NOW, so it would look live again
+    ready(h, vector_flow())
+    with pytest.raises(ReservationRefused) as refusal:
+        authorize(h, now=NOW)
+    assert refusal.value.reason == "reservation_expired"
+
+
+def test_a_reservation_still_live_at_the_old_mark_survives_and_a_used_one_stays_used(tmp_path: Path) -> None:
+    h = quarantined(tmp_path, mark=timedelta(minutes=10))  # reservation expires at NOW+1h
+    clear(h, accepted=NOW)
+    ((_, _, _, _, expired),) = reconciliations(h)
+    assert expired == 0
+    ready(h, vector_flow())
+    authorize(h, now=NOW + timedelta(seconds=1))
+    row = sqlite3.connect(h.path).execute("SELECT consumed_attempt_id FROM reservations").fetchone()
+    assert row == (ATTEMPT,)
+
+
+def test_the_reconciliation_log_is_append_only_across_incidents(tmp_path: Path) -> None:
+    h = quarantined(tmp_path)
+    clear(h, evidence="first")
+    h.store.observe_clock(NOW + timedelta(hours=1))
+    with pytest.raises(ClockQuarantined):
+        h.store.observe_clock(NOW)
+    clear(h, evidence="second")
+    assert [row[1] for row in reconciliations(h)] == ["first", "second"]
 
 
 def test_a_governed_store_refuses_dispatch_while_the_clock_is_quarantined(tmp_path: Path) -> None:
@@ -464,3 +569,14 @@ def test_the_skew_does_not_relax_an_existing_quarantine(tmp_path: Path) -> None:
     with pytest.raises(ClockQuarantined) as excinfo:
         lenient.observe_clock(NOW)
     assert excinfo.value.reason == "clock_quarantined"
+
+
+def test_a_reservation_expiring_exactly_at_the_old_mark_is_expired_by_reconciliation(tmp_path: Path) -> None:
+    h = harness(tmp_path)  # the reservation expires at NOW + 1 hour
+    mark = timedelta(hours=1)
+    h.store.observe_clock(NOW + mark)
+    with pytest.raises(ClockQuarantined):
+        h.store.observe_clock(NOW)
+    clear(h, accepted=NOW)
+    ((_, _, _, _, expired),) = reconciliations(h)
+    assert expired == 1  # expiry is strict: at the mark itself it already counts as expired

@@ -79,6 +79,17 @@ class AuthorizationRefused(Exception):
         self.fork = fork
 
 
+class OperatorAuthority(Protocol):
+    """Injected port that authenticates the operator for an audited administrative action."""
+
+    def authorize(self, operation: str, *, subject: str) -> str | None:
+        """Return a non-blank operator reference, or None when the caller is not authorized."""
+
+
+class OperatorRefused(Exception):
+    """The operator port did not authorize the call; nothing was read or written."""
+
+
 class ClockQuarantined(Exception):
     """Dispatch is quarantined because the consumer clock stepped backward; ``reason`` is a code."""
 
@@ -191,8 +202,11 @@ _SCHEMA: Final = (
     *PROPOSAL_SCHEMA,
     "CREATE TABLE IF NOT EXISTS clock_high_water ("
     " id INTEGER PRIMARY KEY CHECK (id = 1), utc TEXT NOT NULL,"
-    " quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),"
-    " reconciled_by TEXT)",
+    " quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)))",
+    "CREATE TABLE IF NOT EXISTS clock_reconciliations ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT, reconciled_by TEXT NOT NULL,"
+    " trusted_time_evidence TEXT NOT NULL, previous_utc TEXT NOT NULL, accepted_utc TEXT NOT NULL,"
+    " expired_reservations INTEGER NOT NULL, recorded_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS abandon_attestations ("
     " attempt_id TEXT PRIMARY KEY, permit_id TEXT NOT NULL, attestation_digest TEXT NOT NULL,"
     " attestation TEXT NOT NULL, created_at TEXT NOT NULL)",
@@ -756,7 +770,7 @@ class SqliteAttemptStore:
         """Advance the durable UTC high-water mark; a backward step quarantines dispatch.
 
         The mark survives restarts. Once quarantined, every call refuses until
-        ``clear_clock_quarantine`` records an operator reconciliation.
+        ``clear_clock_quarantine`` records an authenticated operator reconciliation.
         """
         _require_aware(now)
         stamp = _now_text(now)
@@ -777,16 +791,55 @@ class SqliteAttemptStore:
         if regressed:
             raise ClockQuarantined("clock_regressed")
 
-    def clear_clock_quarantine(self, reconciled_by: str, now: datetime) -> None:
-        """Record an operator reconciliation: clear the quarantine and reset the mark to ``now``."""
-        _require_text("reconciled_by", reconciled_by)
+    def clear_clock_quarantine(
+        self,
+        *,
+        operator: OperatorAuthority,
+        trusted_time_evidence: str,
+        accepted_at: datetime,
+        now: datetime,
+    ) -> None:
+        """Recover from a backward-clock alarm as an audited administrative action.
+
+        Per the approved clock policy it needs an authenticated operator and trusted-time evidence,
+        records the previous and the accepted timestamps in an append-only log, and revalidates every
+        pending reservation: one that had already expired at the previous mark is marked expired for
+        good, so the accepted (possibly earlier) time cannot revive it. Consumed, revoked and uncertain
+        authority is never revived because nothing here un-consumes or un-revokes anything.
+        """
+        reference = operator.authorize("clear_clock_quarantine", subject="clock")
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to clear a clock quarantine")
+        _require_text("trusted_time_evidence", trusted_time_evidence)
+        _require_aware(accepted_at)
         _require_aware(now)
         with self._immediate() as db:
+            row = db.execute("SELECT utc, quarantined FROM clock_high_water WHERE id = 1").fetchone()
+            if row is None or not row[1]:
+                raise AttemptStateError("no clock quarantine to clear")
+            previous = datetime.fromisoformat(row[0])
+            expired = 0
+            pending = db.execute(
+                "SELECT reservation_id, expires_at FROM reservations WHERE consumed_attempt_id IS NULL"
+            ).fetchall()
+            for reservation_id, expires_at in pending:
+                if datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC) <= previous:
+                    db.execute(
+                        "UPDATE reservations SET consumed_attempt_id = ? WHERE reservation_id = ?",
+                        (f"expired:{reservation_id}", reservation_id),
+                    )
+                    expired += 1
             db.execute(
-                "INSERT INTO clock_high_water (id, utc, quarantined, reconciled_by)"
-                " VALUES (1, ?, 0, ?) ON CONFLICT(id) DO UPDATE SET utc = excluded.utc,"
-                " quarantined = 0, reconciled_by = excluded.reconciled_by",
-                (_now_text(now), reconciled_by),
+                "INSERT INTO clock_reconciliations (reconciled_by, trusted_time_evidence, previous_utc,"
+                " accepted_utc, expired_reservations, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    reference, trusted_time_evidence, _now_text(previous), _now_text(accepted_at),
+                    expired, _now_text(now),
+                ),
+            )
+            db.execute(
+                "UPDATE clock_high_water SET utc = ?, quarantined = 0 WHERE id = 1",
+                (_now_text(accepted_at),),
             )
 
     def build_abandon_attestation(

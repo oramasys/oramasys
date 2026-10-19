@@ -170,7 +170,8 @@ def consume_reservation(
         raise ReservationRefused("reservation_unknown")
     stored_digest, expires_at, consumed_by = row
     if consumed_by is not None:
-        raise ReservationRefused("reservation_consumed")
+        expired = consumed_by.startswith("expired:")  # set by a clock reconciliation
+        raise ReservationRefused("reservation_expired" if expired else "reservation_consumed")
     if scope.digest() != stored_digest:
         raise ReservationRefused("scope_mismatch")
     if _stamp(now) >= expires_at:

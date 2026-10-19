@@ -15,7 +15,7 @@ PR to `main`; the open items below stay closed until the operator decides them.
 | Window and deadline | `finalization_window.py` | A finalization is requested only with at least 15 s left (exactly 15.0 allowed); deadlines read an injected monotonic clock |
 | Circuit breaker | `circuit_breaker.py` | Opens on the 5th consecutive authenticated failure, one probe per 15 s, closes only on a usable response, a signed refusal is not a failure, alert after 120 s |
 | Availability gate | `issuer_availability.py` | Deadline, then window (finalization only), then breaker; a refusal is the visible status `dispatch.issuer_unavailable`; bounded identical-retry delay |
-| Durable clock mark | `observe_clock`, `clear_clock_quarantine` | A governed store persists the UTC high-water mark; a backward step quarantines dispatch until an operator reconciliation names a reference; it survives restart |
+| Durable clock mark | `observe_clock`, `clear_clock_quarantine` | A governed store persists the UTC high-water mark; a backward step quarantines dispatch and survives restart. Recovery is an audited administrative action (below) |
 | Consumer abandon | `build_abandon_attestation`, `record_abandon_outcome` | Requires the committed fence and no 4.2 commit; the attestation has the issuer's eight fields; the authenticated outcome must name this attempt, permit and attestation digest, ends the attempt and records `release_authorized` |
 | Sender precondition | `begin_send` | Refused (`send_precondition_failed`) unless the outbox row is complete, the attempt is authorized, not fenced and not abandoned |
 
@@ -25,6 +25,14 @@ PR to `main`; the open items below stay closed until the operator decides them.
     nothing" invariant therefore excludes the clock mark.
 20. The retry delay is `min(4 s, 0.5 s * 2^failures)` and is refused when it exceeds the remaining budget; the
     numbers are starting values, not safety boundaries.
+22. **Clock recovery follows the approved clock policy** (`CONTRACT-DURABLE-HITL-EFFECTS.md` section 5, and
+    the draft's 8.2 step 6): `clear_clock_quarantine(operator=, trusted_time_evidence=, accepted_at=, now=)`
+    needs an injected `OperatorAuthority` (no default; a None or blank reference raises `OperatorRefused`),
+    non-blank trusted-time evidence and an existing quarantine. It appends the previous and the accepted
+    timestamps, the evidence and the operator reference to `clock_reconciliations` (append-only), resets the
+    mark to the accepted time (which may be earlier than the poisoned mark), and revalidates every pending
+    reservation: one whose expiry is at or before the previous mark is marked `expired:<id>` for good, so the
+    accepted time cannot revive it. Consumed, revoked and uncertain authority is untouched.
 21. The clock mark's skew is the constructor argument `clock_skew_tolerance` (signed policy supplies the value).
     The default is zero, so any backward step quarantines (fail closed). A tolerated step never lowers the
     mark, a step one microsecond past the tolerance quarantines, an existing quarantine is never relaxed by a
@@ -40,7 +48,9 @@ PR to `main`; the open items below stay closed until the operator decides them.
   PRs merged and a paired pin bump.
 
 ## Decisions needed before serving is enabled
-- **Skew value:** a signed-policy `clock_skew_tolerance` for time-sync corrections, restored virtual
-  machines and brief clock jumps. Until one is chosen the store is strict (zero).
-- **Who clears a clock quarantine:** `clear_clock_quarantine` needs a named reconciliation reference; the
-  role that may call it, and how that role is authenticated, are not specified yet.
+- **Skew value:** the approved clock policy is strict: a clock earlier than the mark is refused and alerted
+  (`CONTRACT-DURABLE-HITL-EFFECTS.md` section 5), so zero is the contract default. A non-zero
+  `clock_skew_tolerance` would be a deliberate relaxation needing a policy amendment; the 60-second figure
+  in the draft (13.2) is the provider `NOT_ACCEPTED` window allowance, a different use.
+- **Wiring the operator authenticator:** the role is the operator (an audited administrative action); the
+  port exists and has no default. Binding it to the existing P5 trusted-human approval path is still to do.
