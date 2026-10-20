@@ -8,6 +8,7 @@ no serving, no pin change. `ORAMA_GRANT_SERVING` stays unset.
 PR to `main`; the open items below stay closed until the operator decides them.
 
 ## What it adds
+
 | Piece | Where | Contract |
 |-------|-------|----------|
 | Request validators | `dispatch_consumer_wire.py` | The 12-field permit request and 8-field finalization request, validated like the issuer wires |
@@ -19,12 +20,17 @@ PR to `main`; the open items below stay closed until the operator decides them.
 | Consumer abandon | `build_abandon_attestation`, `record_abandon_outcome` | Requires the committed fence and no 4.2 commit; the attestation has the issuer's eight fields; the authenticated outcome must name this attempt, permit and attestation digest, ends the attempt and records `release_authorized` |
 | Sender precondition | `begin_send` | Refused (`send_precondition_failed`) unless the outbox row is complete, the attempt is authorized, not fenced and not abandoned |
 
-## Choices to confirm (FREEZE-CHOICE 18 to 20)
+## Choices to confirm (FREEZE-CHOICE 18 to 22)
 18. An event in a catch-up envelope without an integer `version` is `catchup_malformed`.
 19. A governed authorization records the clock observation durably even when it refuses; the "refused writes
     nothing" invariant therefore excludes the clock mark.
 20. The retry delay is `min(4 s, 0.5 s * 2^failures)` and is refused when it exceeds the remaining budget; the
     numbers are starting values, not safety boundaries.
+21. The clock mark's skew is the constructor argument `clock_skew_tolerance` (signed policy supplies the value).
+    The default is zero, so any backward step quarantines (fail closed). A tolerated step never lowers the
+    mark, a step one microsecond past the tolerance quarantines, an existing quarantine is never relaxed by a
+    larger tolerance, and a value outside zero to five minutes is refused as a misconfiguration guard. The
+    five-minute ceiling is a sanity bound, not a recommended value.
 22. **Clock recovery follows the approved clock policy** (`CONTRACT-DURABLE-HITL-EFFECTS.md` section 5, and
     the draft's 8.2 step 6): `clear_clock_quarantine(operator=, trusted_time_evidence=, accepted_at=, now=)`
     needs an injected `OperatorAuthority` (no default; a None or blank reference raises `OperatorRefused`),
@@ -33,11 +39,6 @@ PR to `main`; the open items below stay closed until the operator decides them.
     mark to the accepted time (which may be earlier than the poisoned mark), and revalidates every pending
     reservation: one whose expiry is at or before the previous mark is marked `expired:<id>` for good, so the
     accepted time cannot revive it. Consumed, revoked and uncertain authority is untouched.
-21. The clock mark's skew is the constructor argument `clock_skew_tolerance` (signed policy supplies the value).
-    The default is zero, so any backward step quarantines (fail closed). A tolerated step never lowers the
-    mark, a step one microsecond past the tolerance quarantines, an existing quarantine is never relaxed by a
-    larger tolerance, and a value outside zero to five minutes is refused as a misconfiguration guard. The
-    five-minute ceiling is a sanity bound, not a recommended value.
 
 ## Limits and open items
 - Performing the reservation release belongs to the reservation owner; this store only records
