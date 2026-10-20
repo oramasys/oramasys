@@ -28,12 +28,15 @@ class FakeClock:
     """Injected fake clock with manually controlled monotonic time."""
 
     def __init__(self, initial: float = 100.0) -> None:
+        """Start the fake clock at ``initial`` seconds."""
         self.now = initial
 
     def __call__(self) -> float:
+        """Return the current fake time."""
         return self.now
 
     def advance(self, seconds: float) -> None:
+        """Move the fake time forward by ``seconds``."""
         self.now += seconds
 
 
