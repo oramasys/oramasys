@@ -18,15 +18,18 @@ class CatchupRefused(Exception):
     """An envelope was refused; ``reason`` is a stable machine-readable code."""
 
     def __init__(self, reason: str) -> None:
+        """Record the stable machine-readable refusal reason."""
         super().__init__(reason)
         self.reason = reason
 
 
 def _is_int(value: object) -> bool:
+    """Return True for a real integer; a bool does not count as one."""
     return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _event_version(event: object) -> int:
+    """Return the integer version of one envelope event, or refuse it as malformed."""
     if not isinstance(event, Mapping) or not _is_int(event.get("version")):
         raise CatchupRefused("catchup_malformed")
     return int(event["version"])

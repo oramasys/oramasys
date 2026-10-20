@@ -111,6 +111,7 @@ class ClockQuarantined(Exception):
     """Dispatch is quarantined because the consumer clock stepped backward; ``reason`` is a code."""
 
     def __init__(self, reason: str) -> None:
+        """Record the stable machine-readable refusal reason."""
         super().__init__(reason)
         self.reason = reason
 

@@ -18,6 +18,7 @@ DEFAULT_ALERT_AFTER_SECONDS: Final = 120.0
 
 
 def _positive_finite(name: str, value: float) -> float:
+    """Return ``value`` as a float, requiring a positive finite number."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be a positive finite number")
     return float(value)
@@ -33,6 +34,7 @@ class CircuitBreaker:
         probe_interval: float = DEFAULT_PROBE_INTERVAL_SECONDS,
         alert_after: float = DEFAULT_ALERT_AFTER_SECONDS,
     ) -> None:
+        """Validate the limits and start closed with no recorded failures."""
         if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
             raise ValueError("threshold must be a positive integer")
         self._clock = clock
@@ -91,6 +93,7 @@ class CircuitBreaker:
         return self._clock() - self._non_closed_since >= self._alert_after
 
     def _open(self) -> None:
+        """Open the breaker now, restart the probe interval and start the alert clock."""
         now = self._clock()
         self.state = "open"
         self._opened_at = now

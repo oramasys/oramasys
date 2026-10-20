@@ -18,6 +18,7 @@ class Deadline:
     """An absolute monotonic deadline read against an injected clock."""
 
     def __init__(self, expires_monotonic: float, clock: Callable[[], float]) -> None:
+        """Store the absolute monotonic expiry and the injected clock."""
         if not isinstance(expires_monotonic, (int, float)) or not math.isfinite(expires_monotonic):
             raise ValueError("expires_monotonic must be finite")
         self._expires = float(expires_monotonic)

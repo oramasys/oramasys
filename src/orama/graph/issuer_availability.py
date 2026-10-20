@@ -30,6 +30,7 @@ class CallDecision:
 
 
 def _refuse(reason: str) -> CallDecision:
+    """Build the visible issuer-unavailable refusal for ``reason``."""
     return CallDecision(False, ISSUER_UNAVAILABLE_STATUS, reason)
 
 
