@@ -8,6 +8,7 @@ writes nothing unless every rule holds.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterator, Mapping, Sequence
@@ -15,10 +16,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, TypeAlias
 
 from orama.graph.dispatch_consumer_wire import (
     GENESIS_EVENT_DIGEST,
+    _sha256_hex,
+    canonical_bytes,
     SignatureVerifier,
     WireError,
     event_digest,
@@ -31,6 +35,15 @@ from orama.graph.dispatch_consumer_wire import (
     validate_finalization_wire,
     validate_permit_wire,
 )
+from orama.graph.effect_outcomes import OutcomeRefused, check_transition
+from orama.graph.effect_proposals import (
+    PROPOSAL_SCHEMA,
+    EffectScope,
+    bind_scope_to_permit,
+    consume_reservation,
+    record_proposal,
+    reserve,
+)
 from orama.graph.private_store import prepare_private_store
 
 AuthorizationRule: TypeAlias = Literal["rule1", "rule2", "rule3", "rule4", "rule5", "rule6"]
@@ -41,6 +54,7 @@ AUTHORIZATION_RULES: Final[frozenset[str]] = frozenset(
 _BUSY_TIMEOUT_SECONDS: Final = 30.0
 _LIVE_STATES: Final = frozenset({"created", "transmitted"})
 _MAX_LIFETIME: Final = timedelta(seconds=90)
+MAX_CLOCK_SKEW_TOLERANCE: Final = timedelta(minutes=5)
 _DIVERGENCE_REASONS: Final = frozenset({"divergence", "event_digest_mismatch"})
 _OUTBOX_REQUIRED: Final = (
     "permit_id", "permit_digest", "finalization_digest", "r_p", "r_f", "authority_pair",
@@ -64,6 +78,42 @@ class AuthorizationRefused(Exception):
         self.rule = rule
         self.reason = reason
         self.fork = fork
+
+
+class OperatorAuthority(Protocol):
+    """Injected port that authenticates the operator for an audited administrative action."""
+
+    def authorize(self, operation: str, *, subject: str) -> str | None:
+        """Return a non-blank operator reference, or None when the caller is not authorized."""
+
+
+class OperatorRefused(Exception):
+    """The operator port did not authorize the call; nothing was read or written."""
+
+
+class IssuerOutcomeAuthenticator(Protocol):
+    """Trusted adapter bound to the expected issuer and its authenticated response evidence."""
+
+    def verify(self, outcome: str, record: Mapping[str, str]) -> bool:
+        """Authenticate the exact outcome and complete record against issuer response evidence.
+
+        Matching identifiers alone is insufficient. Implementations must verify a signed response
+        or bind these values to a response obtained over an authenticated issuer channel.
+        """
+        ...
+
+
+class IssuerOutcomeRefused(Exception):
+    """Issuer response authentication failed; no abandonment or release was recorded."""
+
+
+class ClockQuarantined(Exception):
+    """Dispatch is quarantined because the consumer clock stepped backward; ``reason`` is a code."""
+
+    def __init__(self, reason: str) -> None:
+        """Record the stable machine-readable refusal reason."""
+        super().__init__(reason)
+        self.reason = reason
 
 
 class AttemptStateError(Exception):
@@ -162,7 +212,35 @@ _SCHEMA: Final = (
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, permit_id TEXT NOT NULL,"
     " permit_digest TEXT NOT NULL, finalization_digest TEXT NOT NULL, r_p INTEGER NOT NULL,"
     " r_f INTEGER NOT NULL, authority_pair TEXT NOT NULL, acked_through INTEGER NOT NULL,"
-    " payload TEXT)",
+    " payload TEXT,"
+    " outcome TEXT NOT NULL DEFAULT 'unknown' CHECK (outcome IN"
+    " ('confirmed', 'failed', 'unknown')),"
+    " outcome_evidence TEXT,"
+    " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
+    *PROPOSAL_SCHEMA,
+    "CREATE TABLE IF NOT EXISTS clock_high_water ("
+    " id INTEGER PRIMARY KEY CHECK (id = 1), utc TEXT NOT NULL,"
+    " quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)))",
+    "CREATE TABLE IF NOT EXISTS clock_reconciliations ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT, reconciled_by TEXT NOT NULL,"
+    " trusted_time_evidence TEXT NOT NULL, previous_utc TEXT NOT NULL, accepted_utc TEXT NOT NULL,"
+    " expired_reservations INTEGER NOT NULL, recorded_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS abandon_attestations ("
+    " attempt_id TEXT PRIMARY KEY, permit_id TEXT NOT NULL, attestation_digest TEXT NOT NULL,"
+    " attestation TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS abandon_outcomes ("
+    " attempt_id TEXT PRIMARY KEY, permit_id TEXT NOT NULL, outcome TEXT NOT NULL,"
+    " attestation_digest TEXT NOT NULL, disposition_ref TEXT NOT NULL,"
+    " issuer_recorded_at TEXT NOT NULL, release_authorized INTEGER NOT NULL DEFAULT 1"
+    " CHECK (release_authorized = 1), recorded_at TEXT NOT NULL)",
+)
+_ABANDON_CAUSES: Final = frozenset({"transient_delay", "cancellation", "loss"})
+_ABANDON_OUTCOMES: Final = frozenset({"abandon.recorded", "abandon.already_abandoned"})
+_OUTBOX_T3_COLUMNS: Final = (
+    ("outcome", "TEXT NOT NULL DEFAULT 'unknown' CHECK (outcome IN"
+     " ('confirmed', 'failed', 'unknown'))"),
+    ("outcome_evidence", "TEXT"),
+    ("send_started", "INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1))"),
 )
 
 
@@ -439,9 +517,38 @@ def _write_authorization(
 class SqliteAttemptStore:
     """Durable consumer attempt store; every write is one ``BEGIN IMMEDIATE`` transaction."""
 
-    def __init__(self, path: Path | str) -> None:
-        """Open (creating privately) the WAL-mode store and its schema."""
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        governed: bool = False,
+        clock_skew_tolerance: timedelta = timedelta(0),
+        abandon_authenticator: IssuerOutcomeAuthenticator | None = None,
+    ) -> None:
+        """Open (creating privately) the WAL-mode store and its schema.
+
+        ``governed`` makes ``authorize_dispatch`` require a matching, live, unused reservation
+        for the attempt's reservation id. It defaults to False only so slice-1 callers keep
+        working; any serving path must construct the store with ``governed=True``.
+
+        ``clock_skew_tolerance`` is the signed-policy skew a backward clock step may stay within
+        before dispatch is quarantined. The specification leaves the value to signed policy, so the
+        default is zero (any backward step quarantines); a value above ``MAX_CLOCK_SKEW_TOLERANCE``
+        is refused as a misconfiguration guard. A tolerated step never lowers the high-water mark.
+
+        ``abandon_authenticator`` must bind responses to the expected issuer and verify their
+        complete contents. Without it, abandonment outcomes are refused before any write.
+        """
+        if (
+            not isinstance(clock_skew_tolerance, timedelta)
+            or clock_skew_tolerance < timedelta(0)
+            or clock_skew_tolerance > MAX_CLOCK_SKEW_TOLERANCE
+        ):
+            raise ValueError("clock_skew_tolerance must be a timedelta from zero to five minutes")
+        self._clock_skew = clock_skew_tolerance
+        self._abandon_authenticator = abandon_authenticator
         prepared = prepare_private_store(path)
+        self._governed = governed
         self._lock = threading.Lock()
         self._db = sqlite3.connect(
             str(prepared),
@@ -453,6 +560,14 @@ class SqliteAttemptStore:
         self._db.execute("PRAGMA synchronous=FULL")
         for statement in _SCHEMA:
             self._db.execute(statement)
+        self._migrate_outbox()
+
+    def _migrate_outbox(self) -> None:
+        """Add the T3 outcome columns to an outbox created before they existed."""
+        present = {row[1] for row in self._db.execute("PRAGMA table_info(outbox)")}
+        for name, definition in _OUTBOX_T3_COLUMNS:
+            if name not in present:
+                self._db.execute(f"ALTER TABLE outbox ADD COLUMN {name} {definition}")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -614,14 +729,20 @@ class SqliteAttemptStore:
         revocations: RevocationPort,
         issuer_id: str,
         expected: ExpectedBinding,
+        scope: EffectScope | None = None,
     ) -> None:
-        """Step 4.3: check the six rules and write intent, use and outbox atomically."""
+        """Step 4.3: check the six rules and write intent, use and outbox atomically.
+
+        A governed store also consumes the attempt's reservation in the same transaction.
+        """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
+        if self._governed:
+            self.observe_clock(now)
         try:
             self._authorize_in_transaction(
                 attempt_id, permit_wire, finalization_wire, now,
-                verifier, gates, revocations, issuer_id, expected,
+                verifier, gates, revocations, issuer_id, expected, scope,
             )
         except AuthorizationRefused as refusal:
             if (
@@ -644,16 +765,26 @@ class SqliteAttemptStore:
         revocations: RevocationPort,
         issuer_id: str,
         expected: ExpectedBinding,
+        scope: EffectScope | None,
     ) -> None:
         """Run the six rules inside one rolled-back-on-refusal transaction."""
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
+            if self._governed:
+                clock = db.execute(
+                    "SELECT quarantined FROM clock_high_water WHERE id = 1"
+                ).fetchone()
+                if clock is None or clock[0]:
+                    raise ClockQuarantined("clock_quarantined")
+                consume_reservation(db, attempt.reservation_id, attempt_id, scope, now)
             try:
                 permit = validate_permit_wire(permit_wire)
                 fin = validate_finalization_wire(finalization_wire)
             except WireError as error:
                 raise AuthorizationRefused("rule1", "malformed_wire") from error
             _check_rule1(db, attempt, permit, now, verifier, expected)
+            if self._governed:
+                bind_scope_to_permit(scope, permit)
             _check_acks(db, issuer_id, permit)
             if revocations.revoked(grant_id=attempt.grant_id, issuer_id=issuer_id):
                 raise AuthorizationRefused("rule4", "grant_revoked")
@@ -662,6 +793,273 @@ class SqliteAttemptStore:
             pair = expected.authority_pair()
             _check_rule6(db, attempt, gates, pair, now)
             _write_authorization(db, attempt, permit, fin, issuer_id, pair, now)
+
+    def observe_clock(self, now: datetime) -> None:
+        """Advance the durable UTC high-water mark; a backward step quarantines dispatch.
+
+        The mark survives restarts. Once quarantined, every call refuses until
+        ``clear_clock_quarantine`` records an authenticated operator reconciliation.
+        """
+        _require_aware(now)
+        stamp = _now_text(now)
+        regressed = False
+        with self._immediate() as db:
+            row = db.execute("SELECT utc, quarantined FROM clock_high_water WHERE id = 1").fetchone()
+            if row is None:
+                db.execute("INSERT INTO clock_high_water (id, utc) VALUES (1, ?)", (stamp,))
+            elif row[1]:
+                raise ClockQuarantined("clock_quarantined")
+            else:
+                mark = datetime.fromisoformat(row[0])
+                if now < mark - self._clock_skew:
+                    db.execute("UPDATE clock_high_water SET quarantined = 1 WHERE id = 1")
+                    regressed = True
+                elif now > mark:
+                    db.execute("UPDATE clock_high_water SET utc = ? WHERE id = 1", (stamp,))
+        if regressed:
+            raise ClockQuarantined("clock_regressed")
+
+    def clear_clock_quarantine(
+        self,
+        *,
+        operator: OperatorAuthority,
+        trusted_time_evidence: str,
+        accepted_at: datetime,
+        now: datetime,
+    ) -> None:
+        """Recover from a backward-clock alarm as an audited administrative action.
+
+        Per the approved clock policy it needs an authenticated operator and trusted-time evidence,
+        records the previous and the accepted timestamps in an append-only log, and revalidates every
+        pending reservation: one that had already expired at the previous mark is marked expired for
+        good, so the accepted (possibly earlier) time cannot revive it. Consumed, revoked and uncertain
+        authority is never revived because nothing here un-consumes or un-revokes anything.
+        """
+        reference = operator.authorize("clear_clock_quarantine", subject="clock")
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to clear a clock quarantine")
+        _require_text("trusted_time_evidence", trusted_time_evidence)
+        _require_aware(accepted_at)
+        _require_aware(now)
+        with self._immediate() as db:
+            row = db.execute("SELECT utc, quarantined FROM clock_high_water WHERE id = 1").fetchone()
+            if row is None or not row[1]:
+                raise AttemptStateError("no clock quarantine to clear")
+            previous = datetime.fromisoformat(row[0])
+            expired = 0
+            pending = db.execute(
+                "SELECT reservation_id, expires_at FROM reservations WHERE consumed_attempt_id IS NULL"
+            ).fetchall()
+            for reservation_id, expires_at in pending:
+                if datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC) <= previous:
+                    db.execute(
+                        "UPDATE reservations SET consumed_attempt_id = ? WHERE reservation_id = ?",
+                        (f"expired:{reservation_id}", reservation_id),
+                    )
+                    expired += 1
+            db.execute(
+                "INSERT INTO clock_reconciliations (reconciled_by, trusted_time_evidence, previous_utc,"
+                " accepted_utc, expired_reservations, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    reference, trusted_time_evidence, _now_text(previous), _now_text(accepted_at),
+                    expired, _now_text(now),
+                ),
+            )
+            db.execute(
+                "UPDATE clock_high_water SET utc = ?, quarantined = 0 WHERE id = 1",
+                (_now_text(accepted_at),),
+            )
+
+    def build_abandon_attestation(
+        self, attempt_id: str, permit_id: str, cause: str, fencing_epoch: int, now: datetime
+    ) -> dict[str, Any]:
+        """Build (and durably keep) the abandon attestation for a fenced, uncommitted attempt.
+
+        The fence must already be committed and step 4.3 must not have committed. The attestation is
+        the consumer's own statement; the issuer records it as audit evidence and does not verify it.
+        """
+        _require_text("permit_id", permit_id)
+        _require_aware(now)
+        if cause not in _ABANDON_CAUSES:
+            raise AttemptStateError("cause must be transient_delay, cancellation or loss")
+        if isinstance(fencing_epoch, bool) or not isinstance(fencing_epoch, int) or fencing_epoch < 1:
+            raise AttemptStateError("fencing_epoch must be an integer of at least 1")
+        with self._immediate() as db:
+            attempt = _load_attempt(db, attempt_id)
+            committed = db.execute(
+                "SELECT 1 FROM grant_use WHERE attempt_id = ? UNION ALL"
+                " SELECT 1 FROM dispatch_intents WHERE attempt_id = ?",
+                (attempt_id, attempt_id),
+            ).fetchone()
+            if not attempt.fenced:
+                raise AttemptStateError("the fence must be committed before attesting")
+            if committed is not None or attempt.state == "authorized":
+                raise AttemptStateError("step 4.3 committed for the attempt; it cannot be abandoned")
+            stored = db.execute(
+                "SELECT permit_id, attestation_digest, attestation FROM abandon_attestations"
+                " WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if stored is not None:
+                try:
+                    kept = json.loads(stored[2])
+                except json.JSONDecodeError as error:
+                    raise AttemptStateError("stored abandon attestation is invalid") from error
+                if not isinstance(kept, dict) or _sha256_hex(canonical_bytes(kept)) != stored[1]:
+                    raise AttemptStateError("stored abandon attestation is invalid")
+                if (
+                    stored[0] != permit_id
+                    or kept.get("cause") != cause
+                    or kept.get("consumer_fencing_epoch") != fencing_epoch
+                ):
+                    raise AttemptStateError("a different attestation already exists for the attempt")
+                return kept
+            body = {
+                "attempt_id": attempt_id, "permit_id": permit_id, "cause": cause,
+                "consumer_fencing_epoch": fencing_epoch,
+                "fence_evidence": f"fence committed for attempt {attempt_id} in state {attempt.state}",
+                "non_commit_evidence": "no grant_use row and no dispatch_intents row for the attempt",
+                "release_pending_record": f"reservation {attempt.reservation_id} release pending",
+                "no_intent_exists": True,
+            }
+            digest = _sha256_hex(canonical_bytes(body))
+            db.execute(
+                "INSERT INTO abandon_attestations (attempt_id, permit_id, attestation_digest,"
+                " attestation, created_at) VALUES (?, ?, ?, ?, ?)",
+                (attempt_id, permit_id, digest, canonical_bytes(body).decode("utf-8"), _now_text(now)),
+            )
+            return body
+
+    def record_abandon_outcome(
+        self, attempt_id: str, outcome: str, record: Mapping[str, Any], now: datetime
+    ) -> None:
+        """Durably record the authenticated issuer abandon outcome and end the attempt.
+
+        The record must name this attempt and permit and carry the digest of the attestation this
+        store built. The outcome authorizes the reservation release (``release_authorized``);
+        performing the release belongs to the reservation owner and reads this record. Idempotent
+        for the same immutable disposition, including Phylax's ``abandon.already_abandoned``
+        retry response. The injected authenticator must authenticate every response, including retries.
+        """
+        _require_aware(now)
+        if outcome not in _ABANDON_OUTCOMES:
+            raise AttemptStateError("unknown abandon outcome")
+        fields = {"attempt_id", "permit_id", "attestation_digest", "disposition_ref", "recorded_at"}
+        authenticated_record = dict(record)
+        if set(authenticated_record) != fields:
+            raise AttemptStateError("the abandon record has invalid fields")
+        for name, value in authenticated_record.items():
+            _require_text(name, value)
+        if self._abandon_authenticator is None or self._abandon_authenticator.verify(
+            outcome, MappingProxyType(authenticated_record)
+        ) is not True:
+            raise IssuerOutcomeRefused("issuer abandon outcome is not authenticated")
+        record = authenticated_record
+        with self._immediate() as db:
+            sent = db.execute(
+                "SELECT permit_id, attestation_digest FROM abandon_attestations WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if sent is None:
+                raise AttemptStateError("no attestation was built for the attempt")
+            if (
+                record.get("attempt_id") != attempt_id
+                or record.get("permit_id") != sent[0]
+                or record.get("attestation_digest") != sent[1]
+            ):
+                raise AttemptStateError("the abandon record does not match the attestation sent")
+            reference = record.get("disposition_ref")
+            issuer_at = record.get("recorded_at")
+            _require_text("disposition_ref", reference)
+            _require_text("recorded_at", issuer_at)
+            existing = db.execute(
+                "SELECT permit_id, attestation_digest, disposition_ref, issuer_recorded_at"
+                " FROM abandon_outcomes WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if existing is not None:
+                # Both success labels refer to the same immutable Phylax disposition.
+                if tuple(existing) != (sent[0], sent[1], reference, issuer_at):
+                    raise AttemptStateError("a different abandon outcome is already recorded")
+                return
+            db.execute(
+                "INSERT INTO abandon_outcomes (attempt_id, permit_id, outcome, attestation_digest,"
+                " disposition_ref, issuer_recorded_at, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (attempt_id, sent[0], outcome, sent[1], reference, issuer_at, _now_text(now)),
+            )
+            db.execute(
+                "UPDATE dispatch_attempts SET state = 'abandoned' WHERE attempt_id = ?", (attempt_id,)
+            )
+
+    def abandon_outcome(self, attempt_id: str) -> dict[str, Any] | None:
+        """Return the recorded abandon outcome for the attempt, or None."""
+        with self._lock:
+            cursor = self._db.execute("SELECT * FROM abandon_outcomes WHERE attempt_id = ?", (attempt_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return dict(zip((c[0] for c in cursor.description), row, strict=True))
+
+    def propose(self, proposal_id: str, scope: EffectScope, now: datetime) -> None:
+        """Durably record a proposal; it carries no authorization state."""
+        _require_text("proposal_id", proposal_id)
+        _require_aware(now)
+        with self._immediate() as db:
+            record_proposal(db, proposal_id, scope, now)
+
+    def reserve(
+        self,
+        reservation_id: str,
+        proposal_id: str,
+        scope: EffectScope,
+        expires_at: datetime,
+        now: datetime,
+    ) -> None:
+        """Bind the proposal's scope to a single-use, expiring reservation."""
+        _require_text("reservation_id", reservation_id)
+        _require_aware(now)
+        _require_aware(expires_at)
+        with self._immediate() as db:
+            reserve(db, reservation_id, proposal_id, scope, expires_at, now)
+
+    def begin_send(self, attempt_id: str) -> None:
+        """Durably mark the one allowed send as started; a second send is always refused."""
+        with self._immediate() as db:
+            row = db.execute(
+                "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise AttemptStateError("no authorized outbox row for the attempt")
+            attempt = _load_attempt(db, attempt_id)
+            complete = db.execute(
+                "SELECT " + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
+                + " FROM outbox WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if attempt.fenced or attempt.state != "authorized" or not complete[0]:
+                raise OutcomeRefused("send_precondition_failed")
+            if row[0]:
+                raise OutcomeRefused("send_already_started")
+            db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+
+    def record_outcome(
+        self, attempt_id: str, outcome: str, evidence_ref: str | None = None
+    ) -> None:
+        """Settle ``unknown`` to ``confirmed`` or ``failed`` with an evidence reference."""
+        with self._immediate() as db:
+            row = db.execute(
+                "SELECT outcome, send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise AttemptStateError("no authorized outbox row for the attempt")
+            current, started = row
+            if not started:
+                raise OutcomeRefused("send_not_started")
+            check_transition(current, outcome, evidence_ref)
+            db.execute(
+                "UPDATE outbox SET outcome = ?, outcome_evidence = ? WHERE attempt_id = ?",
+                (outcome, evidence_ref, attempt_id),
+            )
 
     def outbox_row(self, attempt_id: str) -> dict[str, Any] | None:
         """Return the outbox row for the attempt as a dict, or None."""
