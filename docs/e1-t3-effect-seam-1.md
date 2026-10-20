@@ -8,6 +8,7 @@ transport, no retry, no serving, no pin change. `ORAMA_GRANT_SERVING` stays unse
 provider transport, retry of `unknown`, serving and production pin promotion stay closed.
 
 ## What it adds
+
 | Piece | Where | Contract |
 |-------|-------|----------|
 | Proposal | `effect_proposals` table, `SqliteAttemptStore.propose` | Records the six-field scope (principal, graph, policy hash, operation digest, artifact identity, destination). Carries no authorization state; exists before any grant lookup. |
