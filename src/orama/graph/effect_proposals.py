@@ -38,6 +38,7 @@ class ReservationRefused(Exception):
     """A proposal, reservation or scope check failed; ``reason`` is a stable code."""
 
     def __init__(self, reason: str) -> None:
+        """Record the stable machine-readable refusal reason."""
         super().__init__(reason)
         self.reason = reason
 
