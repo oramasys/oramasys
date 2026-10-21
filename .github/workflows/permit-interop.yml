@@ -28,6 +28,9 @@ jobs:
           PIN="$(tr -d '[:space:]' < requirements/compatibility-phylax-permit.txt)"
           echo "$PIN" | grep -Eq '^[0-9a-f]{40}$'
           echo "commit=$PIN" >> "$GITHUB_OUTPUT"
+          PROBE_PIN="$(tr -d '[:space:]' < requirements/compatibility-phylax-slice2-probe.txt)"
+          echo "$PROBE_PIN" | grep -Eq '^[0-9a-f]{40}$'
+          echo "probe_commit=$PROBE_PIN" >> "$GITHUB_OUTPUT"
       - name: Check out Phylax at the pinned commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -35,13 +38,21 @@ jobs:
           ref: ${{ steps.pin.outputs.commit }}
           path: phylax-pinned
           persist-credentials: false
+      # Probe source only: do not use this checkout to execute issuer code.
+      - name: Check out the pinned slice 2 probe source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: oramasys/phylax
+          ref: ${{ steps.pin.outputs.probe_commit }}
+          path: phylax-probe-pinned
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Install PyNaCl only
         run: python -m pip install 'PyNaCl>=1.5'
       - name: Probe copies must be byte-identical
-        run: cmp src/tests/interop/c2_interop_probe.py phylax-pinned/src/tests/interop/c2_interop_probe.py
+        run: bash scripts/check-permit-probe-parity.sh phylax-pinned phylax-probe-pinned
       - name: Run the interop probe
         run: python src/tests/interop/c2_interop_probe.py "$GITHUB_WORKSPACE/phylax-pinned" "$GITHUB_WORKSPACE"
       - name: Run the slice 2 interop probe
