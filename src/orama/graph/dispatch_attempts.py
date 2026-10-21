@@ -740,10 +740,12 @@ class SqliteAttemptStore:
         if self._governed:
             self.observe_clock(now)
         try:
-            self._authorize_in_transaction(
+            clock_refusal = self._authorize_in_transaction(
                 attempt_id, permit_wire, finalization_wire, now,
                 verifier, gates, revocations, issuer_id, expected, scope,
             )
+            if clock_refusal is not None:
+                raise ClockQuarantined(clock_refusal)
         except AuthorizationRefused as refusal:
             if (
                 refusal.rule == "rule5"
@@ -766,16 +768,21 @@ class SqliteAttemptStore:
         issuer_id: str,
         expected: ExpectedBinding,
         scope: EffectScope | None,
-    ) -> None:
-        """Run the six rules inside one rolled-back-on-refusal transaction."""
+    ) -> str | None:
+        """Check clock and authorization atomically; commit a clock latch before refusing."""
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
             if self._governed:
                 clock = db.execute(
-                    "SELECT quarantined FROM clock_high_water WHERE id = 1"
+                    "SELECT utc, quarantined FROM clock_high_water WHERE id = 1"
                 ).fetchone()
-                if clock is None or clock[0]:
+                if clock is None or clock[1]:
                     raise ClockQuarantined("clock_quarantined")
+                if now < datetime.fromisoformat(clock[0]) - self._clock_skew:
+                    # Return before any authority mutation so the context commits the
+                    # quarantine latch; the public boundary raises after that commit.
+                    db.execute("UPDATE clock_high_water SET quarantined = 1 WHERE id = 1")
+                    return "clock_regressed"
                 consume_reservation(db, attempt.reservation_id, attempt_id, scope, now)
             try:
                 permit = validate_permit_wire(permit_wire)

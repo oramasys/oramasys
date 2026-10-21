@@ -201,6 +201,40 @@ def test_quarantine_committed_between_observation_and_authorization_blocks_dispa
         h.store.close()
 
 
+def test_clock_advance_between_observation_and_authorization_is_durably_quarantined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer peer mark cannot be bypassed by a previously captured authorization time."""
+    h = harness(tmp_path)
+    ready(h, vector_flow())
+    peer = SqliteAttemptStore(h.path, governed=True)
+    observe = h.store.observe_clock
+
+    def advance_after_observation(now: datetime) -> None:
+        """Advance through another SQLite connection after the preflight observation."""
+        observe(now)
+        peer.observe_clock(now + timedelta(seconds=10))
+
+    before = snapshot(h.path)
+    monkeypatch.setattr(h.store, "observe_clock", advance_after_observation)
+    try:
+        with pytest.raises(ClockQuarantined, match="clock_regressed"):
+            authorize(h)
+        after = snapshot(h.path)
+        for table in before.keys() - {"clock_high_water"}:
+            assert after[table] == before[table]
+        assert peer._db.execute("SELECT quarantined FROM clock_high_water").fetchone()[0] == 1
+    finally:
+        peer.close()
+        h.store.close()
+    reopened = SqliteAttemptStore(h.path, governed=True)
+    try:
+        with pytest.raises(ClockQuarantined, match="clock_quarantined"):
+            reopened.observe_clock(NOW + timedelta(hours=1))
+    finally:
+        reopened.close()
+
+
 def test_a_backward_step_quarantines_and_survives_a_restart(tmp_path: Path) -> None:
     """A backward step quarantines and survives a restart."""
     path = db_path(tmp_path)
