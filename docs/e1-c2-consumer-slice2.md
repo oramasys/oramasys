@@ -66,3 +66,14 @@ PR to `main`; the open items below stay closed until the operator decides them.
   in the draft (13.2) is the provider `NOT_ACCEPTED` window allowance, a different use.
 - **Wiring the operator authenticator:** the role is the operator (an audited administrative action); the
   port exists and has no default. Binding it to the existing P5 trusted-human approval path is still to do.
+
+## Part 3 section 3.3: consumer anchor floor (draft implementation)
+
+`SqliteAttemptStore.bootstrap_anchor`, `anchor_record` and `clear_anchor_quarantine`
+(`orama.graph.dispatch_anchor`) implement the consumer-local anchor-floor invariant ratified by the
+operator for section 3.3 only. They are consumer-local: refusals `anchor_floor.permit_below_floor`
+and `anchor_quarantined` are never wire codes. `acked_through` is checkpoint-aware once an anchor is
+persisted. Key trust comes only from an injected `TrustedIssuerKeys` port; there is no production
+adapter, no `governed=True` caller, no transport and no serving path, and `ORAMA_GRANT_SERVING`
+stays unset. Conformance tests: `src/tests/test_dispatch_anchor.py` (mirrors the orama-system suite).
+Not covered: gate order when several rules fail together, and concurrent floor commits.
