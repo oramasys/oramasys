@@ -9,8 +9,10 @@ a unit test here.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -139,6 +141,35 @@ def test_oramasys_import_graph_has_no_nacl_and_no_phylax() -> None:
         capture_output=True, text=True, check=True,
     )
     assert out.stdout.strip() == "OK"
+
+
+def test_pynacl_is_pinned_only_in_the_oracle_environment() -> None:
+    """Real signature tests get PyNaCl without adding crypto to the product."""
+    root = Path(__file__).resolve().parents[2]
+    oracle_lines = {
+        line.split("#", 1)[0].strip()
+        for line in (root / "requirements/compatibility-oracles-py312.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    }
+    assert "PyNaCl==1.6.2" in oracle_lines
+
+    metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = metadata["project"]
+    published = [
+        *metadata["build-system"].get("requires", []),
+        *project.get("dependencies", []),
+        *(dependency
+          for group in project.get("optional-dependencies", {}).values()
+          for dependency in group),
+    ]
+    names = {
+        re.split(r"[ <>=!~;\[@]", dependency.strip(), maxsplit=1)[0]
+        .lower()
+        .replace("_", "-")
+        for dependency in published
+    }
+    assert "pynacl" not in names
 
 
 def test_vocabulary_is_closed_and_partitioned() -> None:

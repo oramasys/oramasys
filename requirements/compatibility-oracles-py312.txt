@@ -58,6 +58,7 @@ pydantic-ai-slim==1.0.18
 pydantic-graph==1.0.18
 pydantic_core==2.50.0
 Pygments==2.21.0
+PyNaCl==1.6.2  # Ed25519ph test adapter only; never a project dependency
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
