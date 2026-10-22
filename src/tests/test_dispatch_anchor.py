@@ -5,6 +5,7 @@ rules run against ``SqliteAttemptStore``. Fake ports only; Oramasys holds no cry
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from orama.graph.dispatch_anchor import (
     AnchorQuarantined,
     AnchorRefused,
 )
-from orama.graph.dispatch_attempts import AttemptStateError, OperatorRefused
+from orama.graph.dispatch_attempts import AttemptStateError, EventRefused, OperatorRefused
 from orama.graph.dispatch_consumer_wire import event_digest
 from tests.test_dispatch_attempts import (
     ATTEMPT,
@@ -92,8 +93,9 @@ def test_gap_does_not_advance_but_next_event_does(harness: Harness) -> None:  # 
     chain = make_chain(8)
     boot(harness, chain[4])
 
-    with pytest.raises(Exception):
+    with pytest.raises(EventRefused) as caught:
         harness.ingest([chain[6]])  # gap at 6
+    assert caught.value.reason == "gap"
     assert harness.store.acked_through(ISSUER) == 5
     harness.ingest([chain[5]])
     assert harness.store.acked_through(ISSUER) == 6
@@ -101,13 +103,16 @@ def test_gap_does_not_advance_but_next_event_does(harness: Harness) -> None:  # 
     assert harness.store.acked_through(ISSUER) == 8
 
 
-def test_events_below_anchor_are_never_acknowledged(harness: Harness) -> None:  # noqa: F811
+def test_events_below_anchor_are_refused_without_persisting(harness: Harness) -> None:  # noqa: F811
     chain = make_chain(5)
     boot(harness, chain[4])
+    before = snapshot(harness.path)
 
-    with pytest.raises(Exception):
-        harness.ingest([chain[3]])
+    with pytest.raises(EventRefused) as caught:
+        harness.ingest([chain[0]])
 
+    assert caught.value.reason == "below_anchor"
+    assert snapshot(harness.path) == before
     assert harness.store.acked_through(ISSUER) == 5
     assert all(v >= 5 for v in _ack_versions(harness))
 
@@ -260,8 +265,15 @@ def test_audited_clear_appends_immutable_log_and_keeps_floor(harness: Harness) -
     assert harness.store.anchor_record(ISSUER)["quarantined"] == 0
     assert harness.store.anchor_record(ISSUER)["anchor_floor"] == 5
     db = sqlite3.connect(harness.path)
-    rows = db.execute("SELECT operator_reference, trusted_evidence FROM anchor_quarantine_log").fetchall()
-    assert rows == [("op-7", "signed note")]
+    rows = db.execute(
+        "SELECT previous_record, accepted_record, operator_reference, trusted_evidence "
+        "FROM anchor_quarantine_log"
+    ).fetchall()
+    assert len(rows) == 1
+    previous, accepted, operator_reference, trusted_evidence = rows[0]
+    assert (operator_reference, trusted_evidence) == ("op-7", "signed note")
+    assert json.loads(previous)["quarantined"] == 1
+    assert json.loads(accepted)["quarantined"] == 0
     with pytest.raises(sqlite3.DatabaseError):
         db.execute("UPDATE anchor_quarantine_log SET trusted_evidence = 'x'")
     with pytest.raises(sqlite3.DatabaseError):

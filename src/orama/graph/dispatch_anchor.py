@@ -195,11 +195,12 @@ def clear(
     current = record(db, issuer_id)
     if current is None or not current["quarantined"]:
         return False
-    snapshot = json.dumps(current, sort_keys=True)
+    previous = json.dumps(current, sort_keys=True)
+    accepted = json.dumps({**current, "quarantined": 0}, sort_keys=True)
     db.execute(
         "INSERT INTO anchor_quarantine_log (issuer_id, previous_record, accepted_record,"
         " trusted_evidence, operator_reference, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (issuer_id, snapshot, snapshot, trusted_evidence, operator_reference, _text(now)),
+        (issuer_id, previous, accepted, trusted_evidence, operator_reference, _text(now)),
     )
     db.execute("UPDATE issuer_anchor SET quarantined = 0 WHERE issuer_id = ?", (issuer_id,))
     return True

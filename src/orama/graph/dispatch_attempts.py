@@ -700,6 +700,9 @@ class SqliteAttemptStore:
     ) -> tuple[int, str, str] | None:
         """Ingest one event; return fork details on divergence, raise on other refusals."""
         version = event["version"]
+        base = dispatch_anchor.base_version(db, issuer_id)
+        if base is not None and version < base:
+            raise EventRefused("below_anchor")
         signed = verifier.verify_event(
             event["issuer_key_id"], event["event_digest"], event["signature"]
         )
