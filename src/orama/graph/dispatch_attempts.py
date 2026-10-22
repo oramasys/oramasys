@@ -19,6 +19,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, TypeAlias
 
+from orama.graph import dispatch_anchor
+from orama.graph.dispatch_anchor import ANCHOR_SCHEMA, TrustedIssuerKeys
 from orama.graph.dispatch_consumer_wire import (
     GENESIS_EVENT_DIGEST,
     _sha256_hex,
@@ -218,6 +220,7 @@ _SCHEMA: Final = (
     " outcome_evidence TEXT,"
     " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
     *PROPOSAL_SCHEMA,
+    *ANCHOR_SCHEMA,
     "CREATE TABLE IF NOT EXISTS clock_high_water ("
     " id INTEGER PRIMARY KEY CHECK (id = 1), utc TEXT NOT NULL,"
     " quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)))",
@@ -262,11 +265,17 @@ def _require_text(name: str, value: object) -> None:
 
 
 def _acked_through(db: sqlite3.Connection, issuer_id: str) -> int:
-    """Return the contiguous acknowledged high-water mark for an issuer."""
-    mark = 0
+    """Return the contiguous acknowledged high-water mark for an issuer.
+
+    With a persisted anchor base N the sequence is checkpoint-aware: it starts at N and never
+    claims acknowledgements below N. Without one it starts at version 1.
+    """
+    base = dispatch_anchor.base_version(db, issuer_id)
+    mark = 0 if base is None else base - 1
     for (version,) in db.execute(
-        "SELECT version FROM issuer_cascade_ack WHERE issuer_id = ? ORDER BY version",
-        (issuer_id,),
+        "SELECT version FROM issuer_cascade_ack WHERE issuer_id = ? AND version > ?"
+        " ORDER BY version",
+        (issuer_id, mark),
     ):
         if version != mark + 1:
             break
@@ -691,6 +700,9 @@ class SqliteAttemptStore:
     ) -> tuple[int, str, str] | None:
         """Ingest one event; return fork details on divergence, raise on other refusals."""
         version = event["version"]
+        base = dispatch_anchor.base_version(db, issuer_id)
+        if base is not None and version < base:
+            raise EventRefused("below_anchor")
         signed = verifier.verify_event(
             event["issuer_key_id"], event["event_digest"], event["signature"]
         )
@@ -772,6 +784,7 @@ class SqliteAttemptStore:
         """Check clock and authorization atomically; commit a clock latch before refusing."""
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
+            dispatch_anchor.assert_not_quarantined(db, issuer_id)
             if self._governed:
                 clock = db.execute(
                     "SELECT utc, quarantined FROM clock_high_water WHERE id = 1"
@@ -792,6 +805,9 @@ class SqliteAttemptStore:
             _check_rule1(db, attempt, permit, now, verifier, expected)
             if self._governed:
                 bind_scope_to_permit(scope, permit)
+            dispatch_anchor.assert_permit_at_or_above_floor(
+                db, issuer_id, permit["revocation_version"]
+            )
             _check_acks(db, issuer_id, permit)
             if revocations.revoked(grant_id=attempt.grant_id, issuer_id=issuer_id):
                 raise AuthorizationRefused("rule4", "grant_revoked")
@@ -800,6 +816,57 @@ class SqliteAttemptStore:
             pair = expected.authority_pair()
             _check_rule6(db, attempt, gates, pair, now)
             _write_authorization(db, attempt, permit, fin, issuer_id, pair, now)
+
+    def bootstrap_anchor(
+        self,
+        issuer_id: str,
+        anchor_event: Mapping[str, Any],
+        verifier: SignatureVerifier,
+        *,
+        trusted_keys: TrustedIssuerKeys,
+        now: datetime,
+    ) -> None:
+        """Part 3 section 3.3 item 1: bootstrap from a pruned anchor as one local transaction.
+
+        Recomputes the digest, resolves the key only through ``trusted_keys``, verifies the
+        signature, then atomically persists identity, key, version, digest, floor and the
+        acknowledgement base. An identical repeat is a no-op; any difference refuses and
+        retains anchor quarantine. Consumer-local: no wire refusal code is added.
+        """
+        _require_text("issuer_id", issuer_id)
+        _require_aware(now)
+        event = dispatch_anchor.verified_anchor(issuer_id, anchor_event, verifier, trusted_keys)
+        with self._immediate() as db:
+            conflicted = dispatch_anchor.install_or_quarantine(db, issuer_id, event, now)
+        if conflicted:
+            raise dispatch_anchor.AnchorConflict("conflicting_anchor")
+
+    def anchor_record(self, issuer_id: str) -> dict[str, Any] | None:
+        """Read-only view of the persisted anchor record (works under quarantine)."""
+        with self._lock:
+            return dispatch_anchor.record(self._db, issuer_id)
+
+    def clear_anchor_quarantine(
+        self,
+        issuer_id: str,
+        *,
+        operator: OperatorAuthority,
+        trusted_evidence: str,
+        now: datetime,
+    ) -> None:
+        """Clear an anchor quarantine as an audited operator action; never lowers a floor."""
+        _require_text("issuer_id", issuer_id)
+        reference = operator.authorize("clear_anchor_quarantine", subject=issuer_id)
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to clear an anchor quarantine")
+        _require_text("trusted_evidence", trusted_evidence)
+        _require_aware(now)
+        with self._immediate() as db:
+            if not dispatch_anchor.clear(
+                db, issuer_id, operator_reference=reference,
+                trusted_evidence=trusted_evidence, now=now,
+            ):
+                raise AttemptStateError("no anchor quarantine to clear")
 
     def observe_clock(self, now: datetime) -> None:
         """Advance the durable UTC high-water mark; a backward step quarantines dispatch.
