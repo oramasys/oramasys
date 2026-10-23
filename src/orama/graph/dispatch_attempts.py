@@ -19,7 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, TypeAlias
 
-from orama.graph import dispatch_anchor
+from orama.graph import dispatch_anchor, dispatch_revocations
 from orama.graph.dispatch_anchor import ANCHOR_SCHEMA, TrustedIssuerKeys
 from orama.graph.dispatch_consumer_wire import (
     GENESIS_EVENT_DIGEST,
@@ -221,6 +221,7 @@ _SCHEMA: Final = (
     " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
     *PROPOSAL_SCHEMA,
     *ANCHOR_SCHEMA,
+    *dispatch_revocations.REVOCATION_SCHEMA,
     "CREATE TABLE IF NOT EXISTS clock_high_water ("
     " id INTEGER PRIMARY KEY CHECK (id = 1), utc TEXT NOT NULL,"
     " quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)))",
@@ -727,6 +728,7 @@ class SqliteAttemptStore:
             " VALUES (?, ?, ?, ?)",
             (issuer_id, version, computed, _now_text(now)),
         )
+        dispatch_revocations.record(db, issuer_id, event)
         return None
 
     def authorize_dispatch(
@@ -742,19 +744,25 @@ class SqliteAttemptStore:
         issuer_id: str,
         expected: ExpectedBinding,
         scope: EffectScope | None = None,
+        approval_ref: str | None = None,
     ) -> None:
         """Step 4.3: check the six rules and write intent, use and outbox atomically.
 
         A governed store also consumes the attempt's reservation in the same transaction.
+        ``approval_ref`` is the grant's ``second_approval_ref`` from its verified v2 grant; when
+        given, an acknowledged revocation of that approval refuses under Rule 4. Without it, a
+        cascade listing the grant still refuses.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
+        if approval_ref is not None:
+            _require_text("approval_ref", approval_ref)
         if self._governed:
             self.observe_clock(now)
         try:
             clock_refusal = self._authorize_in_transaction(
                 attempt_id, permit_wire, finalization_wire, now,
-                verifier, gates, revocations, issuer_id, expected, scope,
+                verifier, gates, revocations, issuer_id, expected, scope, approval_ref,
             )
             if clock_refusal is not None:
                 raise ClockQuarantined(clock_refusal)
@@ -780,6 +788,7 @@ class SqliteAttemptStore:
         issuer_id: str,
         expected: ExpectedBinding,
         scope: EffectScope | None,
+        approval_ref: str | None = None,
     ) -> str | None:
         """Check clock and authorization atomically; commit a clock latch before refusing."""
         with self._immediate() as db:
@@ -811,6 +820,11 @@ class SqliteAttemptStore:
             _check_acks(db, issuer_id, permit)
             if revocations.revoked(grant_id=attempt.grant_id, issuer_id=issuer_id):
                 raise AuthorizationRefused("rule4", "grant_revoked")
+            fact = dispatch_revocations.refusal_reason(
+                db, issuer_id, attempt.grant_id, approval_ref
+            )
+            if fact is not None:
+                raise AuthorizationRefused("rule4", fact)
             _check_finalization(db, attempt, permit, fin, now, verifier, issuer_id, expected)
             _check_event(db, fin, issuer_id, now)
             pair = expected.authority_pair()
@@ -838,8 +852,15 @@ class SqliteAttemptStore:
         event = dispatch_anchor.verified_anchor(issuer_id, anchor_event, verifier, trusted_keys)
         with self._immediate() as db:
             conflicted = dispatch_anchor.install_or_quarantine(db, issuer_id, event, now)
+            if not conflicted:
+                dispatch_revocations.record(db, issuer_id, event)
         if conflicted:
             raise dispatch_anchor.AnchorConflict("conflicting_anchor")
+
+    def authority_facts(self, issuer_id: str) -> dict[str, list[tuple[Any, ...]]]:
+        """Read-only view of the recorded revocation and cascade facts for an issuer."""
+        with self._lock:
+            return dispatch_revocations.facts(self._db, issuer_id)
 
     def anchor_record(self, issuer_id: str) -> dict[str, Any] | None:
         """Read-only view of the persisted anchor record (works under quarantine)."""

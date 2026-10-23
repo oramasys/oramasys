@@ -229,7 +229,11 @@ def test_event_wire_rejects_malformed() -> None:
 
 def test_event_wire_rejects_an_oversize_object() -> None:
     """An event whose canonical bytes exceed 65536 is refused."""
-    big = _mutated(EVENTS[1], kind="revocation", body={"blob": "x" * 70_000})
+    grants = [f"{i:04d}" + "x" * 1020 for i in range(70)]  # a valid cascade body, too large
+    big = _mutated(
+        EVENTS[1], kind="cascade",
+        body={"approval_id": "a-1", "grant_ids": grants, "issuer_authority_version": 1},
+    )
 
     with pytest.raises(WireError, match="65536"):
         validate_event_wire(big)

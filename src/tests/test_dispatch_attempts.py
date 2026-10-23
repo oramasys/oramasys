@@ -31,6 +31,7 @@ from orama.graph.dispatch_attempts import (
 )
 from orama.graph.dispatch_consumer_wire import (
     GENESIS_EVENT_DIGEST,
+    WireError,
     event_digest,
     finalization_body,
     finalization_digest,
@@ -811,21 +812,21 @@ def test_ingest_flags_a_previous_digest_that_forks_the_stored_chain(harness: Har
     assert harness.store.is_diverged(ISSUER)
 
 
-def test_ingest_accepts_revocation_events_and_authorize_ignores_them_as_revocation(
+def test_ingest_refuses_the_opaque_revocation_body_and_accepts_the_closed_one(
     harness: Harness,
 ) -> None:
-    """Non-finalization kinds ingest like any chained event."""
-    body = {"grant_id": GRANT}
-    digest = event_digest(1, "revocation", body, GENESIS_EVENT_DIGEST)
-    harness.ingest(
-        [
-            {
-                "version": 1, "kind": "revocation", "body": body,
-                "previous_event_digest": GENESIS_EVENT_DIGEST, "event_digest": digest,
-                "issuer_key_id": KEY, "signature": SIG,
-            }
-        ]
-    )
+    """Part 3 Sections 1-2 replace slice 1's opaque bodies: only the closed body ingests."""
+    def revocation(body: dict[str, Any]) -> dict[str, Any]:
+        digest = event_digest(1, "revocation", body, GENESIS_EVENT_DIGEST)
+        return {
+            "version": 1, "kind": "revocation", "body": body,
+            "previous_event_digest": GENESIS_EVENT_DIGEST, "event_digest": digest,
+            "issuer_key_id": KEY, "signature": SIG,
+        }
+
+    with pytest.raises(WireError):
+        event_digest(1, "revocation", {"grant_id": GRANT}, GENESIS_EVENT_DIGEST)
+    harness.ingest([revocation({"subject_kind": "grant", "subject_id": GRANT})])
 
     assert harness.store.acked_through(ISSUER) == 1
 
