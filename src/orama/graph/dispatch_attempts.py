@@ -201,7 +201,9 @@ class VerifiedDispatchGrant:
     This is intentionally distinct from adjustment-grant verification.  The
     consumer accepts these facts only after a trusted adapter has verified the
     v2 dispatch grant; the store then copies the approval binding durably before
-    any issuer call.
+    any issuer call. This is a plain value object: the store checks its type and
+    canonical identifiers, not where the facts came from. That provenance is
+    held by the composition adapter that builds it, which is outside this slice.
     """
 
     grant_id: str
@@ -664,10 +666,13 @@ class SqliteAttemptStore:
     ) -> None:
         """Persist a fixture or migration attempt binding (idempotent when identical).
 
-        This private primitive exists only for migration and Phase 3 fixture
-        construction. Production composition must use ``create_attempt``. A
-        ``None`` binding records an undeclared legacy attempt, which Rule 4
-        refuses whenever the issuer has revoked any approval.
+        This private primitive exists only for fixture construction (tests and the
+        interop probes). It is not the migration path: attempts that predate the
+        binding column are migrated in place by ``_migrate_attempts``, which leaves
+        them NULL. Production composition must use ``create_attempt``. A ``None``
+        binding records an undeclared attempt, which Rule 4 refuses whenever the
+        issuer has revoked any approval. The leading underscore is a convention, not
+        enforcement.
         """
         for name, value in (
             ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
