@@ -59,7 +59,7 @@ def governed(tmp_path: Path) -> Harness:
     """Open a governed store with the vector attempt, proposal and reservation in place."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path, governed=True)
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     store.propose(PROPOSAL, SCOPE, NOW)
     store.reserve(RESERVATION, PROPOSAL, SCOPE, LIVE_UNTIL, NOW)
     return Harness(store, path, FakeVerifier(), FakeGates(), FakeRevocations())
@@ -164,7 +164,7 @@ def test_a_governed_store_refuses_dispatch_when_no_reservation_exists(tmp_path: 
     """Governed authorization refuses an attempt whose reservation has not been recorded."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path, governed=True)
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     h = Harness(store, path, FakeVerifier(), FakeGates(), FakeRevocations())
     ready(h, vector_flow())
     with pytest.raises(ReservationRefused) as excinfo:
@@ -428,7 +428,7 @@ def reserved_for(tmp_path: Path, scope: EffectScope) -> Harness:
     """A governed store whose reservation was made for ``scope`` (not necessarily the permit's)."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path, governed=True)
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     store.propose(PROPOSAL, scope, NOW)
     store.reserve(RESERVATION, PROPOSAL, scope, LIVE_UNTIL, NOW)
     return Harness(store, path, FakeVerifier(), FakeGates(), FakeRevocations())

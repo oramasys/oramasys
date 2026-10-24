@@ -30,7 +30,13 @@ REVOCATION_SCHEMA: Final = (
 
 
 def record(db: sqlite3.Connection, issuer_id: str, event: Mapping[str, Any]) -> None:
-    """Record the authority fact carried by an acknowledged, validated event (idempotent)."""
+    """Record authority facts from an acknowledged, validated event (idempotent).
+
+    A cascade's ``issuer_authority_version`` remains signed provenance for
+    ordering and forensic reconstruction. Rule 4 deliberately evaluates the
+    recorded revocation and cascade facts, not a second authority-version
+    comparator.
+    """
     version, kind, body = event["version"], event["kind"], event["body"]
     if kind == "revocation":
         db.execute(

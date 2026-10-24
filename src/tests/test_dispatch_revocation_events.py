@@ -108,7 +108,7 @@ def make_store(tmp_path: Path, approval: str | None = "") -> SqliteAttemptStore:
     attempt undeclared, and any other value names the grant's second approval.
     """
     s = SqliteAttemptStore(db_path(tmp_path))
-    s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=approval)
+    s._create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=approval)
     return s
 
 
@@ -341,7 +341,7 @@ def test_approval_binding_must_be_empty_or_canonical(tmp_path: Path, bad: object
     """A blank, spaced, overlong, non-ASCII or non-string binding fails closed at creation."""
     s = SqliteAttemptStore(db_path(tmp_path))
     with pytest.raises(ValueError):
-        s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=bad)  # type: ignore[arg-type]
+        s._create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=bad)  # type: ignore[arg-type]
     assert s.get_attempt(ATTEMPT) is None
 
 
@@ -351,7 +351,7 @@ def test_verified_dispatch_grant_accepts_the_canonical_identifier_boundary(tmp_p
 
     accepted = VerifiedDispatchGrant(GRANT, "a" * 1024)
     store = SqliteAttemptStore(db_path(tmp_path))
-    store.create_attempt_from_verified_grant(ATTEMPT, accepted, RESERVATION)
+    store.create_attempt(ATTEMPT, accepted, RESERVATION)
 
     assert store.get_attempt(ATTEMPT).second_approval_ref == "a" * 1024
     with pytest.raises(ValueError, match="second_approval_ref"):
@@ -359,11 +359,11 @@ def test_verified_dispatch_grant_accepts_the_canonical_identifier_boundary(tmp_p
 
 
 def test_verified_dispatch_grant_copies_its_binding_without_a_raw_override(tmp_path: Path) -> None:
-    """The composition helper accepts only verified dispatch-grant facts."""
+    """The public creation boundary accepts only verified dispatch-grant facts."""
     from orama.graph.dispatch_attempts import VerifiedDispatchGrant
 
     store = SqliteAttemptStore(db_path(tmp_path))
-    store.create_attempt_from_verified_grant(
+    store.create_attempt(
         ATTEMPT,
         VerifiedDispatchGrant(GRANT, APPROVAL),
         RESERVATION,
@@ -372,13 +372,22 @@ def test_verified_dispatch_grant_copies_its_binding_without_a_raw_override(tmp_p
     assert store.get_attempt(ATTEMPT).second_approval_ref == APPROVAL
 
 
+def test_public_attempt_creation_refuses_a_raw_grant_id(tmp_path: Path) -> None:
+    """Production creation cannot accept a caller-supplied approval binding source."""
+    store = SqliteAttemptStore(db_path(tmp_path))
+
+    with pytest.raises(TypeError, match="VerifiedDispatchGrant"):
+        store.create_attempt(ATTEMPT, GRANT, RESERVATION)  # type: ignore[arg-type]
+    assert store.get_attempt(ATTEMPT) is None
+
+
 def test_approval_binding_is_part_of_the_idempotent_attempt(tmp_path: Path) -> None:
     """Repeating an attempt is a no-op only with the same binding; any change is refused."""
     s = make_store(tmp_path, APPROVAL)
-    s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=APPROVAL)
+    s._create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=APPROVAL)
     for other in ("", None, "approval-2"):
         with pytest.raises(AttemptStateError):
-            s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=other)
+            s._create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=other)
     assert s.get_attempt(ATTEMPT).second_approval_ref == APPROVAL
 
 

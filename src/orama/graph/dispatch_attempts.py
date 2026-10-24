@@ -635,19 +635,39 @@ class SqliteAttemptStore:
     def create_attempt(
         self,
         attempt_id: str,
+        verified_grant: VerifiedDispatchGrant,
+        reservation_id: str,
+    ) -> None:
+        """Persist a verified dispatch grant's binding before any issuer contact.
+
+        The composition adapter must verify the v2 dispatch grant before it
+        builds ``VerifiedDispatchGrant``.  The store copies that object into
+        durable attempt state and exposes no authorizing-caller approval
+        parameter on this public boundary.
+        """
+        if not isinstance(verified_grant, VerifiedDispatchGrant):
+            raise TypeError("verified_grant must be a VerifiedDispatchGrant")
+        self._create_attempt(
+            attempt_id,
+            verified_grant.grant_id,
+            reservation_id,
+            second_approval_ref=verified_grant.second_approval_ref,
+        )
+
+    def _create_attempt(
+        self,
+        attempt_id: str,
         grant_id: str,
         reservation_id: str,
         *,
         second_approval_ref: str | None = None,
     ) -> None:
-        """Persist a low-level attempt binding (idempotent when identical).
+        """Persist a fixture or migration attempt binding (idempotent when identical).
 
-        This primitive remains for migration and Phase 3 fixture construction.
-        Production composition must call ``create_attempt_from_verified_grant``
-        so the binding is copied from a verified dispatch-grant object rather
-        than accepted as an authorizing caller argument. ``None`` records an
-        undeclared legacy attempt, which Rule 4 refuses whenever the issuer has
-        revoked any approval.
+        This private primitive exists only for migration and Phase 3 fixture
+        construction. Production composition must use ``create_attempt``. A
+        ``None`` binding records an undeclared legacy attempt, which Rule 4
+        refuses whenever the issuer has revoked any approval.
         """
         for name, value in (
             ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
@@ -675,26 +695,6 @@ class SqliteAttemptStore:
                     second_approval_ref,
                 ),
             )
-
-    def create_attempt_from_verified_grant(
-        self,
-        attempt_id: str,
-        verified_grant: VerifiedDispatchGrant,
-        reservation_id: str,
-    ) -> None:
-        """Persist a verified dispatch grant's approval binding before issuer contact.
-
-        Verification belongs outside this SQLite transaction and is owned by a
-        composition adapter. This method owns the one-way copy into durable
-        attempt state, preventing a future authorizing caller from supplying a
-        separate approval reference.
-        """
-        self.create_attempt(
-            attempt_id,
-            verified_grant.grant_id,
-            reservation_id,
-            second_approval_ref=verified_grant.second_approval_ref,
-        )
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord | None:
         """Return the attempt row, or None if it does not exist."""
@@ -779,7 +779,12 @@ class SqliteAttemptStore:
         verifier: SignatureVerifier,
         now: datetime,
     ) -> tuple[int, str, str] | None:
-        """Ingest one event; return fork details on divergence, raise on other refusals."""
+        """Ingest one event; return fork details on divergence, raise on other refusals.
+
+        An anchor establishes a monotonic epoch floor. Events below it are
+        rejected rather than backfilled; an audited recovery protocol would be
+        a separate operation, not a normal ingest exception.
+        """
         version = event["version"]
         base = dispatch_anchor.base_version(db, issuer_id)
         if base is not None and version < base:
