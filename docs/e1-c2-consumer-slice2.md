@@ -89,7 +89,7 @@ they conflict with this section, this section governs.
 | Revocation and cascade event body shapes are not built | Built and merged: Oramasys #74 (consumer ingestion and Rule 4) with Phylax #19 (signed bodies); interop #75 (X2 digests). |
 | Not covered: gate order when several rules fail together | Covered by merged #73 (`test_dispatch_anchor_order_race.py`). |
 | Not covered: concurrent floor commits | #73 races threads over one store instance and its shared lock. Two independently constructed stores on one database file are the remaining qualification gap (finding F3); its tests are separate from this status update. |
-| The ratified specification is `orama-system` `59c623fa` | That commit is a merge of an unrelated Hermes change, not a ratification. The Parts 1 and 2 ratification records are the orama-system commits `d750caba` and `1bd4a3bd`. Verify against orama-system `main` before citing. |
+| The ratified specification is `orama-system` `59c623fa` | That commit is a merge of an unrelated Hermes change, not a ratification. Ratification records live in orama-system, for example `d750caba` (Part 3 section 3.3) and `1bd4a3bd` (partial ratification status). The Parts 1 and 2 record commit is not named here; locate it in orama-system `main` before citing. |
 
 Still not built or decided: the effect grant v2 parser and verified-grant composition, a production operator
 authenticator, retained and signed checkpoints, and execution witnesses (Part 3 sections 3.1, 3.2 and 4).
