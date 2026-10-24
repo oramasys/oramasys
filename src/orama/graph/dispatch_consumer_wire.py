@@ -236,9 +236,14 @@ def _validate_event_body(kind: object, body: object) -> None:
             raise WireError("issuer_authority_version must be a safe integer of at least 1")
 
 
+def is_canonical_identifier(value: object) -> bool:
+    """Return True for a canonical identifier: printable ASCII without space, 1 to 1024 bytes."""
+    return isinstance(value, str) and _IDENTIFIER_RE.fullmatch(value) is not None
+
+
 def _require_identifier(name: str, value: object) -> None:
-    """Require a canonical identifier: printable ASCII without space, 1 to 1024 bytes."""
-    if not isinstance(value, str) or _IDENTIFIER_RE.fullmatch(value) is None:
+    """Require a canonical identifier (see ``is_canonical_identifier``)."""
+    if not is_canonical_identifier(value):
         raise WireError(f"{name} must be a canonical identifier")
 
 

@@ -63,18 +63,30 @@ def _revoked(db: sqlite3.Connection, issuer_id: str, kind: str, subject: str) ->
 def refusal_reason(
     db: sqlite3.Connection, issuer_id: str, grant_id: str, approval_ref: str | None
 ) -> str | None:
-    """Return the consumer-local Rule 4 reason the recorded facts give, or None."""
+    """Return the consumer-local Rule 4 reason the recorded facts give, or None.
+
+    ``approval_ref`` is the approval binding persisted on the attempt: a non-empty value is
+    matched against approval revocations; ``""`` (single approval) matches none; ``None``
+    (undeclared) cannot be proven unrelated, so any approval revocation from this issuer
+    refuses it. A cascade listing the grant refuses in every case.
+    """
     if _revoked(db, issuer_id, "issuer", issuer_id):
         return "issuer_revoked"
     if _revoked(db, issuer_id, "grant", grant_id):
         return "grant_revoked"
-    if approval_ref is not None and _revoked(db, issuer_id, "approval", approval_ref):
+    if approval_ref and _revoked(db, issuer_id, "approval", approval_ref):
         return "approval_revoked"
     if db.execute(
         "SELECT 1 FROM issuer_cascade_grants WHERE issuer_id = ? AND grant_id = ? LIMIT 1",
         (issuer_id, grant_id),
     ).fetchone() is not None:
         return "cascade_listed"
+    if approval_ref is None and db.execute(
+        "SELECT 1 FROM issuer_revocations WHERE issuer_id = ? AND subject_kind = 'approval'"
+        " LIMIT 1",
+        (issuer_id,),
+    ).fetchone() is not None:
+        return "approval_undeclared"
     return None
 
 

@@ -30,6 +30,7 @@ from orama.graph.dispatch_consumer_wire import (
     event_digest,
     finalization_body,
     finalization_digest,
+    is_canonical_identifier,
     parse_timestamp,
     permit_body,
     permit_payload_digest,
@@ -189,6 +190,8 @@ class AttemptRecord:
     fenced: bool
     transmitted: bool
     permit_id: str | None
+    second_approval_ref: str | None = None
+    """The grant's approval binding: None undeclared, "" single approval, else the approval id."""
 
 
 _SCHEMA: Final = (
@@ -196,7 +199,8 @@ _SCHEMA: Final = (
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, reservation_id TEXT NOT NULL,"
     " state TEXT NOT NULL, fenced INTEGER NOT NULL DEFAULT 0,"
     " transmitted INTEGER NOT NULL DEFAULT 0, permit_id TEXT, permit_digest TEXT,"
-    " finalization_digest TEXT, r_p INTEGER, r_f INTEGER, created_at TEXT NOT NULL)",
+    " finalization_digest TEXT, r_p INTEGER, r_f INTEGER, created_at TEXT NOT NULL,"
+    " second_approval_ref TEXT)",
     "CREATE TABLE IF NOT EXISTS issuer_cascade_ack ("
     " issuer_id TEXT NOT NULL, version INTEGER NOT NULL, event_digest TEXT NOT NULL,"
     " applied_at TEXT NOT NULL, PRIMARY KEY (issuer_id, version))",
@@ -317,13 +321,15 @@ def _require_lifetime(rule: AuthorizationRule, issued_at: str, expires_at: str) 
 def _load_attempt(db: sqlite3.Connection, attempt_id: str) -> AttemptRecord:
     """Load an attempt row or fail closed on an unknown attempt."""
     row = db.execute(
-        "SELECT attempt_id, grant_id, reservation_id, state, fenced, transmitted, permit_id"
-        " FROM dispatch_attempts WHERE attempt_id = ?",
+        "SELECT attempt_id, grant_id, reservation_id, state, fenced, transmitted, permit_id,"
+        " second_approval_ref FROM dispatch_attempts WHERE attempt_id = ?",
         (attempt_id,),
     ).fetchone()
     if row is None:
         raise ValueError(f"unknown attempt_id {attempt_id!r}")
-    return AttemptRecord(row[0], row[1], row[2], row[3], bool(row[4]), bool(row[5]), row[6])
+    return AttemptRecord(
+        row[0], row[1], row[2], row[3], bool(row[4]), bool(row[5]), row[6], row[7]
+    )
 
 
 def _check_rule1(
@@ -571,6 +577,7 @@ class SqliteAttemptStore:
         for statement in _SCHEMA:
             self._db.execute(statement)
         self._migrate_outbox()
+        self._migrate_attempts()
 
     def _migrate_outbox(self) -> None:
         """Add the T3 outcome columns to an outbox created before they existed."""
@@ -578,6 +585,16 @@ class SqliteAttemptStore:
         for name, definition in _OUTBOX_T3_COLUMNS:
             if name not in present:
                 self._db.execute(f"ALTER TABLE outbox ADD COLUMN {name} {definition}")
+
+    def _migrate_attempts(self) -> None:
+        """Add the approval binding column to an attempts table created before it existed.
+
+        Existing rows get NULL, which Rule 4 treats as undeclared and so fails closed whenever
+        the issuer has revoked any approval.
+        """
+        present = {row[1] for row in self._db.execute("PRAGMA table_info(dispatch_attempts)")}
+        if "second_approval_ref" not in present:
+            self._db.execute("ALTER TABLE dispatch_attempts ADD COLUMN second_approval_ref TEXT")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -595,25 +612,47 @@ class SqliteAttemptStore:
                 raise
             self._db.execute("COMMIT")
 
-    def create_attempt(self, attempt_id: str, grant_id: str, reservation_id: str) -> None:
-        """Durably record the attempt BEFORE any issuer call (idempotent when identical)."""
+    def create_attempt(
+        self,
+        attempt_id: str,
+        grant_id: str,
+        reservation_id: str,
+        *,
+        second_approval_ref: str | None = None,
+    ) -> None:
+        """Durably record the attempt BEFORE any issuer call (idempotent when identical).
+
+        ``second_approval_ref`` is copied from the verified v2 grant and bound to the attempt
+        here, once, so Rule 4 reads it from persisted state rather than from the authorizing
+        caller. ``""`` is the wire's single-approval value; a non-empty value must be a
+        canonical identifier. Omitting it records the attempt as undeclared, which Rule 4
+        refuses whenever the issuer has revoked any approval (fail closed, never a bypass).
+        """
         for name, value in (
             ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
         ):
             _require_text(name, value)
+        if second_approval_ref not in (None, "") and not is_canonical_identifier(
+            second_approval_ref
+        ):
+            raise ValueError("second_approval_ref must be empty or a canonical identifier")
         with self._immediate() as db:
             row = db.execute(
-                "SELECT grant_id, reservation_id FROM dispatch_attempts WHERE attempt_id = ?",
+                "SELECT grant_id, reservation_id, second_approval_ref FROM dispatch_attempts"
+                " WHERE attempt_id = ?",
                 (attempt_id,),
             ).fetchone()
             if row is not None:
-                if tuple(row) != (grant_id, reservation_id):
+                if tuple(row) != (grant_id, reservation_id, second_approval_ref):
                     raise AttemptStateError("attempt_id already exists with a different binding")
                 return
             db.execute(
                 "INSERT INTO dispatch_attempts (attempt_id, grant_id, reservation_id, state,"
-                " created_at) VALUES (?, ?, ?, 'created', ?)",
-                (attempt_id, grant_id, reservation_id, _now_text(datetime.now(UTC))),
+                " created_at, second_approval_ref) VALUES (?, ?, ?, 'created', ?, ?)",
+                (
+                    attempt_id, grant_id, reservation_id, _now_text(datetime.now(UTC)),
+                    second_approval_ref,
+                ),
             )
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord | None:
@@ -744,25 +783,21 @@ class SqliteAttemptStore:
         issuer_id: str,
         expected: ExpectedBinding,
         scope: EffectScope | None = None,
-        approval_ref: str | None = None,
     ) -> None:
         """Step 4.3: check the six rules and write intent, use and outbox atomically.
 
         A governed store also consumes the attempt's reservation in the same transaction.
-        ``approval_ref`` is the grant's ``second_approval_ref`` from its verified v2 grant; when
-        given, an acknowledged revocation of that approval refuses under Rule 4. Without it, a
-        cascade listing the grant still refuses.
+        Rule 4 reads the approval binding persisted by ``create_attempt``; the authorizing
+        caller cannot supply or omit it.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
-        if approval_ref is not None:
-            _require_text("approval_ref", approval_ref)
         if self._governed:
             self.observe_clock(now)
         try:
             clock_refusal = self._authorize_in_transaction(
                 attempt_id, permit_wire, finalization_wire, now,
-                verifier, gates, revocations, issuer_id, expected, scope, approval_ref,
+                verifier, gates, revocations, issuer_id, expected, scope,
             )
             if clock_refusal is not None:
                 raise ClockQuarantined(clock_refusal)
@@ -788,7 +823,6 @@ class SqliteAttemptStore:
         issuer_id: str,
         expected: ExpectedBinding,
         scope: EffectScope | None,
-        approval_ref: str | None = None,
     ) -> str | None:
         """Check clock and authorization atomically; commit a clock latch before refusing."""
         with self._immediate() as db:
@@ -821,7 +855,7 @@ class SqliteAttemptStore:
             if revocations.revoked(grant_id=attempt.grant_id, issuer_id=issuer_id):
                 raise AuthorizationRefused("rule4", "grant_revoked")
             fact = dispatch_revocations.refusal_reason(
-                db, issuer_id, attempt.grant_id, approval_ref
+                db, issuer_id, attempt.grant_id, attempt.second_approval_ref
             )
             if fact is not None:
                 raise AuthorizationRefused("rule4", fact)

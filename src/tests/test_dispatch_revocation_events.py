@@ -6,7 +6,9 @@ digests come from a standard-library oracle, not from the consumer wire module u
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ import pytest
 
 from orama.graph.dispatch_attempts import (
     AUTHORIZATION_RULES,
+    AttemptStateError,
     AuthorizationRefused,
     EventRefused,
     SqliteAttemptStore,
@@ -98,34 +101,38 @@ def flow_after(prefix: list[tuple[str, dict[str, Any]]]) -> Flow:
     return Flow(permit, {**fbody, "issuer_signature": SIG}, chain)
 
 
-@pytest.fixture
-def store(tmp_path: Path) -> SqliteAttemptStore:
-    """Return an ungoverned store with the vector attempt created."""
+def make_store(tmp_path: Path, approval: str | None = "") -> SqliteAttemptStore:
+    """Return an ungoverned store whose vector attempt is bound to ``approval``.
+
+    ``""`` is the single-approval binding (the only verifiable value at M2), ``None`` leaves the
+    attempt undeclared, and any other value names the grant's second approval.
+    """
     s = SqliteAttemptStore(db_path(tmp_path))
-    s.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=approval)
     return s
 
 
-def authorize(
-    s: SqliteAttemptStore, flow: Flow, approval_ref: str | None = None, *, scope: EffectScope | None = None
-) -> None:
+@pytest.fixture
+def store(tmp_path: Path) -> SqliteAttemptStore:
+    """Return an ungoverned store with the vector attempt bound to a single approval."""
+    return make_store(tmp_path)
+
+
+def authorize(s: SqliteAttemptStore, flow: Flow, *, scope: EffectScope | None = None) -> None:
     """Ingest the flow's prefix and run Step 4.3."""
     s.ingest_events(ISSUER, flow.chain, FakeVerifier())
     s.authorize_dispatch(
         ATTEMPT, flow.permit, flow.fin, NOW, verifier=FakeVerifier(), gates=FakeGates(),
         revocations=FakeRevocations(), issuer_id=ISSUER, expected=EXPECTED, scope=scope,
-        approval_ref=approval_ref,
     )
 
 
-def refused(
-    s: SqliteAttemptStore, path: Path, flow: Flow, approval_ref: str | None = None, **kwargs: Any
-) -> str:
+def refused(s: SqliteAttemptStore, path: Path, flow: Flow, **kwargs: Any) -> str:
     """Require a Rule 4 refusal that writes nothing beyond the ingested prefix; return the reason."""
     s.ingest_events(ISSUER, flow.chain, FakeVerifier())
     before = snapshot(path)
     with pytest.raises(AuthorizationRefused) as excinfo:
-        authorize(s, flow, approval_ref, **kwargs)
+        authorize(s, flow, **kwargs)
     assert excinfo.value.rule == "rule4"
     assert snapshot(path) == before, "a refused authorization wrote something"
     return excinfo.value.reason
@@ -235,10 +242,11 @@ def test_rule4_refuses_grant_revocation(store: SqliteAttemptStore, tmp_path: Pat
     assert refused(store, db_path(tmp_path), flow_after([revoke("grant", GRANT)])) == "grant_revoked"
 
 
-def test_rule4_refuses_approval_revocation(store: SqliteAttemptStore, tmp_path: Path) -> None:
-    """A revocation of the grant's approval refuses dispatch when the caller names that approval."""
+def test_rule4_refuses_approval_revocation(tmp_path: Path) -> None:
+    """A revocation of the approval bound to the attempt refuses dispatch, with no caller input."""
+    bound = make_store(tmp_path, APPROVAL)
     flow = flow_after([revoke("approval", APPROVAL)])
-    assert refused(store, db_path(tmp_path), flow, APPROVAL) == "approval_revoked"
+    assert refused(bound, db_path(tmp_path), flow) == "approval_revoked"
 
 
 def test_rule4_refuses_issuer_revocation(store: SqliteAttemptStore, tmp_path: Path) -> None:
@@ -247,22 +255,55 @@ def test_rule4_refuses_issuer_revocation(store: SqliteAttemptStore, tmp_path: Pa
 
 
 def test_rule4_refuses_cascade_listed_grant(store: SqliteAttemptStore, tmp_path: Path) -> None:
-    """A cascade that lists the grant refuses it even when no approval_ref is supplied."""
+    """A cascade that lists the grant refuses it whatever approval the attempt is bound to."""
     flow = flow_after([cascade(APPROVAL, ["a-first", GRANT, "z-last"])])
     assert refused(store, db_path(tmp_path), flow) == "cascade_listed"
 
 
-def test_rule4_ignores_unrelated_facts(store: SqliteAttemptStore) -> None:
-    """Other grants, approvals and issuers, and an approval the caller did not name, do not refuse."""
+def test_rule4_ignores_unrelated_facts(tmp_path: Path) -> None:
+    """Other grants, approvals and issuers, and approvals other than the bound one, do not refuse."""
+    bound = make_store(tmp_path, "approval-unrelated")
     flow = flow_after([
         revoke("grant", "grant-other"), revoke("approval", "approval-other"),
         revoke("issuer", "issuer-other"), revoke("approval", APPROVAL),
         cascade(APPROVAL, ["grant-other", "grant-zzz"]),
     ])
 
-    authorize(store, flow, approval_ref="approval-unrelated")
+    authorize(bound, flow)
+
+    assert bound.outbox_row(ATTEMPT) is not None
+
+
+def test_single_approval_binding_matches_no_approval_revocation(store: SqliteAttemptStore) -> None:
+    """The empty binding (single approval) is never matched by an approval revocation."""
+    authorize(store, flow_after([revoke("approval", APPROVAL)]))
 
     assert store.outbox_row(ATTEMPT) is not None
+
+
+def test_undeclared_binding_fails_closed_on_any_approval_revocation(tmp_path: Path) -> None:
+    """An attempt created without a binding cannot be proven unrelated to a revoked approval."""
+    undeclared = make_store(tmp_path, None)
+    flow = flow_after([revoke("approval", "approval-anything")])
+
+    assert refused(undeclared, db_path(tmp_path), flow) == "approval_undeclared"
+
+
+def test_undeclared_binding_is_unaffected_without_approval_revocations(tmp_path: Path) -> None:
+    """With no approval revoked, an undeclared attempt is judged by the other facts only."""
+    undeclared = make_store(tmp_path, None)
+
+    authorize(undeclared, flow_after([revoke("grant", "grant-other")]))
+
+    assert undeclared.outbox_row(ATTEMPT) is not None
+
+
+def test_cascade_listing_is_reported_before_an_undeclared_binding(tmp_path: Path) -> None:
+    """When the grant is cascade-listed, that specific reason wins over the undeclared one."""
+    undeclared = make_store(tmp_path, None)
+    flow = flow_after([revoke("approval", APPROVAL), cascade(APPROVAL, [GRANT])])
+
+    assert refused(undeclared, db_path(tmp_path), flow) == "cascade_listed"
 
 
 def test_refusal_leaves_no_intent_outbox_use_or_reservation(tmp_path: Path) -> None:
@@ -295,10 +336,49 @@ def test_refusal_leaves_no_intent_outbox_use_or_reservation(tmp_path: Path) -> N
     assert consumed["reservations"] != after["reservations"], "control must consume the reservation"
 
 
-def test_approval_ref_must_be_canonical_text_when_given(store: SqliteAttemptStore) -> None:
-    """A blank approval_ref fails closed instead of silently matching nothing."""
+@pytest.mark.parametrize("bad", [" ", "a b", "x" * 1025, "caf\u00e9", 7])
+def test_approval_binding_must_be_empty_or_canonical(tmp_path: Path, bad: object) -> None:
+    """A blank, spaced, overlong, non-ASCII or non-string binding fails closed at creation."""
+    s = SqliteAttemptStore(db_path(tmp_path))
     with pytest.raises(ValueError):
-        authorize(store, flow_after([revoke("grant", "grant-other")]), approval_ref=" ")
+        s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=bad)  # type: ignore[arg-type]
+    assert s.get_attempt(ATTEMPT) is None
+
+
+def test_approval_binding_is_part_of_the_idempotent_attempt(tmp_path: Path) -> None:
+    """Repeating an attempt is a no-op only with the same binding; any change is refused."""
+    s = make_store(tmp_path, APPROVAL)
+    s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=APPROVAL)
+    for other in ("", None, "approval-2"):
+        with pytest.raises(AttemptStateError):
+            s.create_attempt(ATTEMPT, GRANT, RESERVATION, second_approval_ref=other)
+    assert s.get_attempt(ATTEMPT).second_approval_ref == APPROVAL
+
+
+def test_authorizing_caller_cannot_supply_the_approval_binding() -> None:
+    """Step 4.3 takes no approval argument; the binding comes only from the persisted attempt."""
+    assert "approval_ref" not in inspect.signature(SqliteAttemptStore.authorize_dispatch).parameters
+
+
+def test_legacy_attempts_table_gains_an_undeclared_binding(tmp_path: Path) -> None:
+    """A store created before the binding column migrates; old rows are undeclared and fail closed."""
+    path = db_path(tmp_path)
+    SqliteAttemptStore(path).close()
+    legacy = sqlite3.connect(path)
+    legacy.execute("ALTER TABLE dispatch_attempts DROP COLUMN second_approval_ref")
+    legacy.execute(
+        "INSERT INTO dispatch_attempts (attempt_id, grant_id, reservation_id, state, created_at)"
+        " VALUES (?, ?, ?, 'created', '2026-10-24T00:00:00.000000Z')",
+        (ATTEMPT, GRANT, RESERVATION),
+    )
+    legacy.commit()
+    legacy.close()
+
+    migrated = SqliteAttemptStore(path)
+
+    assert migrated.get_attempt(ATTEMPT).second_approval_ref is None
+    flow = flow_after([revoke("approval", APPROVAL)])
+    assert refused(migrated, path, flow) == "approval_undeclared"
 
 
 def test_no_new_authorization_rules() -> None:

@@ -817,6 +817,7 @@ def test_ingest_refuses_the_opaque_revocation_body_and_accepts_the_closed_one(
 ) -> None:
     """Part 3 Sections 1-2 replace slice 1's opaque bodies: only the closed body ingests."""
     def revocation(body: dict[str, Any]) -> dict[str, Any]:
+        """Return a one-event chain carrying ``body`` as a revocation."""
         digest = event_digest(1, "revocation", body, GENESIS_EVENT_DIGEST)
         return {
             "version": 1, "kind": "revocation", "body": body,
