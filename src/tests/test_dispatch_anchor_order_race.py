@@ -20,7 +20,11 @@ from orama.graph.dispatch_anchor import (
     AnchorFloorRefused,
     AnchorQuarantined,
 )
-from orama.graph.dispatch_attempts import AuthorizationRefused, SqliteAttemptStore
+from orama.graph.dispatch_attempts import (
+    AuthorizationRefused,
+    SqliteAttemptStore,
+    VerifiedDispatchGrant,
+)
 from tests.test_dispatch_anchor import TrustedKeys, boot, forged_anchor, quarantined
 from tests.test_dispatch_attempts import (
     ATTEMPT,
@@ -96,7 +100,7 @@ JOIN_SECONDS = 30
 def _store(tmp_path: Path) -> SqliteAttemptStore:
     """Return a fresh store with the shared attempt already created."""
     store = SqliteAttemptStore(tmp_path / "race" / "attempts.db")
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store.create_attempt(ATTEMPT, VerifiedDispatchGrant(GRANT), RESERVATION)
     return store
 
 
