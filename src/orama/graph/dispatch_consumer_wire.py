@@ -22,6 +22,8 @@ MAX_WIRE_BYTES: Final = 65_536
 SIGNATURE_BYTES: Final = 64
 GENESIS_EVENT_DIGEST: Final = "0" * 64
 EVENT_KINDS: Final = frozenset({"revocation", "cascade", "finalization"})
+SUBJECT_KINDS: Final = frozenset({"grant", "approval", "issuer"})
+_IDENTIFIER_RE: Final = re.compile(r"[\x21-\x7e]{1,1024}")
 
 _PERMIT_REQUEST_FIELDS: Final = (
     "grant_id", "grant_payload_digest", "operation_id", "request_digest", "artifact_digest",
@@ -212,6 +214,37 @@ def _validate_event_body(kind: object, body: object) -> None:
         if set(body) != {"finalization_id"}:
             raise WireError("a finalization event body is exactly {finalization_id}")
         _check_value("finalization_id", body["finalization_id"])
+    elif kind == "revocation":
+        if set(body) != {"subject_kind", "subject_id"}:
+            raise WireError("a revocation body is exactly {subject_kind, subject_id}")
+        if not isinstance(body["subject_kind"], str) or body["subject_kind"] not in SUBJECT_KINDS:
+            raise WireError("subject_kind must be grant, approval or issuer")
+        _require_identifier("subject_id", body["subject_id"])
+    else:
+        if set(body) != {"approval_id", "grant_ids", "issuer_authority_version"}:
+            raise WireError("a cascade body is exactly {approval_id, grant_ids, issuer_authority_version}")
+        _require_identifier("approval_id", body["approval_id"])
+        grant_ids = body["grant_ids"]
+        if not isinstance(grant_ids, list):
+            raise WireError("grant_ids must be an array")
+        for grant_id in grant_ids:
+            _require_identifier("grant_ids element", grant_id)
+        if any(earlier >= later for earlier, later in zip(grant_ids, grant_ids[1:])):
+            raise WireError("grant_ids must be strictly ascending and duplicate-free")
+        version = body["issuer_authority_version"]
+        if not _is_int(version) or not 1 <= version <= MAX_SAFE_INTEGER:
+            raise WireError("issuer_authority_version must be a safe integer of at least 1")
+
+
+def is_canonical_identifier(value: object) -> bool:
+    """Return True for a canonical identifier: printable ASCII without space, 1 to 1024 bytes."""
+    return isinstance(value, str) and _IDENTIFIER_RE.fullmatch(value) is not None
+
+
+def _require_identifier(name: str, value: object) -> None:
+    """Require a canonical identifier (see ``is_canonical_identifier``)."""
+    if not is_canonical_identifier(value):
+        raise WireError(f"{name} must be a canonical identifier")
 
 
 def validate_event_wire(obj: object) -> dict[str, Any]:
