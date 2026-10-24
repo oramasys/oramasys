@@ -31,6 +31,7 @@ from orama.graph.dispatch_attempts import (
 )
 from orama.graph.dispatch_consumer_wire import (
     GENESIS_EVENT_DIGEST,
+    WireError,
     event_digest,
     finalization_body,
     finalization_digest,
@@ -233,7 +234,7 @@ def harness(tmp_path: Path) -> Harness:
     """Open a store with the vector attempt created."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path)
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     return Harness(store, path, FakeVerifier(), FakeGates(), FakeRevocations())
 
 
@@ -671,7 +672,7 @@ def test_threaded_race_between_fence_and_authorize_has_exactly_one_winner(
         path = tmp_path / f"race-{iteration}" / "attempts.db"
         flow = vector_flow()
         setup = SqliteAttemptStore(path)
-        setup.create_attempt(ATTEMPT, GRANT, RESERVATION)
+        setup._create_attempt(ATTEMPT, GRANT, RESERVATION)
         setup.ingest_events(ISSUER, flow.chain[:1], FakeVerifier())
         setup.close()
         fencer, authorizer = SqliteAttemptStore(path), SqliteAttemptStore(path)
@@ -811,21 +812,22 @@ def test_ingest_flags_a_previous_digest_that_forks_the_stored_chain(harness: Har
     assert harness.store.is_diverged(ISSUER)
 
 
-def test_ingest_accepts_revocation_events_and_authorize_ignores_them_as_revocation(
+def test_ingest_refuses_the_opaque_revocation_body_and_accepts_the_closed_one(
     harness: Harness,
 ) -> None:
-    """Non-finalization kinds ingest like any chained event."""
-    body = {"grant_id": GRANT}
-    digest = event_digest(1, "revocation", body, GENESIS_EVENT_DIGEST)
-    harness.ingest(
-        [
-            {
-                "version": 1, "kind": "revocation", "body": body,
-                "previous_event_digest": GENESIS_EVENT_DIGEST, "event_digest": digest,
-                "issuer_key_id": KEY, "signature": SIG,
-            }
-        ]
-    )
+    """Part 3 Sections 1-2 replace slice 1's opaque bodies: only the closed body ingests."""
+    def revocation(body: dict[str, Any]) -> dict[str, Any]:
+        """Return a one-event chain carrying ``body`` as a revocation."""
+        digest = event_digest(1, "revocation", body, GENESIS_EVENT_DIGEST)
+        return {
+            "version": 1, "kind": "revocation", "body": body,
+            "previous_event_digest": GENESIS_EVENT_DIGEST, "event_digest": digest,
+            "issuer_key_id": KEY, "signature": SIG,
+        }
+
+    with pytest.raises(WireError):
+        event_digest(1, "revocation", {"grant_id": GRANT}, GENESIS_EVENT_DIGEST)
+    harness.ingest([revocation({"subject_kind": "grant", "subject_id": GRANT})])
 
     assert harness.store.acked_through(ISSUER) == 1
 
@@ -837,7 +839,7 @@ def test_create_attempt_is_durable_across_close_and_reopen(tmp_path: Path) -> No
     """The attempt row survives close and reopen with its identity intact."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path)
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     store.close()
 
     reopened = SqliteAttemptStore(path)
@@ -852,12 +854,12 @@ def test_create_attempt_is_durable_across_close_and_reopen(tmp_path: Path) -> No
 def test_create_attempt_is_idempotent_but_refuses_a_different_binding(tmp_path: Path) -> None:
     """The same attempt_id with the same binding is a no-op; a different one is refused."""
     store = SqliteAttemptStore(db_path(tmp_path))
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     with pytest.raises(AttemptStateError):
-        store.create_attempt(ATTEMPT, GRANT, "res-other")
+        store._create_attempt(ATTEMPT, GRANT, "res-other")
     with pytest.raises(ValueError):
-        store.create_attempt(" ", GRANT, RESERVATION)
+        store._create_attempt(" ", GRANT, RESERVATION)
 
 
 def test_store_directory_and_file_are_private(tmp_path: Path) -> None:
@@ -872,7 +874,7 @@ def test_mark_transmitted_is_durable(tmp_path: Path) -> None:
     """The transmitted flag survives reopen and moves created to transmitted."""
     path = db_path(tmp_path)
     store = SqliteAttemptStore(path)
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     store.mark_transmitted(ATTEMPT)
     store.close()
 
@@ -913,7 +915,7 @@ def test_crash_and_restart_between_ingest_and_authorize(tmp_path: Path) -> None:
     path = db_path(tmp_path)
     flow = vector_flow()
     first = SqliteAttemptStore(path)
-    first.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    first._create_attempt(ATTEMPT, GRANT, RESERVATION)
     first.ingest_events(ISSUER, flow.chain[:1], FakeVerifier())
     first.close()
 

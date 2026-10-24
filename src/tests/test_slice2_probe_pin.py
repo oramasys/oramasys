@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_PATH = ROOT / "src" / "tests" / "interop" / "c2_slice2_probe.py"
-EXPECTED_SHA256 = "682129b1d1f359fa04548c75f2bb362f93648e5673bddb96390453d3b4d8d878"
+EXPECTED_SHA256 = "3bf01b0a0052931fd8858b37862e3b05ec407ab62ab35f970062df75c7687df7"
 
 
 def test_slice2_probe_file_exists_and_matches_sha256() -> None:

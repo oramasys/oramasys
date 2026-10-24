@@ -57,3 +57,20 @@ jobs:
         run: python src/tests/interop/c2_interop_probe.py "$GITHUB_WORKSPACE/phylax-pinned" "$GITHUB_WORKSPACE"
       - name: Run the slice 2 interop probe
         run: python src/tests/interop/c2_slice2_probe.py "$GITHUB_WORKSPACE/phylax-pinned" "$GITHUB_WORKSPACE"
+      - name: Read the pinned Phylax Part 3 events commit
+        id: events-pin
+        run: |
+          PIN="$(tr -d '[:space:]' < requirements/compatibility-phylax-events.txt)"
+          echo "$PIN" | grep -Eq '^[0-9a-f]{40}$'
+          echo "commit=$PIN" >> "$GITHUB_OUTPUT"
+      - name: Check out Phylax at the pinned Part 3 events commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: oramasys/phylax
+          ref: ${{ steps.events-pin.outputs.commit }}
+          path: phylax-events-pinned
+          persist-credentials: false
+      - name: Part 3 events probe copies must be byte-identical
+        run: cmp src/tests/interop/c2_part3_events_probe.py phylax-events-pinned/src/tests/interop/c2_part3_events_probe.py
+      - name: Run the Part 3 events interop probe
+        run: python src/tests/interop/c2_part3_events_probe.py "$GITHUB_WORKSPACE/phylax-events-pinned" "$GITHUB_WORKSPACE"

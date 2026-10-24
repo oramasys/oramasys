@@ -76,7 +76,7 @@ def harness(tmp_path: Path, *, governed: bool = True) -> Harness:
     store = SqliteAttemptStore(
         path, governed=governed, abandon_authenticator=FakeIssuerAuthenticator()
     )
-    store.create_attempt(ATTEMPT, GRANT, RESERVATION)
+    store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     if governed:
         store.propose("proposal-1", SCOPE, NOW)
         store.reserve(RESERVATION, "proposal-1", SCOPE, NOW + timedelta(hours=1), NOW)
