@@ -194,6 +194,26 @@ class AttemptRecord:
     """The grant's approval binding: None undeclared, "" single approval, else the approval id."""
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedDispatchGrant:
+    """Dispatch-grant facts produced by the future verified-v2 composition boundary.
+
+    This is intentionally distinct from adjustment-grant verification.  The
+    consumer accepts these facts only after a trusted adapter has verified the
+    v2 dispatch grant; the store then copies the approval binding durably before
+    any issuer call.
+    """
+
+    grant_id: str
+    second_approval_ref: str = ""
+
+    def __post_init__(self) -> None:
+        """Refuse malformed dispatch-grant facts before persistence."""
+        _require_text("grant_id", self.grant_id)
+        if self.second_approval_ref and not is_canonical_identifier(self.second_approval_ref):
+            raise ValueError("second_approval_ref must be empty or a canonical identifier")
+
+
 _SCHEMA: Final = (
     "CREATE TABLE IF NOT EXISTS dispatch_attempts ("
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, reservation_id TEXT NOT NULL,"
@@ -620,13 +640,14 @@ class SqliteAttemptStore:
         *,
         second_approval_ref: str | None = None,
     ) -> None:
-        """Durably record the attempt BEFORE any issuer call (idempotent when identical).
+        """Persist a low-level attempt binding (idempotent when identical).
 
-        ``second_approval_ref`` is copied from the verified v2 grant and bound to the attempt
-        here, once, so Rule 4 reads it from persisted state rather than from the authorizing
-        caller. ``""`` is the wire's single-approval value; a non-empty value must be a
-        canonical identifier. Omitting it records the attempt as undeclared, which Rule 4
-        refuses whenever the issuer has revoked any approval (fail closed, never a bypass).
+        This primitive remains for migration and Phase 3 fixture construction.
+        Production composition must call ``create_attempt_from_verified_grant``
+        so the binding is copied from a verified dispatch-grant object rather
+        than accepted as an authorizing caller argument. ``None`` records an
+        undeclared legacy attempt, which Rule 4 refuses whenever the issuer has
+        revoked any approval.
         """
         for name, value in (
             ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
@@ -654,6 +675,26 @@ class SqliteAttemptStore:
                     second_approval_ref,
                 ),
             )
+
+    def create_attempt_from_verified_grant(
+        self,
+        attempt_id: str,
+        verified_grant: VerifiedDispatchGrant,
+        reservation_id: str,
+    ) -> None:
+        """Persist a verified dispatch grant's approval binding before issuer contact.
+
+        Verification belongs outside this SQLite transaction and is owned by a
+        composition adapter. This method owns the one-way copy into durable
+        attempt state, preventing a future authorizing caller from supplying a
+        separate approval reference.
+        """
+        self.create_attempt(
+            attempt_id,
+            verified_grant.grant_id,
+            reservation_id,
+            second_approval_ref=verified_grant.second_approval_ref,
+        )
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord | None:
         """Return the attempt row, or None if it does not exist."""

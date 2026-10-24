@@ -345,6 +345,33 @@ def test_approval_binding_must_be_empty_or_canonical(tmp_path: Path, bad: object
     assert s.get_attempt(ATTEMPT) is None
 
 
+def test_verified_dispatch_grant_accepts_the_canonical_identifier_boundary(tmp_path: Path) -> None:
+    """A verified second approval may be exactly 1024 ASCII bytes, but never 1025."""
+    from orama.graph.dispatch_attempts import VerifiedDispatchGrant
+
+    accepted = VerifiedDispatchGrant(GRANT, "a" * 1024)
+    store = SqliteAttemptStore(db_path(tmp_path))
+    store.create_attempt_from_verified_grant(ATTEMPT, accepted, RESERVATION)
+
+    assert store.get_attempt(ATTEMPT).second_approval_ref == "a" * 1024
+    with pytest.raises(ValueError, match="second_approval_ref"):
+        VerifiedDispatchGrant(GRANT, "a" * 1025)
+
+
+def test_verified_dispatch_grant_copies_its_binding_without_a_raw_override(tmp_path: Path) -> None:
+    """The composition helper accepts only verified dispatch-grant facts."""
+    from orama.graph.dispatch_attempts import VerifiedDispatchGrant
+
+    store = SqliteAttemptStore(db_path(tmp_path))
+    store.create_attempt_from_verified_grant(
+        ATTEMPT,
+        VerifiedDispatchGrant(GRANT, APPROVAL),
+        RESERVATION,
+    )
+
+    assert store.get_attempt(ATTEMPT).second_approval_ref == APPROVAL
+
+
 def test_approval_binding_is_part_of_the_idempotent_attempt(tmp_path: Path) -> None:
     """Repeating an attempt is a no-op only with the same binding; any change is refused."""
     s = make_store(tmp_path, APPROVAL)
