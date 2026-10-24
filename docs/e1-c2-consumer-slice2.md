@@ -77,3 +77,24 @@ persisted. Key trust comes only from an injected `TrustedIssuerKeys` port; there
 adapter, no `governed=True` caller, no transport and no serving path, and `ORAMA_GRANT_SERVING`
 stays unset. Conformance tests: `src/tests/test_dispatch_anchor.py` (mirrors the orama-system suite).
 Not covered: gate order when several rules fail together, and concurrent floor commits.
+
+## Current status (2026-10-25)
+
+The sections above are the historical record of the slice-2 and section 3.3 work and stay as written. Where
+they conflict with this section, this section governs.
+
+| Earlier statement | Current state |
+| --- | --- |
+| The operator merges PR 67 first and retargets this PR to `main` | Done. PR 67 and the slice-2 PRs are merged; no retargeting remains. |
+| Revocation and cascade event body shapes are not built | Built and merged: Oramasys #74 (consumer ingestion and Rule 4) with Phylax #19 (signed bodies); interop #75 (X2 digests). |
+| Not covered: gate order when several rules fail together | Covered by merged #73 (`test_dispatch_anchor_order_race.py`). |
+| Not covered: concurrent floor commits | #73 races threads over one store instance and its shared lock. Two independently constructed stores on one database file are the remaining qualification gap (finding F3); its tests are separate from this status update. |
+| The ratified specification is `orama-system` `59c623fa` | Correct as the ratified base commit: the orama-system addendum `2026-10-19-e1-specification-ratification-addendum.md` records Parts 1 and 2 as ratified at that commit. The commit's own merge subject (a Hermes change) is unrelated, so cite the addendum as the ratification record and the commit as the ratified base. |
+
+Still not built or decided: the effect grant v2 parser and verified-grant composition, a production operator
+authenticator, retained and signed checkpoints, and execution witnesses (Part 3 sections 3.1, 3.2 and 4).
+No serving, no transport, no production caller and no pin change follow from the merged work.
+`ORAMA_GRANT_SERVING` stays unset until the operator's scheduled action.
+
+Evidence for the merged state: consumer main `68f063017b52129f7a92de03ff9899f70f07d10a`, CI run 40087328610 and
+permit interop run 40087328625; issuer main `849351f54839b22d62f33242a348700b40864890`, CI run 40087386751.
