@@ -198,7 +198,7 @@ def test_concurrent_conflicting_bootstrap_quarantines_and_keeps_the_first_values
     record = store.anchor_record(ISSUER)
     winner = record["event_digest"]
     assert winner in {original["event_digest"], conflicting["event_digest"]}
-    for anchor, result in zip(submitted, results):
+    for anchor, result in zip(submitted, results, strict=True):
         if anchor["event_digest"] == winner:
             assert result is None, (anchor["event_digest"], result)
         else:
