@@ -185,6 +185,30 @@ def test_ingest_refuses_malformed_bodies(
     assert snapshot(db_path(tmp_path)) == before
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"approval_id": "approval-1", "grant_ids": [], "issuer_authority_version": 1},
+        {"approval_id": "approval-1", "grant_ids": ["g-a"], "issuer_authority_version": 1},
+        {"approval_id": "approval-1", "grant_ids": ["g-a"], "issuer_authority_version": 2**53 - 1},
+        {"approval_id": "a" * 1024, "grant_ids": ["g" * 1024], "issuer_authority_version": 1},
+    ],
+    ids=["empty grant_ids", "single grant_id", "max safe version", "max length identifiers"],
+)
+def test_ingest_accepts_cascade_boundary_bodies(
+    store: SqliteAttemptStore, body: dict[str, Any]
+) -> None:
+    """Empty or single ``grant_ids``, versions 1 and 2**53-1, and 1024-byte ids are all accepted."""
+    flow = flow_after([("cascade", body)])
+
+    store.ingest_events(ISSUER, flow.chain, FakeVerifier())
+
+    assert store.authority_facts(ISSUER)["cascades"] == [
+        (1, body["approval_id"], body["issuer_authority_version"], body["grant_ids"])
+    ]
+    assert store.acked_through(ISSUER) == 1
+
+
 def test_malformed_batch_persists_nothing(store: SqliteAttemptStore) -> None:
     """A valid event followed by a malformed one in the same batch leaves no ack and no fact."""
     bad = {**EVENTS["events"][1], "body": {"subject_kind": "approvals", "subject_id": "a"}}
