@@ -91,6 +91,17 @@ def test_rule3_is_reported_when_the_floor_holds(harness: Harness) -> None:  # no
     assert caught.value.rule == "rule3"
 
 
+def test_rule2_is_reported_before_rule3_when_both_fail(harness: Harness) -> None:  # noqa: F811
+    """With the floor met, Rules 2 and 3 both failing reports Rule 2 (gate order)."""
+    boot(harness, make_chain(3)[2])  # floor 3, acknowledged through 3
+    flow = build_flow(r_p=4, r_f=5, permit_changes={"consumer_acked_through": 5})
+
+    with pytest.raises(AuthorizationRefused) as caught:
+        harness.authorize(flow)
+
+    assert caught.value.rule == "rule2"
+
+
 PENDING = object()
 """Marker for a worker that never recorded a result; distinct from a successful ``None``."""
 
