@@ -144,6 +144,18 @@ def create_app(
             payload_digest=receipt.payload_digest,
         )
 
+    @app.get("/readyz")
+    async def readiness() -> dict:
+        """Report composition only, never grant validity or effect authorization."""
+        if state != "ready":
+            raise HTTPException(status_code=503, detail={"code": "serving_unavailable"})
+        return {"status": "ready", "scope": "grant_composition"}
+
+    @app.get("/healthz")
+    async def liveness() -> dict:
+        """Expose data-free process liveness independently of authority readiness."""
+        return {"status": "ok"}
+
     @app.get("/health")
     async def health() -> dict:
         """Report process availability and non-sensitive grant composition state."""

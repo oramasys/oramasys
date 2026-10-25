@@ -1202,7 +1202,7 @@ class SqliteAttemptStore:
         with self._immediate() as db:
             reserve(db, reservation_id, proposal_id, scope, expires_at, now)
 
-    def begin_send(self, attempt_id: str) -> None:
+    def begin_send(self, attempt_id: str, *, inert_only: bool = False) -> None:
         """Durably mark the one allowed send as started; a second send is always refused."""
         with self._immediate() as db:
             row = db.execute(
@@ -1211,6 +1211,15 @@ class SqliteAttemptStore:
             if row is None:
                 raise AttemptStateError("no authorized outbox row for the attempt")
             attempt = _load_attempt(db, attempt_id)
+            if inert_only:
+                scope = db.execute(
+                    "SELECT p.destination FROM effect_proposals p JOIN reservations r"
+                    " ON r.proposal_id = p.proposal_id WHERE r.reservation_id = ?"
+                    " AND r.consumed_attempt_id = ?",
+                    (attempt.reservation_id, attempt_id),
+                ).fetchone()
+                if not self._governed or scope != ("inert://simulation",):
+                    raise OutcomeRefused("inert_scope_required")
             complete = db.execute(
                 "SELECT " + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
                 + " FROM outbox WHERE attempt_id = ?",
