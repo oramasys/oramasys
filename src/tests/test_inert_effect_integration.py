@@ -1,6 +1,7 @@
 """Use the real governed transaction before driving an inert effect."""
 import pytest
 from dataclasses import replace
+from pathlib import Path
 from orama.graph.dispatch_attempts import SqliteAttemptStore
 from tests.test_dispatch_attempts import GRANT, RESERVATION, NOW, Harness, FakeVerifier, FakeGates, FakeRevocations, ready, vector_flow
 from tests.test_effect_seam import SCOPE, LIVE_UNTIL, authorize
@@ -23,8 +24,8 @@ def test_real_effect_cannot_be_settled_by_simulation(tmp_path):
         h.store.close()
 
 
-def inert_harness(tmp_path):
-    """Create an authorized attempt explicitly scoped to the inert destination."""
+def inert_harness(tmp_path: Path, *, authorize_attempt: bool = True) -> Harness:
+    """Prepare an inert attempt, optionally pausing before its authorization commit."""
     store = SqliteAttemptStore(tmp_path / "inert.sqlite", governed=True)
     store._create_attempt(ATTEMPT, GRANT, RESERVATION)
     scope = replace(SCOPE, destination="inert://simulation")
@@ -32,7 +33,8 @@ def inert_harness(tmp_path):
     store.reserve(RESERVATION, "inert-proposal", scope, LIVE_UNTIL, NOW)
     h = Harness(store, tmp_path / "inert.sqlite", FakeVerifier(), FakeGates(), FakeRevocations())
     ready(h, vector_flow())
-    authorize(h, scope)
+    if authorize_attempt:
+        authorize(h, scope)
     return h
 
 
