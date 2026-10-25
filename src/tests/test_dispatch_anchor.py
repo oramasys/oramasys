@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,15 +23,29 @@ from orama.graph.dispatch_anchor import (
     AnchorQuarantined,
     AnchorRefused,
 )
-from orama.graph.dispatch_attempts import AttemptStateError, EventRefused, OperatorRefused
+from orama.graph.dispatch_attempts import (
+    AttemptStateError,
+    EventRefused,
+    OperatorRefused,
+    SqliteAttemptStore,
+    VerifiedDispatchGrant,
+)
 from orama.graph.dispatch_consumer_wire import event_digest
+from orama.graph.effect_proposals import EffectScope
 from tests.test_dispatch_attempts import (
     ATTEMPT,
+    EXPECTED,
+    GRANT,
     ISSUER,
     KEY,
     NOW,
+    RESERVATION,
+    FakeGates,
+    FakeRevocations,
+    FakeVerifier,
     Harness,
     build_flow,
+    db_path,
     harness,  # noqa: F401  (fixture re-export)
     make_chain,
     snapshot,
@@ -37,27 +54,33 @@ from tests.test_dispatch_attempts import (
 
 @dataclass
 class TrustedKeys:
+    """Trusted issuer key ids, keyed by issuer id."""
     allowed: dict[str, set[str]] = field(default_factory=lambda: {ISSUER: {KEY}})
 
     def key_belongs_to(self, issuer_id: str, key_id: str) -> bool:
+        """Return whether the key id is trusted for the issuer."""
         return key_id in self.allowed.get(issuer_id, set())
 
 
 @dataclass
 class Operator:
+    """Operator authority stub returning a fixed reference."""
     reference: str | None = "operator-1"
 
     def authorize(self, operation: str, *, subject: str) -> str | None:
+        """Return the fixed operator reference, or None when the operator is withheld."""
         return self.reference
 
 
 def boot(h: Harness, event: dict[str, Any], keys: TrustedKeys | None = None) -> None:
+    """Bootstrap the harness store from the event with the default trusted keys unless given."""
     h.store.bootstrap_anchor(
         ISSUER, event, h.verifier, trusted_keys=keys or TrustedKeys(), now=NOW
     )
 
 
 def forged_anchor(version: int = 5, previous: str = "d" * 64) -> dict[str, Any]:
+    """Build a well-formed anchor event with a valid digest but a forged signature."""
     body = {"finalization_id": f"other-{version}"}
     digest = event_digest(version, "finalization", body, previous)
     return {
@@ -68,6 +91,7 @@ def forged_anchor(version: int = 5, previous: str = "d" * 64) -> dict[str, Any]:
 
 
 def quarantined(h: Harness, version: int = 5) -> list[dict[str, Any]]:
+    """Quarantine the issuer by bootstrapping a real anchor, then a conflicting forged one."""
     chain = make_chain(version + 3)
     boot(h, chain[version - 1])
     with pytest.raises(AnchorConflict):
@@ -75,7 +99,35 @@ def quarantined(h: Harness, version: int = 5) -> list[dict[str, Any]]:
     return chain
 
 
+F3_SCOPE = EffectScope(
+    principal="f3-principal",
+    graph_id="f3-graph",
+    policy_hash="a" * 64,
+    operation_digest="b" * 64,
+    artifact_identity="c" * 64,
+    destination="f3-destination",
+)
+F3_PROPOSAL = "f3-proposal"
+
+
+def f3_stores(tmp_path: Path) -> tuple[SqliteAttemptStore, SqliteAttemptStore, Path]:
+    """Return independent governed stores backed by one prepared SQLite database."""
+    path = db_path(tmp_path)
+    first = SqliteAttemptStore(path, governed=True)
+    second = SqliteAttemptStore(path, governed=True)
+    first.create_attempt(ATTEMPT, VerifiedDispatchGrant(GRANT), RESERVATION)
+    first.propose(F3_PROPOSAL, F3_SCOPE, NOW)
+    first.reserve(RESERVATION, F3_PROPOSAL, F3_SCOPE, NOW + timedelta(hours=1), NOW)
+    return first, second, path
+
+
+def f3_boot(store: SqliteAttemptStore, event: dict[str, Any]) -> None:
+    """Bootstrap through an independently constructed store instance."""
+    store.bootstrap_anchor(ISSUER, event, FakeVerifier(), trusted_keys=TrustedKeys(), now=NOW)
+
+
 def test_cold_bootstrap_persists_identity_floor_and_base(harness: Harness) -> None:  # noqa: F811
+    """A cold bootstrap persists the anchor identity, floor, base and acked version."""
     anchor = make_chain(5)[4]
 
     boot(harness, anchor)
@@ -89,7 +141,132 @@ def test_cold_bootstrap_persists_identity_floor_and_base(harness: Harness) -> No
     assert harness.store.acked_through(ISSUER) == 5
 
 
+def test_independent_stores_accept_an_identical_bootstrap_and_restart_readback(
+    tmp_path: Path,
+) -> None:
+    """Two connections share an idempotent bootstrap and a restart reads the same anchor."""
+    first, second, path = f3_stores(tmp_path)
+    anchor = make_chain(5)[4]
+    try:
+        f3_boot(first, anchor)
+        f3_boot(second, anchor)
+    finally:
+        first.close()
+        second.close()
+
+    reopened = SqliteAttemptStore(path, governed=True)
+    try:
+        assert reopened.anchor_record(ISSUER) == {
+            "issuer_id": ISSUER,
+            "issuer_key_id": KEY,
+            "version": 5,
+            "event_digest": anchor["event_digest"],
+            "anchor_floor": 5,
+            "base_version": 5,
+            "base_digest": anchor["event_digest"],
+            "quarantined": 0,
+        }
+        assert reopened.acked_through(ISSUER) == 5
+    finally:
+        reopened.close()
+
+
+def test_independent_store_bootstrap_race_quarantines_and_survives_restart(
+    tmp_path: Path,
+) -> None:
+    """Two independent connections race without a shared application mutex or sleeps."""
+    first, second, path = f3_stores(tmp_path)
+    original, conflicting = make_chain(5)[4], forged_anchor()
+    ready = threading.Barrier(3)
+    release = threading.Event()
+    pending = object()
+    outcomes: list[object] = [pending, pending]
+
+    def bootstrap(index: int, store: SqliteAttemptStore, anchor: dict[str, Any]) -> None:
+        """Wait for both SQLite connections, then retain the bootstrap result for assertion."""
+        try:
+            ready.wait()
+            release.wait()
+            f3_boot(store, anchor)
+        except BaseException as error:  # noqa: BLE001 - the assertion classifies each racer
+            outcomes[index] = error
+        else:
+            outcomes[index] = None
+
+    threads = [
+        threading.Thread(target=bootstrap, args=(0, first, original), daemon=True),
+        threading.Thread(target=bootstrap, args=(1, second, conflicting), daemon=True),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        ready.wait()
+        release.set()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not [thread for thread in threads if thread.is_alive()]
+        assert all(outcome is not pending for outcome in outcomes), outcomes
+        assert sum(outcome is None for outcome in outcomes) == 1, outcomes
+        assert sum(isinstance(outcome, AnchorConflict) for outcome in outcomes) == 1, outcomes
+    finally:
+        release.set()
+        first.close()
+        second.close()
+
+    reopened = SqliteAttemptStore(path, governed=True)
+    try:
+        record = reopened.anchor_record(ISSUER)
+        assert record is not None
+        assert record["event_digest"] in {original["event_digest"], conflicting["event_digest"]}
+        assert record["quarantined"] == 1
+        with sqlite3.connect(path) as db:
+            evidence = db.execute(
+                "SELECT evidence FROM issuer_anchor_conflicts WHERE issuer_id = ?", (ISSUER,)
+            ).fetchall()
+        assert len(evidence) == 1
+        assert json.loads(evidence[0][0])["event_digest"] != record["event_digest"]
+    finally:
+        reopened.close()
+
+
+def test_peer_committed_floor_refuses_authorization_without_consuming_or_writing(
+    tmp_path: Path,
+) -> None:
+    """A floor committed by one connection blocks a peer before reservation or effects mutate."""
+    first, second, path = f3_stores(tmp_path)
+    flow = build_flow(r_p=3, r_f=4)
+    try:
+        f3_boot(first, make_chain(5)[4])
+        # Stabilize the governed high-water row before the refusal snapshot; this test targets
+        # anchor-floor atomicity rather than the independently qualified clock mechanism.
+        second.observe_clock(NOW)
+        before = snapshot(path)
+
+        with pytest.raises(AnchorFloorRefused) as caught:
+            second.authorize_dispatch(
+                ATTEMPT,
+                flow.permit,
+                flow.fin,
+                NOW,
+                verifier=FakeVerifier(),
+                gates=FakeGates(),
+                revocations=FakeRevocations(),
+                issuer_id=ISSUER,
+                expected=EXPECTED,
+                scope=F3_SCOPE,
+            )
+
+        assert caught.value.reason == "anchor_floor.permit_below_floor"
+        after = snapshot(path)
+        for table in ("reservations", "grant_use", "dispatch_intents", "outbox"):
+            assert after[table] == before[table]
+    finally:
+        first.close()
+        second.close()
+
+
 def test_gap_does_not_advance_but_next_event_does(harness: Harness) -> None:  # noqa: F811
+    """A gap leaves acked_through unchanged and the next contiguous event advances it."""
     chain = make_chain(8)
     boot(harness, chain[4])
 
@@ -104,6 +281,7 @@ def test_gap_does_not_advance_but_next_event_does(harness: Harness) -> None:  # 
 
 
 def test_events_below_anchor_are_refused_without_persisting(harness: Harness) -> None:  # noqa: F811
+    """Events at or below the anchor floor are refused and nothing is written."""
     chain = make_chain(5)
     boot(harness, chain[4])
     before = snapshot(harness.path)
@@ -118,6 +296,7 @@ def test_events_below_anchor_are_refused_without_persisting(harness: Harness) ->
 
 
 def _ack_versions(h: Harness) -> list[int]:
+    """Return the acked event versions recorded in issuer_cascade_ack."""
     return [r[0] for r in sqlite3.connect(h.path).execute("SELECT version FROM issuer_cascade_ack")]
 
 
@@ -125,6 +304,7 @@ def _ack_versions(h: Harness) -> list[int]:
 def test_bad_digest_or_shape_is_plain_refusal_persisting_nothing(
     harness: Harness, mutate: str  # noqa: F811
 ) -> None:
+    """A mutated digest, body or version is a plain refusal that persists nothing."""
     anchor = deepcopy(make_chain(5)[4])
     if mutate == "digest":
         anchor["event_digest"] = "0" * 64
@@ -141,6 +321,7 @@ def test_bad_digest_or_shape_is_plain_refusal_persisting_nothing(
 
 
 def test_key_supplied_only_by_event_is_not_trusted(harness: Harness) -> None:  # noqa: F811
+    """A key id known only from the event itself is not trusted."""
     with pytest.raises(AnchorRefused):
         boot(harness, make_chain(5)[4], TrustedKeys(allowed={ISSUER: set()}))
     with pytest.raises(AnchorRefused):
@@ -150,6 +331,7 @@ def test_key_supplied_only_by_event_is_not_trusted(harness: Harness) -> None:  #
 
 
 def test_bad_signature_is_plain_refusal(harness: Harness) -> None:  # noqa: F811
+    """A bad signature is a plain refusal rather than a quarantine."""
     harness.verifier.event_ok = False
 
     with pytest.raises(AnchorRefused):
@@ -159,6 +341,7 @@ def test_bad_signature_is_plain_refusal(harness: Harness) -> None:  # noqa: F811
 
 
 def test_identical_retry_is_noop_and_keeps_acked_through(harness: Harness) -> None:  # noqa: F811
+    """An identical retry is a no-op and keeps acked_through."""
     chain = make_chain(7)
     boot(harness, chain[4])
     harness.ingest(chain[5:7])
@@ -170,6 +353,7 @@ def test_identical_retry_is_noop_and_keeps_acked_through(harness: Harness) -> No
 
 
 def test_conflicting_retry_refuses_quarantines_and_keeps_values(harness: Harness) -> None:  # noqa: F811
+    """A conflicting retry refuses, quarantines the issuer and keeps stored values."""
     quarantined(harness)
 
     rec = harness.store.anchor_record(ISSUER)
@@ -178,6 +362,7 @@ def test_conflicting_retry_refuses_quarantines_and_keeps_values(harness: Harness
 
 
 def test_different_key_identity_on_repeat_quarantines(harness: Harness) -> None:  # noqa: F811
+    """Repeating the anchor under a different key identity quarantines the issuer."""
     anchor = make_chain(5)[4]
     boot(harness, anchor)
     other = {**anchor, "issuer_key_id": "key-2"}
@@ -190,6 +375,7 @@ def test_different_key_identity_on_repeat_quarantines(harness: Harness) -> None:
 
 
 def test_lower_version_retry_cannot_lower_floor(harness: Harness) -> None:  # noqa: F811
+    """A lower-version retry cannot lower the stored floor."""
     chain = make_chain(9)
     boot(harness, chain[8])
 
@@ -202,6 +388,7 @@ def test_lower_version_retry_cannot_lower_floor(harness: Harness) -> None:  # no
 def test_quarantine_blocks_authorization_without_writes_and_is_per_issuer(
     harness: Harness,  # noqa: F811
 ) -> None:
+    """Quarantine blocks authorization without writes and applies only to that issuer."""
     flow = build_flow(r_p=1, r_f=2)
     quarantined(harness)
     before = snapshot(harness.path)
@@ -217,6 +404,7 @@ def test_quarantine_blocks_authorization_without_writes_and_is_per_issuer(
 
 
 def test_matching_later_bootstrap_does_not_clear_quarantine(harness: Harness) -> None:  # noqa: F811
+    """A later matching bootstrap does not clear an existing quarantine."""
     chain = quarantined(harness)
 
     boot(harness, chain[4])
@@ -226,6 +414,7 @@ def test_matching_later_bootstrap_does_not_clear_quarantine(harness: Harness) ->
 
 @pytest.mark.parametrize("reference,evidence", [(None, "ev"), ("", "ev"), ("  ", "ev")])
 def test_clear_requires_operator_reference(harness: Harness, reference: Any, evidence: str) -> None:  # noqa: F811
+    """Clearing a quarantine requires an operator reference."""
     quarantined(harness)
 
     with pytest.raises(OperatorRefused):
@@ -238,6 +427,7 @@ def test_clear_requires_operator_reference(harness: Harness, reference: Any, evi
 
 @pytest.mark.parametrize("evidence", ["", "   "])
 def test_clear_requires_trusted_evidence(harness: Harness, evidence: str) -> None:  # noqa: F811
+    """Clearing a quarantine requires trusted evidence."""
     quarantined(harness)
 
     with pytest.raises(ValueError):
@@ -247,6 +437,7 @@ def test_clear_requires_trusted_evidence(harness: Harness, evidence: str) -> Non
 
 
 def test_clear_needs_an_existing_quarantine(harness: Harness) -> None:  # noqa: F811
+    """Clearing is refused when the issuer is not quarantined."""
     boot(harness, make_chain(5)[4])
 
     with pytest.raises(AttemptStateError):
@@ -256,6 +447,7 @@ def test_clear_needs_an_existing_quarantine(harness: Harness) -> None:  # noqa: 
 
 
 def test_audited_clear_appends_immutable_log_and_keeps_floor(harness: Harness) -> None:  # noqa: F811
+    """An audited clear appends an immutable log entry and keeps the floor."""
     quarantined(harness)
 
     harness.store.clear_anchor_quarantine(
@@ -283,6 +475,7 @@ def test_audited_clear_appends_immutable_log_and_keeps_floor(harness: Harness) -
 def test_permit_below_floor_is_refused_with_no_writes_and_reservation_kept(
     harness: Harness,  # noqa: F811
 ) -> None:
+    """A permit below the floor is refused with no writes and the reservation kept."""
     flow = build_flow(r_p=3, r_f=4)
     boot(harness, make_chain(6)[5])
     before = snapshot(harness.path)
@@ -295,6 +488,7 @@ def test_permit_below_floor_is_refused_with_no_writes_and_reservation_kept(
 
 
 def test_permit_at_floor_authorizes_on_a_checkpoint_aware_base(harness: Harness) -> None:  # noqa: F811
+    """A permit at the floor authorizes on a checkpoint-aware base."""
     flow = build_flow(r_p=3, r_f=4)
     boot(harness, flow.chain[2])  # anchor at version 3 == floor
     harness.ingest(flow.chain[3:4])
@@ -308,6 +502,7 @@ def test_permit_at_floor_authorizes_on_a_checkpoint_aware_base(harness: Harness)
 
 
 def test_issuer_without_an_anchor_has_no_floor(harness: Harness) -> None:  # noqa: F811
+    """An issuer without an anchor has no floor."""
     flow = build_flow(r_p=1, r_f=2)
     harness.ingest(flow.chain[:1])
 
@@ -315,11 +510,13 @@ def test_issuer_without_an_anchor_has_no_floor(harness: Harness) -> None:  # noq
 
 
 def test_crash_inside_bootstrap_leaves_nothing(harness: Harness, monkeypatch: Any) -> None:  # noqa: F811
+    """A crash after the anchor insert rolls the whole bootstrap back."""
     import orama.graph.dispatch_anchor as anchor
 
     real = anchor.install_or_quarantine
 
     def crash(db: sqlite3.Connection, *args: Any) -> bool:
+        """Run the real install, then raise to simulate a crash inside the transaction."""
         real(db, *args)
         raise RuntimeError("crash after anchor insert")
 
