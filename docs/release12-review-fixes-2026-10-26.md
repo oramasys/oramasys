@@ -87,3 +87,38 @@ AST documentation audit of all changed Python files, including modules, classes,
 nested functions and methods: Phylax PR 22 167/167; dependent PR 23 293/293;
 Oramasys PR 77 154/154. These are docstring-presence counts, not executable
 coverage percentages or an audit of unrelated repository files.
+
+## R0-2 draft D2 integration (supersedes parts of the sections above)
+
+This section records how the R0-2 draft D2 (stacked on this branch) changes the
+behaviour described above. It is a draft; it is not an activation or
+enablement record, and `ORAMA_GRANT_SERVING` stays unset.
+
+- One canonical send path. `TrustedEffectGrantComposer` only verifies and
+  binds. Its send re-verifies the durable signed grant, derives the attempt's
+  final-boundary tuple from the store and goes through the sealed final
+  boundary (`authorize_final_boundary`, then `begin_bound_send` with the
+  single-use human approval). The plain `InertEffectDriver` is a store-level
+  primitive only; `POST /effects/inert` accepts only `FinalBoundarySender`.
+- The send-time rechecks (clock quarantine, missing or expired send authority,
+  acknowledged revocation, divergence, anchor quarantine) are one helper,
+  `_recheck_send_authority`, run inside the send transaction for every inert
+  send, including the final-boundary send. The send-authority expiry is the
+  earlier of the permit and finalization expiry compared as parsed instants.
+- The signed grant is verified again inside the send transaction, after the
+  send marker is written and before commit, so a revocation between the
+  pre-check and the marker rolls the send back.
+- `ORAMA_INERT_EFFECTS=enabled` is no longer enough. The composition root also
+  needs the R0-2 capability record to make `effects` effective (with the
+  startup refusal matrix) and the final-boundary ports. No operator signature
+  verifier is wired, so in R0-2 no sender is ever wired and the route answers
+  `404 serving.route_not_exposed`.
+- `/effects/inert` errors use the contract body
+  `{"error": {"code", "correlation_id"}}` with public codes only; the mapping
+  from internal reasons is documented in `orama/api/public_errors.py`.
+  Principal and binding mismatches have their own internal codes
+  (`effect.principal_mismatch` maps to `deny.unauthorized_caller`,
+  `effect.binding_mismatch` to `deny.malformed_grant`).
+- The authenticated principal is the single shared control-plane bearer's
+  principal. Checking it against the attempt's bound principal proves that the
+  caller holds that bearer, not per-caller ownership of the attempt.
