@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -177,6 +177,40 @@ def test_approval_consume_checks_status_in_a_fixed_order(h: Harness) -> None:
             effect_approvals.consume_approval(db, binding(), NOW)
 
 
+class MisleadingClock(datetime):
+    """A clock reading whose formatted text sorts before every real stamp; only its instant is true.
+
+    Injected clocks may return ``datetime`` subclasses. An expiry decided by comparing
+    ``strftime`` text would follow this text; one decided on instants cannot.
+    """
+
+    def strftime(self, fmt: str) -> str:
+        """Return a stamp that sorts before any real expiry."""
+        return "0000-01-01T00:00:00.000000Z"
+
+
+def misleading(moment: datetime) -> MisleadingClock:
+    """Return ``moment`` as a ``MisleadingClock`` with the same aware instant."""
+    utc = moment.astimezone(UTC)
+    return MisleadingClock(
+        utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second, utc.microsecond, tzinfo=UTC
+    )
+
+
+def test_approval_expiry_is_decided_on_instants_not_text(h: Harness) -> None:
+    """A clock past the approval's expiry cannot consume it, whatever its text form sorts like."""
+    approve(h)
+    late = misleading(LIVE_UNTIL + timedelta(minutes=1))
+    assert late > LIVE_UNTIL and late.astimezone(UTC).strftime("%Y") < "2026"
+    with h.store._immediate() as db:
+        with pytest.raises(FinalBoundaryRefused, match="approval_expired"):
+            effect_approvals.consume_approval(db, binding(), late)
+    assert h.store.approval_state(ATTEMPT) == "granted"
+    with h.store._immediate() as db:
+        effect_approvals.consume_approval(db, binding(), misleading(LIVE_UNTIL - timedelta(microseconds=1)))
+    assert h.store.approval_state(ATTEMPT) == "consumed"
+
+
 def test_the_approval_table_is_append_only_except_the_first_consumption(h: Harness) -> None:
     """No deletes, no rewriting the bound tuple, and one consumption stamp."""
     approve(h)
@@ -270,6 +304,33 @@ def test_a_ticket_expires(h: Harness) -> None:
     assert h.store.outbox_row(ATTEMPT)["outcome"] == "unknown"
     h.store.reconcile_unknown(ticket, ATTEMPT, "failed", "ev", operator=Operator(),
                               now=NOW + timedelta(minutes=5) - timedelta(microseconds=1))
+
+
+def test_ticket_expiry_is_decided_on_instants_not_text(h: Harness) -> None:
+    """A clock past the ticket's expiry cannot spend it, whatever its text form sorts like."""
+    in_doubt(h)
+    ticket = open_ticket(h, ttl=timedelta(minutes=5))
+    with pytest.raises(ReconciliationRefused, match="ticket_expired"):
+        h.store.reconcile_unknown(
+            ticket, ATTEMPT, "failed", "ev", operator=Operator(),
+            now=misleading(NOW + timedelta(minutes=10)),
+        )
+    assert h.store.outbox_row(ATTEMPT)["outcome"] == "unknown"
+
+
+def test_a_ticket_whose_stored_expiry_cannot_be_read_counts_as_expired(h: Harness) -> None:
+    """A damaged or foreign-format expiry never compares as later than now; the ticket refuses."""
+    in_doubt(h)
+    h.store._db.execute(
+        "INSERT INTO reconciliation_tickets (ticket_id, attempt_id, opened_by, expires_at,"
+        " created_at) VALUES ('ticket-damaged', ?, 'operator-ref', 'zz-not-a-time', ?)",
+        (ATTEMPT, NOW.isoformat()),
+    )
+    with pytest.raises(ReconciliationRefused, match="ticket_expired"):
+        h.store.reconcile_unknown(
+            "ticket-damaged", ATTEMPT, "failed", "ev", operator=Operator(), now=NOW
+        )
+    assert h.store.outbox_row(ATTEMPT)["outcome"] == "unknown"
 
 
 def test_a_ticket_is_scoped_to_its_attempt(h: Harness) -> None:

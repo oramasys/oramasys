@@ -115,11 +115,25 @@ def open_ticket(
     return ticket_id
 
 
+def _instant(stamp: object) -> datetime | None:
+    """Parse a stored fixed-width UTC stamp into an aware instant, or None when it cannot be read."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.strptime(stamp, _TIME_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
 def spend_ticket(
     db: sqlite3.Connection, ticket_id: str, attempt_id: str, outcome: str, evidence_ref: str,
     operator_ref: str, now: datetime,
 ) -> None:
-    """Spend the ticket once: settle ``unknown`` to ``outcome`` with the manual evidence reference."""
+    """Spend the ticket once: settle ``unknown`` to ``outcome`` with the manual evidence reference.
+
+    Ticket expiry compares the parsed stored instant with ``now`` (an aware datetime), never
+    formatted text; a stored expiry that cannot be read counts as expired.
+    """
     if outcome not in MANUAL_OUTCOMES:
         raise ReconciliationRefused("outcome_not_final")
     if not isinstance(evidence_ref, str) or not evidence_ref.strip():
@@ -134,7 +148,8 @@ def spend_ticket(
         raise ReconciliationRefused("ticket_scope_mismatch")
     if ticket[2] is not None:
         raise ReconciliationRefused("ticket_consumed")
-    if now.astimezone(UTC).strftime(_TIME_FORMAT) >= ticket[1]:
+    expires = _instant(ticket[1])
+    if expires is None or now >= expires:
         raise ReconciliationRefused("ticket_expired")
     row = db.execute(
         "SELECT outcome, send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)

@@ -42,10 +42,37 @@ def _digest(value: str) -> str:
 
 
 def _tuple_of(binding: FinalBoundaryBinding) -> tuple[str, str, str, str, int, str]:
-    """Return the comparable tuple of a binding (expiry as fixed-width UTC text)."""
+    """Return the binding's tuple with the expiry as the fixed-width UTC text that is stored."""
     return (
         binding.attempt_id, binding.principal, _digest(binding.operation_digest), binding.target,
         binding.epoch, binding.expires_at.astimezone(UTC).strftime(_TIME_FORMAT),
+    )
+
+
+def _instant(stamp: object) -> datetime | None:
+    """Parse a stored fixed-width UTC stamp into an aware instant, or None when it cannot be read.
+
+    Expiry is always decided on instants, never by comparing formatted text.
+    """
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.strptime(stamp, _TIME_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _same_tuple(row: tuple, binding: FinalBoundaryBinding) -> bool:
+    """Return True when a stored ``(principal, digest, target, epoch, expires_at)`` equals the binding.
+
+    The expiry is compared as a parsed instant; an unreadable stored expiry never matches.
+    """
+    _, principal, digest, target, epoch, _ = _tuple_of(binding)
+    expires = _instant(row[4])
+    return (
+        tuple(row[:4]) == (principal, digest, target, epoch)
+        and expires is not None
+        and expires == binding.expires_at.astimezone(UTC)
     )
 
 
@@ -63,7 +90,7 @@ def create_approval(
     if row is not None:
         if row[6] is not None:
             raise FinalBoundaryRefused("approval_consumed")
-        if tuple(row[1:6]) != (principal, digest, target, epoch, expires):
+        if not _same_tuple(tuple(row[1:6]), binding):
             raise FinalBoundaryRefused("approval_conflict")
         return row[0]
     db.execute(
@@ -76,8 +103,12 @@ def create_approval(
 
 
 def consume_approval(db: sqlite3.Connection, binding: FinalBoundaryBinding, now: datetime) -> None:
-    """Consume the approval for ``binding`` once, or raise ``FinalBoundaryRefused`` naming why not."""
-    attempt, principal, digest, target, epoch, expires = _tuple_of(binding)
+    """Consume the approval for ``binding`` once, or raise ``FinalBoundaryRefused`` naming why not.
+
+    Expiry compares the parsed stored instant with ``now`` (an aware datetime); formatted text is
+    never compared, so neither the text layout nor how a clock value formats itself can decide it.
+    """
+    attempt = binding.attempt_id
     row = db.execute(
         "SELECT principal, operation_digest, target, epoch, expires_at, consumed_at"
         " FROM effect_approvals WHERE attempt_id = ?",
@@ -87,9 +118,10 @@ def consume_approval(db: sqlite3.Connection, binding: FinalBoundaryBinding, now:
         raise FinalBoundaryRefused("approval_missing")
     if row[5] is not None:
         raise FinalBoundaryRefused("approval_consumed")
-    if tuple(row[:5]) != (principal, digest, target, epoch, expires):
+    if not _same_tuple(tuple(row[:5]), binding):
         raise FinalBoundaryRefused("approval_mismatch")
-    if now.astimezone(UTC).strftime(_TIME_FORMAT) >= expires:
+    expires = _instant(row[4])
+    if expires is None or now >= expires:
         raise FinalBoundaryRefused("approval_expired")
     db.execute(
         "UPDATE effect_approvals SET consumed_at = ? WHERE attempt_id = ? AND consumed_at IS NULL",
