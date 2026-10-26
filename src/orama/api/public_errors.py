@@ -5,7 +5,9 @@ error object when a durable record exists (a denial audit record, or the attempt
 in-doubt effect dispatch). Nothing else: no grant ids, key ids, paths or
 policy internals. Internal verifier reasons, and the reasons of the effect send path, are mapped
 to the closed public set here; an unmapped reason is reported as ``deny.verifier_unavailable``
-(deny, never allow). ``DENY_STATUS`` is the one HTTP status table for the public denial codes.
+(deny, never allow). The mapping tables live in ``orama.graph.effect_denial_codes``, so the attempt
+store can record the public code without importing this layer; they are re-exported here.
+``DENY_STATUS`` is the one HTTP status table for the public denial codes.
 """
 from __future__ import annotations
 
@@ -14,17 +16,21 @@ from typing import Final
 
 from fastapi.responses import JSONResponse
 
+from orama.graph.effect_denial_codes import (  # noqa: F401 - re-exported public names
+    DENY_MALFORMED_GRANT,
+    DENY_MISSING_CAPABILITY_RECORD,
+    DENY_REVOCATION_STALE,
+    DENY_REVOKED_GRANT,
+    DENY_UNAUTHORIZED_CALLER,
+    DENY_UNKNOWN_KEY,
+    DENY_VERIFIER_UNAVAILABLE,
+    public_denial_code,
+    public_effect_denial_code,
+)
+
 SERVING_NOT_READY: Final = "serving.not_ready"
 SERVING_DISABLED: Final = "serving.disabled"
 SERVING_ROUTE_NOT_EXPOSED: Final = "serving.route_not_exposed"
-
-DENY_REVOCATION_STALE: Final = "deny.revocation_stale"
-DENY_UNKNOWN_KEY: Final = "deny.unknown_key"
-DENY_MALFORMED_GRANT: Final = "deny.malformed_grant"
-DENY_REVOKED_GRANT: Final = "deny.revoked_grant"
-DENY_MISSING_CAPABILITY_RECORD: Final = "deny.missing_capability_record"
-DENY_UNAUTHORIZED_CALLER: Final = "deny.unauthorized_caller"
-DENY_VERIFIER_UNAVAILABLE: Final = "deny.verifier_unavailable"
 
 SERVING_CODES: Final[frozenset[str]] = frozenset(
     {SERVING_NOT_READY, SERVING_DISABLED, SERVING_ROUTE_NOT_EXPOSED}
@@ -35,19 +41,6 @@ DENY_CODES: Final[frozenset[str]] = frozenset({
 })
 PUBLIC_CODES: Final[frozenset[str]] = SERVING_CODES | DENY_CODES
 
-_INTERNAL_TO_PUBLIC: Final[dict[str, str]] = {
-    "revocation.stale": DENY_REVOCATION_STALE,
-    "grant.key_unknown": DENY_UNKNOWN_KEY,
-    "grant.malformed": DENY_MALFORMED_GRANT,
-    "grant.schema_unsupported": DENY_MALFORMED_GRANT,
-    "grant.signature_invalid": DENY_MALFORMED_GRANT,
-    "grant.expired": DENY_MALFORMED_GRANT,
-    "grant.future_dated": DENY_MALFORMED_GRANT,
-    "grant.revoked": DENY_REVOKED_GRANT,
-    "verifier.unavailable": DENY_VERIFIER_UNAVAILABLE,
-}
-
-
 DENY_STATUS: Final[dict[str, int]] = {
     DENY_MALFORMED_GRANT: 400,
     DENY_UNAUTHORIZED_CALLER: 401,
@@ -57,75 +50,6 @@ DENY_STATUS: Final[dict[str, int]] = {
     DENY_REVOCATION_STALE: 503,
     DENY_VERIFIER_UNAVAILABLE: 503,
 }
-
-# Internal reasons of the effect send path (``POST /effects/inert``: the grant composer, the sealed
-# final boundary and the attempt store) mapped to the closed public set. Contract section 3 has no
-# finer code, so:
-# * a caller that is not the attempt's bound principal is ``deny.unauthorized_caller``;
-# * any binding, expiry, approval, replay or envelope difference (the attempt as presented cannot
-#   be authorized) is ``deny.malformed_grant``;
-# * any revocation fact is ``deny.revoked_grant``;
-# * an attempt refused because the effects capability was not effective is
-#   ``deny.missing_capability_record``;
-# * a verifier, clock or outcome that cannot be vouched for is ``deny.verifier_unavailable``,
-#   which is also the answer for every unmapped reason (deny, never allow).
-# The verifier codes in ``_INTERNAL_TO_PUBLIC`` apply unchanged. An in-doubt dispatch (the send
-# marker committed; ``outcome_unknown``, ``evidence_invalid``, ``outcome_unrecorded``) is also
-# ``deny.verifier_unavailable`` (503), and the route adds the attempt's opaque ``receipt_ref``
-# because a durable record exists. A pre-dispatch refusal that wrote the terminal refusal record also
-# carries that record's ``receipt_ref`` (and replays with the stored code); a deny that left no
-# durable record carries none.
-_EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
-    "effect.principal_mismatch": DENY_UNAUTHORIZED_CALLER,
-    "principal_mismatch": DENY_UNAUTHORIZED_CALLER,
-    **{
-        reason: DENY_MALFORMED_GRANT
-        for reason in (
-            "effect.binding_mismatch", "effect_grant_binding_missing", "attempt_not_authorized",
-            "attempt_refused", "send_already_started", "operation_digest_mismatch",
-            "target_mismatch", "epoch_mismatch", "expiry_mismatch", "epoch_stale", "expired",
-            "approval_not_verified", "approval_undeclared", "approval_missing",
-            "approval_consumed", "approval_mismatch", "approval_expired", "inert_scope_required",
-            "send_precondition_failed", "send_authority_expired_or_missing",
-            "replay_envelope_mismatch", "effect_grant_bound_send_required", "effect.lease_stale",
-        )
-    },
-    **{
-        reason: DENY_REVOKED_GRANT
-        for reason in (
-            "grant_revoked", "issuer_revoked", "approval_revoked", "cascade_listed",
-            "send_authority_revoked",
-        )
-    },
-    "effects_denied": DENY_MISSING_CAPABILITY_RECORD,
-    **{
-        reason: DENY_VERIFIER_UNAVAILABLE
-        for reason in (
-            "approval_verifier_missing", "approval_verifier_unavailable",
-            "send_clock_quarantined", "outcome_unknown", "evidence_invalid", "outcome_unrecorded",
-            "effect_grant_recheck_required", "send_authority_issuer_mismatch", "send_lease_unavailable",
-        )
-    },
-}
-
-
-def public_denial_code(internal_reason: str) -> str:
-    """Map a verifier-internal reason to the closed public set; unknown reasons deny as unavailable."""
-    return _INTERNAL_TO_PUBLIC.get(internal_reason, DENY_VERIFIER_UNAVAILABLE)
-
-
-def public_effect_denial_code(internal_reason: str) -> str:
-    """Map an effect send-path reason to the closed public set (see ``_EFFECT_TO_PUBLIC``).
-
-    Sealed-envelope refusals (``envelope_*``) are ``deny.malformed_grant``; verifier codes map as in
-    ``public_denial_code``; anything else is ``deny.verifier_unavailable``.
-    """
-    if internal_reason in _EFFECT_TO_PUBLIC:
-        return _EFFECT_TO_PUBLIC[internal_reason]
-    if internal_reason.startswith("envelope_"):
-        return DENY_MALFORMED_GRANT
-    return public_denial_code(internal_reason)
-
 
 def new_correlation_id() -> str:
     """Return a fresh opaque correlation id."""

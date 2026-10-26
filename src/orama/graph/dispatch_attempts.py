@@ -40,6 +40,7 @@ from orama.graph.dispatch_consumer_wire import (
     validate_permit_wire,
 )
 from orama.graph import effect_fencing
+from orama.graph.effect_denial_codes import public_effect_denial_code
 from orama.graph.effect_fencing import FENCING_SCHEMA, FencingRefused, StoredRefusal
 from orama.graph.effect_outcomes import OutcomeRefused, check_transition
 from orama.graph.effect_proposals import (
@@ -1177,8 +1178,6 @@ class SqliteAttemptStore:
             if started is not None and started[0]:
                 raise AttemptStateError("send_already_started")
             # The public deny.* code is decided once, here, and replayed from the record forever.
-            from orama.api.public_errors import public_effect_denial_code
-
             return effect_fencing.record_refusal(
                 db, attempt_id, kind, rule, reason, now, public_effect_denial_code(reason)
             )

@@ -18,7 +18,7 @@ plain ``begin_send``, and ``begin_bound_send`` refuses it without the signed-gra
 recheck (``authority_check``).
 
 Internal refusal codes are closed. Besides the verifier's own codes there are two
-consumer-side codes, mapped to the public vocabulary in ``orama.api.public_errors``:
+consumer-side codes, mapped to the public vocabulary in ``orama.graph.effect_denial_codes``:
 
 * ``effect.principal_mismatch``: the authenticated caller or the verified grant names a
   different principal than the one bound to the attempt (public ``deny.unauthorized_caller``);
