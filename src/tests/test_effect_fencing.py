@@ -152,7 +152,9 @@ def test_epoch_helpers_refuse_non_integers() -> None:
 def test_an_attempts_table_from_before_the_epoch_is_migrated_in_place(tmp_path: Path) -> None:
     """The ad hoc migration adds the column; an old row keeps NULL and so has no epoch."""
     path = tmp_path / "old" / "attempts.db"
-    path.parent.mkdir()
+    # The store refuses a state directory or database that is not private to its owner.
+    path.parent.mkdir(mode=0o700)
+    path.parent.chmod(0o700)
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE dispatch_attempts (attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL,"
@@ -167,6 +169,7 @@ def test_an_attempts_table_from_before_the_epoch_is_migrated_in_place(tmp_path: 
     )
     conn.commit()
     conn.close()
+    path.chmod(0o600)
     store = SqliteAttemptStore(path)
     try:
         assert store.fencing_epoch("old-attempt") is None
