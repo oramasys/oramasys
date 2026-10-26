@@ -4,6 +4,10 @@ The caller must first complete the existing governed authorization transaction.
 This driver uses its durable one-send marker and records evidence of a simulation,
 not evidence that an external effect occurred. A crash leaves UNKNOWN and must not
 be retried automatically.
+
+This is a store-level primitive only. It is not a send path for composed grants and
+it is never reachable from ``POST /effects/inert``: that route accepts only the
+``FinalBoundarySender`` (verify-and-bind composer plus the sealed final boundary).
 """
 from __future__ import annotations
 

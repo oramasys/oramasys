@@ -84,12 +84,22 @@ class SealedInertDriver:
         self._publisher = publisher
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def send(self, raw: bytes | str, digest: str, *, principal: str) -> RedactedReceipt:
+    @property
+    def store(self) -> SqliteAttemptStore:
+        """The attempt store this driver sends through (read-only reference)."""
+        return self._store
+
+    def send(
+        self, raw: bytes | str, digest: str, *, principal: str,
+        authority_check: Callable[[], None] | None = None,
+    ) -> RedactedReceipt:
         """Validate the envelope, pass the final boundary, send once, and return the receipt.
 
         An exact replay returns the stored receipt. Raises ``EnvelopeRefused``,
         ``FinalBoundaryRefused``, ``SealedDriverRefused`` or ``OutcomeRefused`` before any dispatch,
-        and ``SendOutcomeUnknown`` when the send began but could not be proven.
+        and ``SendOutcomeUnknown`` when the send began but could not be proven. ``authority_check``
+        (for example the signed-grant re-verification of the composer) runs inside the transaction
+        that sets the send marker; if it raises, nothing is sent or consumed.
         """
         envelope = open_envelope(raw, digest)
         now = self._clock()
@@ -109,7 +119,7 @@ class SealedInertDriver:
         try:
             self._store.begin_bound_send(
                 binding, now, issuer_id=self._issuer_id, clock=self._clock,
-                envelope_digest=envelope.digest,
+                envelope_digest=envelope.digest, authority_check=authority_check,
             )
         except FinalBoundaryRefused as refusal:
             if refusal.terminal and refusal.reason in TERMINAL_REASONS:

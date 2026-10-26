@@ -1407,6 +1407,7 @@ class SqliteAttemptStore:
         issuer_id: str,
         clock: Callable[[], datetime] | None = None,
         envelope_digest: str | None = None,
+        authority_check: Callable[[], None] | None = None,
     ) -> None:
         """Start the one inert send only if the durable tuple still equals ``binding``.
 
@@ -1421,6 +1422,10 @@ class SqliteAttemptStore:
         write the receipt. The inert-scope guard of ``begin_send`` applies, and so does the shared
         send-authority re-check (``_recheck_send_authority``: clock quarantine, missing or expired
         send authority, acknowledged revocation, divergence and anchor quarantine), unconditionally.
+        ``authority_check`` (the composer's signed-grant re-verification) is called last, after the
+        send marker is written but before the transaction commits; if it raises, the transaction
+        rolls back, so no send marker, consumed approval or envelope record survives. It must not
+        call back into this store.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
@@ -1441,6 +1446,8 @@ class SqliteAttemptStore:
             self._begin_send_in(db, binding.attempt_id, True, at)
             if envelope_digest is not None:
                 effect_receipts.record_send_envelope(db, binding.attempt_id, envelope_digest, at)
+            if authority_check is not None:
+                authority_check()
 
     def grant_effect_approval(
         self, binding: FinalBoundaryBinding, *, approver: OperatorAuthority, now: datetime

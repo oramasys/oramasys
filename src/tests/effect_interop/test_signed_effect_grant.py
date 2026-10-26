@@ -48,9 +48,20 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     )
     assert store.get_attempt("attempt-1").grant_id == grant.grant_id
     from orama.graph.effect_grant_composition import EffectGrantRefused
+    from orama.graph.final_boundary import FinalBoundaryBinding
+    from orama.graph.sealed_inert_driver import SealedInertDriver
+    from tests.test_dispatch_attempts import FakeGates, FakeRevocations
+    from tests.test_effect_fencing import Operator
+    from tests.test_final_boundary import Approvals
     composer = TrustedEffectGrantComposer(authority)
+    # The canonical send path: the composer only verifies and binds; the send itself goes through
+    # the sealed final boundary (effects switch, revocation view and approval verifier are doubles).
+    driver = SealedInertDriver(
+        store, effects_allowed=lambda: True, approval_verifier=Approvals(),
+        revocations=FakeRevocations(), issuer_id="issuer-1",
+    )
     with pytest.raises(EffectGrantRefused):
-        composer.send(store, "attempt-1", authenticated_principal="different-principal")
+        composer.send(driver, "attempt-1", authenticated_principal="different-principal")
     import json
     from phylax import dispatch_wire as wire
     from phylax.dispatch_composition import DispatchIssuerSigner
@@ -58,7 +69,6 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     from phylax.effect_grant import EffectGrantLookup, EffectGrantVerifier
     from orama.graph.dispatch_attempts import ExpectedBinding
     from orama.graph.effect_proposals import EffectScope
-    from tests.test_dispatch_attempts import FakeGates, FakeRevocations
     public = authority_store.key("issuer-1").public_key
     class Signatures:
         """Verify actual producer signatures using one trusted public key."""
@@ -84,10 +94,22 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     signatures = Signatures()
     store.ingest_events("issuer-1", envelope["events"], signatures)
     store.authorize_dispatch("attempt-1", permit, json.loads(finalization), now, verifier=signatures, gates=FakeGates(), revocations=FakeRevocations(), issuer_id="issuer-1", expected=ExpectedBinding("a" * 64, "d" * 64, 1, 1, "ledger-1"), scope=scope)
-    assert composer.send(store, "attempt-1", authenticated_principal="principal-1") == "inert-simulation:v1"
+    stored = store.attempt_binding("attempt-1")
+    store.grant_effect_approval(
+        FinalBoundaryBinding(
+            attempt_id="attempt-1", principal="principal-1",
+            operation_digest="sha256:" + stored.operation_digest, target=stored.target,
+            epoch=stored.epoch, expires_at=stored.expires_at,
+        ),
+        approver=Operator(), now=now,
+    )
+    receipt = composer.send(driver, "attempt-1", authenticated_principal="principal-1")
+    assert receipt.outcome == "confirmed"
+    assert store.outbox_row("attempt-1")["outcome_evidence"] == "inert-simulation:v1"
+    assert store.approval_state("attempt-1") == "consumed"
     before = store.outbox_row("attempt-1")
     authority.revoke(grant.grant_id)
     with pytest.raises(EffectGrantRefused, match="grant.revoked"):
-        composer.send(store, "attempt-1", authenticated_principal="principal-1")
+        composer.send(driver, "attempt-1", authenticated_principal="principal-1")
     assert store.outbox_row("attempt-1") == before
     store.close()

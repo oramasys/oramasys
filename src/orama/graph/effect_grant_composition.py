@@ -1,24 +1,55 @@
-"""The consumer's fail-closed boundary for signed v2 effect grants.
+"""The consumer's fail-closed boundary for signed v2 effect grants: verify and bind only.
 
 This module deliberately owns no signing, issuer transport, or effect driver.
 It accepts only a verifier projection, checks every request-bound fact before
 durable state changes, and then passes the verified approval binding into the
 existing attempt store.
+
+There is ONE canonical send path. ``TrustedEffectGrantComposer`` verifies the
+durable signed grant again and derives the attempt's final-boundary binding;
+the send itself always goes through the sealed final boundary
+(``authorize_final_boundary`` and ``SqliteAttemptStore.begin_bound_send`` via
+``SealedInertDriver``). The signed grant is re-verified a second time inside the
+send transaction, so a revocation cannot slip between the check and the send
+marker. ``FinalBoundarySender`` is the only sender the HTTP route accepts; the
+plain ``InertEffectDriver`` is never reachable from it.
+
+Internal refusal codes are closed. Besides the verifier's own codes there are two
+consumer-side codes, mapped to the public vocabulary in ``orama.api.public_errors``:
+
+* ``effect.principal_mismatch``: the authenticated caller or the verified grant names a
+  different principal than the one bound to the attempt (public ``deny.unauthorized_caller``);
+* ``effect.binding_mismatch``: a verified fact differs from the bound request or attempt
+  (public ``deny.malformed_grant``).
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from orama.graph.dispatch_attempts import SqliteAttemptStore, VerifiedDispatchGrant
 from orama.graph.dispatch_consumer_wire import is_canonical_identifier
+from orama.graph.effect_receipts import RedactedReceipt
+from orama.graph.final_boundary import (
+    ApprovalVerifier,
+    FinalBoundaryBinding,
+    FinalBoundaryRefused,
+    RevocationLookup,
+)
+from orama.graph.sealed_envelope import seal
+from orama.graph.sealed_inert_driver import SealedInertDriver
 
+PRINCIPAL_MISMATCH = "effect.principal_mismatch"
+BINDING_MISMATCH = "effect.binding_mismatch"
+INERT_EFFECT_CLASS = "inert.simulation"
 
 _REFUSAL_CODES = frozenset({
     "grant.malformed", "grant.schema_unsupported", "grant.key_unknown",
     "grant.signature_invalid", "grant.expired", "grant.future_dated",
     "grant.revoked", "revocation.stale", "verifier.unavailable",
+    PRINCIPAL_MISMATCH, BINDING_MISMATCH,
 })
 
 
@@ -99,12 +130,54 @@ def _projection(value: object) -> VerifiedEffectGrant:
         raise EffectGrantRefused("grant.malformed") from error
 
 
-class TrustedEffectGrantComposer:
-    """Verify and bind a v2 effect grant before an attempt can exist."""
+def _mismatch_code(names: list[str]) -> str:
+    """Name a principal difference distinctly from any other bound-fact difference."""
+    return PRINCIPAL_MISMATCH if "principal" in names else BINDING_MISMATCH
 
-    def __init__(self, verifier: EffectGrantVerifier) -> None:
+
+def _sha256_form(digest: str) -> str:
+    """Return the ``sha256:``-prefixed form of a stored operation digest for the sealed envelope."""
+    return digest if digest.startswith("sha256:") else f"sha256:{digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class FinalBoundaryPorts:
+    """The injected ports the sealed final boundary needs; R0-2 wires none of them.
+
+    A composition root that cannot supply all three refuses at startup
+    (``startup.effects_without_permit_verifier``) instead of wiring a sender.
+    """
+
+    approval_verifier: ApprovalVerifier
+    revocations: RevocationLookup
+    issuer_id: str
+
+    def __post_init__(self) -> None:
+        """Refuse an incomplete set of ports before anything can be wired."""
+        if self.approval_verifier is None or self.revocations is None:
+            raise ValueError("final-boundary ports must all be supplied")
+        if not isinstance(self.issuer_id, str) or not self.issuer_id.strip():
+            raise ValueError("issuer_id must be non-blank text")
+
+
+class TrustedEffectGrantComposer:
+    """Verify and bind a v2 effect grant; every send goes through the sealed final boundary."""
+
+    def __init__(
+        self, verifier: EffectGrantVerifier, *, clock: Callable[[], datetime] | None = None
+    ) -> None:
         """Keep only the public verifier port, never issuer or signing capabilities."""
         self._verifier = verifier
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def _verified(self, wire: bytes) -> VerifiedEffectGrant:
+        """Verify the wire and return the validated projection, or raise a closed refusal."""
+        try:
+            return _projection(self._verifier.verify(wire))
+        except EffectGrantRefused:
+            raise
+        except Exception as error:
+            raise _refusal(error) from error
 
     def create_attempt(
         self,
@@ -122,12 +195,7 @@ class TrustedEffectGrantComposer:
         consumer_lease_epoch: int,
     ) -> None:
         """Persist a dispatch attempt only when every grant fact matches its request."""
-        try:
-            grant = _projection(self._verifier.verify(wire))
-        except EffectGrantRefused:
-            raise
-        except Exception as error:
-            raise _refusal(error) from error
+        grant = self._verified(wire)
         expected: dict[str, Any] = {
             "principal": principal,
             "run_id": run_id,
@@ -138,8 +206,9 @@ class TrustedEffectGrantComposer:
             "consumer_lease_epoch": consumer_lease_epoch,
             "payload_digest": grant.payload_digest,
         }
-        if any(getattr(grant, name) != value for name, value in expected.items()):
-            raise EffectGrantRefused("grant.schema_unsupported")
+        differing = [name for name, value in expected.items() if getattr(grant, name) != value]
+        if differing:
+            raise EffectGrantRefused(_mismatch_code(differing))
         store.create_attempt(
             attempt_id,
             VerifiedDispatchGrant(grant.grant_id, grant.second_approval_ref),
@@ -147,23 +216,94 @@ class TrustedEffectGrantComposer:
         )
         store.bind_effect_grant(attempt_id, wire, expected)
 
-    def send(self, store: SqliteAttemptStore, attempt_id: str, *, authenticated_principal: str) -> str:
-        """Reverify durable signed authority and authenticated ownership immediately before send."""
-        from orama.graph.inert_effect_driver import InertEffectDriver
-        wire, context = store.effect_grant_binding(attempt_id)
-        if context["principal"] != authenticated_principal:
-            raise EffectGrantRefused("grant.schema_unsupported")
-        try:
-            grant = _projection(self._verifier.verify(wire))
-        except EffectGrantRefused:
-            raise
-        except Exception as error:
-            raise _refusal(error) from error
-        attempt = store.get_attempt(attempt_id)
-        if attempt is None or grant.grant_id != attempt.grant_id or grant.second_approval_ref != attempt.second_approval_ref:
-            raise EffectGrantRefused("grant.malformed")
-        if any(getattr(grant, name) != value for name, value in context.items()):
-            raise EffectGrantRefused("grant.schema_unsupported")
-        if grant.effect_class != "inert.simulation" or datetime.now(UTC) >= grant.expires_at:
+    def _check_bound(
+        self, grant: VerifiedEffectGrant, context: dict[str, Any], grant_id: str,
+        second_approval_ref: str | None,
+    ) -> None:
+        """Refuse unless the verified grant still equals the durable binding and is live and inert."""
+        if grant.grant_id != grant_id or grant.second_approval_ref != (second_approval_ref or ""):
+            raise EffectGrantRefused(BINDING_MISMATCH)
+        differing = [name for name, value in context.items() if getattr(grant, name) != value]
+        if differing:
+            raise EffectGrantRefused(_mismatch_code(differing))
+        if grant.effect_class != INERT_EFFECT_CLASS:
+            raise EffectGrantRefused(BINDING_MISMATCH)
+        if self._clock() >= grant.expires_at:
             raise EffectGrantRefused("grant.expired")
-        return InertEffectDriver(store).send(attempt_id)
+
+    def bound_binding(
+        self, store: SqliteAttemptStore, attempt_id: str, *, authenticated_principal: str
+    ) -> tuple[FinalBoundaryBinding, Callable[[], None]]:
+        """Re-verify durable signed authority; return the final-boundary binding and its recheck.
+
+        The binding carries the authenticated principal and the tuple the store durably recorded
+        at authorization, so the final boundary compares the caller with the attempt's principal.
+        The returned recheck verifies the signed grant again; the sealed driver runs it inside the
+        send transaction. An attempt that is not (or not fully) authorized is refused with
+        ``attempt_not_authorized`` before anything is recorded.
+        """
+        wire, context = store.effect_grant_binding(attempt_id)
+        if context.get("principal") != authenticated_principal:
+            raise EffectGrantRefused(PRINCIPAL_MISMATCH)
+        attempt = store.get_attempt(attempt_id)
+        if attempt is None:
+            raise EffectGrantRefused(BINDING_MISMATCH)
+        grant_id, second_ref = attempt.grant_id, attempt.second_approval_ref
+
+        def recheck() -> None:
+            """Verify the signed grant again and require it to still match the binding."""
+            self._check_bound(self._verified(wire), context, grant_id, second_ref)
+
+        recheck()
+        stored = store.attempt_binding(attempt_id)
+        if (
+            stored is None or stored.state != "authorized" or stored.operation_digest is None
+            or stored.target is None or stored.epoch is None or stored.expires_at is None
+        ):
+            raise FinalBoundaryRefused("attempt_not_authorized")
+        binding = FinalBoundaryBinding(
+            attempt_id=attempt_id, principal=authenticated_principal,
+            operation_digest=_sha256_form(stored.operation_digest), target=stored.target,
+            epoch=stored.epoch, expires_at=stored.expires_at,
+        )
+        return binding, recheck
+
+    def send(
+        self, driver: SealedInertDriver, attempt_id: str, *, authenticated_principal: str
+    ) -> RedactedReceipt:
+        """Send one bound attempt through the sealed final boundary, or refuse.
+
+        There is no other send path: the envelope is sealed from the durable tuple and handed to
+        ``SealedInertDriver``, which re-verifies at the final boundary, consumes the single-use
+        approval and starts the send in one transaction that also re-runs the signed-grant check.
+        """
+        if not isinstance(driver, SealedInertDriver):
+            raise TypeError("the send must go through the sealed final boundary")
+        binding, recheck = self.bound_binding(
+            driver.store, attempt_id, authenticated_principal=authenticated_principal
+        )
+        envelope = seal(
+            binding.attempt_id, binding.operation_digest, binding.epoch, binding.expires_at,
+            binding.target,
+        )
+        return driver.send(
+            envelope.raw, envelope.digest, principal=authenticated_principal,
+            authority_check=recheck,
+        )
+
+
+class FinalBoundarySender:
+    """The only sender ``POST /effects/inert`` accepts: verify-and-bind, then the final boundary."""
+
+    def __init__(self, composer: TrustedEffectGrantComposer, driver: SealedInertDriver) -> None:
+        """Hold the verify-and-bind composer and the sealed driver over the attempt store."""
+        if not isinstance(composer, TrustedEffectGrantComposer):
+            raise TypeError("composer must be a TrustedEffectGrantComposer")
+        if not isinstance(driver, SealedInertDriver):
+            raise TypeError("driver must be a SealedInertDriver")
+        self._composer = composer
+        self._driver = driver
+
+    def __call__(self, attempt_id: str, principal: str) -> RedactedReceipt:
+        """Send the attempt as the authenticated principal through the canonical path."""
+        return self._composer.send(self._driver, attempt_id, authenticated_principal=principal)
