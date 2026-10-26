@@ -574,6 +574,72 @@ def _write_authorization(
     )
 
 
+def _validate_attempt(
+    attempt_id: str, grant_id: str, reservation_id: str, second_approval_ref: str | None
+) -> None:
+    """Fail closed on blank identifiers or a non-canonical approval binding before any write."""
+    for name, value in (
+        ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
+    ):
+        _require_text(name, value)
+    if second_approval_ref not in (None, "") and not is_canonical_identifier(second_approval_ref):
+        raise ValueError("second_approval_ref must be empty or a canonical identifier")
+
+
+def _insert_attempt(
+    db: sqlite3.Connection,
+    attempt_id: str,
+    grant_id: str,
+    reservation_id: str,
+    second_approval_ref: str | None,
+) -> None:
+    """Insert the attempt row in the caller's transaction (idempotent when identical)."""
+    row = db.execute(
+        "SELECT grant_id, reservation_id, second_approval_ref FROM dispatch_attempts"
+        " WHERE attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if row is not None:
+        if tuple(row) != (grant_id, reservation_id, second_approval_ref):
+            raise AttemptStateError("attempt_id already exists with a different binding")
+        return
+    db.execute(
+        "INSERT INTO dispatch_attempts (attempt_id, grant_id, reservation_id, state,"
+        " created_at, second_approval_ref) VALUES (?, ?, ?, 'created', ?, ?)",
+        (attempt_id, grant_id, reservation_id, _now_text(datetime.now(UTC)), second_approval_ref),
+    )
+
+
+def _encode_context(context: Mapping[str, Any]) -> str:
+    """Return the canonical JSON text of a verified effect-grant request context."""
+    return json.dumps(dict(context), sort_keys=True, separators=(",", ":"))
+
+
+def _bind_effect_grant_in(
+    db: sqlite3.Connection, attempt_id: str, wire: bytes, encoded: str
+) -> None:
+    """Record the attempt's immutable effect-grant binding in the caller's transaction.
+
+    An identical repeat is a no-op and a different binding conflicts. An attempt that already
+    authorized (state or intent) without a binding is refused: its authorization skipped the
+    effect-grant cross-check and must not be bound after the fact.
+    """
+    attempt = _load_attempt(db, attempt_id)
+    prior = db.execute(
+        "SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if prior is not None:
+        if tuple(prior) != (wire, encoded):
+            raise AttemptStateError("effect grant binding conflict")
+        return
+    intent = db.execute(
+        "SELECT 1 FROM dispatch_intents WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if attempt.state == "authorized" or intent is not None:
+        raise AttemptStateError("attempt already authorized without an effect-grant binding")
+    db.execute("INSERT INTO effect_grant_bindings VALUES (?, ?, ?)", (attempt_id, wire, encoded))
+
+
 class SqliteAttemptStore:
     """Durable consumer attempt store; every write is one ``BEGIN IMMEDIATE`` transaction."""
 
@@ -689,6 +755,33 @@ class SqliteAttemptStore:
             second_approval_ref=verified_grant.second_approval_ref,
         )
 
+    def create_bound_attempt(
+        self,
+        attempt_id: str,
+        verified_grant: VerifiedDispatchGrant,
+        reservation_id: str,
+        *,
+        wire: bytes,
+        context: Mapping[str, Any],
+    ) -> None:
+        """Persist a verified attempt and its effect-grant binding in ONE ``BEGIN IMMEDIATE`` commit.
+
+        This is the composer's path. No committed state ever holds the attempt without its
+        binding, so ``authorize_dispatch`` can never run in between and skip the effect-grant
+        cross-check. Idempotent when the attempt and the binding are identical; any difference
+        refuses and writes nothing.
+        """
+        if not isinstance(verified_grant, VerifiedDispatchGrant):
+            raise TypeError("verified_grant must be a VerifiedDispatchGrant")
+        values = (
+            attempt_id, verified_grant.grant_id, reservation_id, verified_grant.second_approval_ref,
+        )
+        _validate_attempt(*values)
+        encoded = _encode_context(context)
+        with self._immediate() as db:
+            _insert_attempt(db, *values)
+            _bind_effect_grant_in(db, attempt_id, wire, encoded)
+
     def _create_attempt(
         self,
         attempt_id: str,
@@ -707,32 +800,9 @@ class SqliteAttemptStore:
         issuer has revoked any approval. The leading underscore is a convention, not
         enforcement.
         """
-        for name, value in (
-            ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
-        ):
-            _require_text(name, value)
-        if second_approval_ref not in (None, "") and not is_canonical_identifier(
-            second_approval_ref
-        ):
-            raise ValueError("second_approval_ref must be empty or a canonical identifier")
+        _validate_attempt(attempt_id, grant_id, reservation_id, second_approval_ref)
         with self._immediate() as db:
-            row = db.execute(
-                "SELECT grant_id, reservation_id, second_approval_ref FROM dispatch_attempts"
-                " WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-            if row is not None:
-                if tuple(row) != (grant_id, reservation_id, second_approval_ref):
-                    raise AttemptStateError("attempt_id already exists with a different binding")
-                return
-            db.execute(
-                "INSERT INTO dispatch_attempts (attempt_id, grant_id, reservation_id, state,"
-                " created_at, second_approval_ref) VALUES (?, ?, ?, 'created', ?, ?)",
-                (
-                    attempt_id, grant_id, reservation_id, _now_text(datetime.now(UTC)),
-                    second_approval_ref,
-                ),
-            )
+            _insert_attempt(db, attempt_id, grant_id, reservation_id, second_approval_ref)
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord | None:
         """Return the attempt row, or None if it does not exist."""
@@ -743,16 +813,15 @@ class SqliteAttemptStore:
                 return None
 
     def bind_effect_grant(self, attempt_id: str, wire: bytes, context: Mapping[str, Any]) -> None:
-        """Persist immutable verified request facts; a partially prepared attempt cannot send."""
-        encoded = json.dumps(dict(context), sort_keys=True, separators=(",", ":"))
+        """Persist immutable verified request facts; a partially prepared attempt cannot send.
+
+        Refused for an attempt that already authorized without a binding: that authorization never
+        ran the effect-grant cross-check, so binding it afterwards would launder it. The composer
+        uses ``create_bound_attempt``, which commits the attempt and its binding together.
+        """
+        encoded = _encode_context(context)
         with self._immediate() as db:
-            _load_attempt(db, attempt_id)
-            prior = db.execute("SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
-            if prior is not None:
-                if tuple(prior) != (wire, encoded):
-                    raise AttemptStateError("effect grant binding conflict")
-                return
-            db.execute("INSERT INTO effect_grant_bindings VALUES (?, ?, ?)", (attempt_id, wire, encoded))
+            _bind_effect_grant_in(db, attempt_id, wire, encoded)
 
     def effect_grant_binding(self, attempt_id: str) -> tuple[bytes, dict[str, Any]]:
         """Return the immutable authority context required by the trusted sender."""

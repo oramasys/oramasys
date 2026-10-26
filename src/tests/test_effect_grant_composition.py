@@ -1,13 +1,14 @@
 """Trusted effect-grant composition: verify-and-bind only; every send passes the final boundary."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from orama.graph.dispatch_attempts import SqliteAttemptStore
+from orama.graph.dispatch_attempts import AttemptStateError, SqliteAttemptStore
 from orama.graph.effect_grant_composition import (
     BINDING_MISMATCH,
     PRINCIPAL_MISMATCH,
@@ -377,6 +378,60 @@ def test_an_attempt_without_a_grant_binding_cannot_be_sent(tmp_path: Path) -> No
         with pytest.raises(Exception, match="effect_grant_binding_missing"):
             composer.send(driver, ATTEMPT, authenticated_principal=SCOPE.principal)
         assert h.store.outbox_row(ATTEMPT)["send_started"] == 0
+    finally:
+        h.store.close()
+
+
+def test_the_composed_attempt_and_its_grant_binding_commit_together(tmp_path: Path) -> None:
+    """No committed state ever holds the composed attempt without its effect-grant binding.
+
+    An authorization that ran between two separate commits would find no binding and skip the
+    effect-grant cross-check. Every commit of the composer's store is observed from a second
+    connection, exactly as that interleaved authorization would see it.
+    """
+    path = tmp_path / "atomic.sqlite"
+    store = SqliteAttemptStore(path, governed=True)
+    observer = SqliteAttemptStore(path, governed=True)
+    seen: list[tuple[int, int]] = []
+    commit = store._immediate
+
+    @contextmanager
+    def observed():
+        """Run the store's transaction, then record what another connection sees after commit."""
+        with commit() as db:
+            yield db
+        seen.append(observer._db.execute(
+            "SELECT (SELECT count(*) FROM dispatch_attempts WHERE attempt_id = ?),"
+            " (SELECT count(*) FROM effect_grant_bindings WHERE attempt_id = ?)",
+            (ATTEMPT, ATTEMPT),
+        ).fetchone())
+
+    store._immediate = observed  # type: ignore[method-assign]
+    try:
+        composer = TrustedEffectGrantComposer(FixedVerifier(projection()), clock=lambda: NOW)
+        composer.create_attempt(
+            store, attempt_id=ATTEMPT, reservation_id=RESERVATION, wire=WIRE, principal=PRINCIPAL,
+            run_id="run-1", operation_id=PERMIT["operation_id"],
+            request_digest=PERMIT["request_digest"], effect_class="inert.simulation",
+            ledger_store_id=PERMIT["ledger_store_id"], consumer_lease_epoch=1,
+        )
+        assert seen and (1, 0) not in seen
+        assert seen[-1] == (1, 1)
+    finally:
+        store.close()
+        observer.close()
+
+
+def test_an_attempt_authorized_without_a_binding_cannot_be_bound_afterwards(tmp_path: Path) -> None:
+    """Binding after an unchecked authorization is refused, so it can never launder it."""
+    from tests.test_inert_effect_integration import inert_harness
+
+    h = inert_harness(tmp_path)
+    try:
+        context = {"principal": "mallory", "payload_digest": "f" * 64}
+        with pytest.raises(AttemptStateError, match="already authorized"):
+            h.store.bind_effect_grant(ATTEMPT, WIRE, context)
+        assert h.store._db.execute("SELECT count(*) FROM effect_grant_bindings").fetchone() == (0,)
     finally:
         h.store.close()
 

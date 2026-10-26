@@ -194,7 +194,12 @@ class TrustedEffectGrantComposer:
         ledger_store_id: str,
         consumer_lease_epoch: int,
     ) -> None:
-        """Persist a dispatch attempt only when every grant fact matches its request."""
+        """Persist a dispatch attempt only when every grant fact matches its request.
+
+        The attempt and its effect-grant binding are committed in one store transaction
+        (``create_bound_attempt``), so an authorization can never see the attempt without the
+        binding and skip the effect-grant cross-check.
+        """
         grant = self._verified(wire)
         expected: dict[str, Any] = {
             "principal": principal,
@@ -209,12 +214,13 @@ class TrustedEffectGrantComposer:
         differing = [name for name, value in expected.items() if getattr(grant, name) != value]
         if differing:
             raise EffectGrantRefused(_mismatch_code(differing))
-        store.create_attempt(
+        store.create_bound_attempt(
             attempt_id,
             VerifiedDispatchGrant(grant.grant_id, grant.second_approval_ref),
             reservation_id,
+            wire=wire,
+            context=expected,
         )
-        store.bind_effect_grant(attempt_id, wire, expected)
 
     def _check_bound(
         self, grant: VerifiedEffectGrant, context: dict[str, Any], grant_id: str,
