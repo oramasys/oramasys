@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
+from orama.graph.dispatch_consumer_wire import WireError, parse_timestamp
+
 SCOPE_FIELDS: Final = (
     "principal", "graph_id", "policy_hash", "operation_digest", "artifact_identity", "destination",
 )
@@ -174,7 +176,11 @@ def consume_reservation(
         raise ReservationRefused("reservation_expired" if expired else "reservation_consumed")
     if scope.digest() != stored_digest:
         raise ReservationRefused("scope_mismatch")
-    if _stamp(now) >= expires_at:
+    try:
+        expiry = parse_timestamp(expires_at)
+    except WireError as error:  # an unreadable stored expiry is never treated as live
+        raise ReservationRefused("reservation_expiry_unreadable") from error
+    if parse_timestamp(_stamp(now)) >= expiry:
         raise ReservationRefused("reservation_expired")
     db.execute(
         "UPDATE reservations SET consumed_attempt_id = ? WHERE reservation_id = ?",
