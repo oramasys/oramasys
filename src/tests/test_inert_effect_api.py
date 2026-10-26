@@ -6,10 +6,12 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from orama.api.authz import AUTHENTICATED_CONTROL_PLANE_PRINCIPAL
+from orama.api.authz import AUTHENTICATED_CONTROL_PLANE_PRINCIPAL, install_authz
 from orama.api.capabilities import CapabilityConfig, StartupRefused
+from orama.api.inert_effect_route import install_inert_effect_route
 from orama.api.public_errors import public_effect_denial_code
 from orama.api.server import create_app
 from orama.graph.effect_grant_composition import FinalBoundarySender
@@ -114,6 +116,52 @@ async def test_a_wired_sender_stays_dark_without_an_effective_effects_bit(bound:
         public_error(await post(app, {"attempt_id": ATTEMPT}), 404, "serving.route_not_exposed")
     assert bound.verifier.calls == 1  # only the create_attempt verification
     untouched(bound)
+
+
+class StartupOnlyEffects:
+    """Capability view double: ``effects`` is effective when the route is installed, then denied."""
+
+    def __init__(self) -> None:
+        """Start with no question asked."""
+        self.asked = 0
+
+    def is_effective(self, bit: str) -> bool:
+        """Grant ``effects`` to the first (install-time) question only; deny every later one."""
+        self.asked += 1
+        return bit == "effects" and self.asked == 1
+
+
+class AlwaysEffects:
+    """Capability view double whose ``effects`` bit is effective on every question."""
+
+    def is_effective(self, bit: str) -> bool:
+        """Grant ``effects`` and nothing else."""
+        return bit == "effects"
+
+
+def bare_app(view, sender: FinalBoundarySender) -> FastAPI:
+    """Build an app with only the bearer middleware and the inert route over ``view``."""
+    app = FastAPI()
+    install_authz(app)
+    install_inert_effect_route(app, capabilities=view, sender=sender)  # type: ignore[arg-type]
+    return app
+
+
+async def test_the_route_asks_the_effects_capability_again_for_every_request(bound: Bound) -> None:
+    """The second route-level gate, isolated: effects held at startup but not for this request.
+
+    The sender is wired and was live at install, so only the per-request capability question
+    stands between the request and a send: the route answers 404 and the sender is never called.
+    The same app shape with a view that keeps answering yes does send (control).
+    """
+    view = StartupOnlyEffects()
+    sender = FinalBoundarySender(bound.composer, sealed(bound))
+    public_error(await post(bare_app(view, sender), {"attempt_id": ATTEMPT}), 404, "serving.route_not_exposed")
+    assert view.asked >= 2
+    assert bound.verifier.calls == 1  # only the create_attempt verification
+    untouched(bound)
+    response = await post(bare_app(AlwaysEffects(), sender), {"attempt_id": ATTEMPT})
+    assert response.status_code == 200 and response.json()["receipt"]["outcome"] == "confirmed"
 
 
 def test_an_unsigned_effects_record_refuses_startup(bound: Bound) -> None:

@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 
 from orama.api.authz import AUTHENTICATED_CONTROL_PLANE_PRINCIPAL
 from orama.api.capabilities import CapabilityConfig, StartupRefused
-from orama.graph.effect_grant_composition import FinalBoundaryPorts
+from orama.graph.effect_grant_composition import FinalBoundaryPorts, FinalBoundarySender
 from tests.test_capabilities import BIN, CFG, Signer, make_record, signed
 from tests.test_dispatch_attempts import ATTEMPT, ISSUER, NOW, FakeRevocations
 from tests.test_effect_grant_composition import FixedVerifier, bound_harness, untouched
@@ -127,18 +127,95 @@ async def test_an_all_false_capability_record_also_wires_no_sender(
     assert opener.calls == []
 
 
-@pytest.mark.parametrize("value", [None, " enabled ", "true", "ENABLED"])
+class SpySender(FinalBoundarySender):
+    """The canonical sender, recording every construction so a test can prove none was wired."""
+
+    built: list[SpySender] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        """Record the construction, then build the real canonical sender."""
+        SpySender.built.append(self)
+        super().__init__(*args, **kwargs)
+
+
+@pytest.fixture
+def spy(module: ModuleType, monkeypatch: pytest.MonkeyPatch) -> type[SpySender]:
+    """Make the composition root build ``SpySender`` and start with no recorded construction."""
+    SpySender.built = []
+    monkeypatch.setattr(module, "FinalBoundarySender", SpySender)
+    return SpySender
+
+
+def ports() -> FinalBoundaryPorts:
+    """Complete final-boundary ports (test doubles; R0-2 wires none)."""
+    return FinalBoundaryPorts(Approvals(), FakeRevocations(), ISSUER)
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", " enabled ", "enabled ", "\tenabled", "true", "1", "ENABLED", "Enabled"],
+    ids=["unset", "empty", "padded", "trailing", "tab", "true", "one", "upper", "title"],
+)
 async def test_only_the_exact_request_value_is_a_request(
-    module: ModuleType, tmp_path: Path, value: str | None
+    module: ModuleType, spy: type[SpySender], tmp_path: Path, value: str | None
 ) -> None:
-    """Anything but the exact value leaves composition untouched and the route dark."""
-    values = environ(tmp_path)
-    values.pop("ORAMA_INERT_EFFECTS")
-    if value is not None:
-        values["ORAMA_INERT_EFFECTS"] = value
-    opener = Opener()
-    dark(await post(module.build_app(values, open_verifier=opener), {"attempt_id": ATTEMPT}))
-    assert opener.calls == []
+    """Anything but the exact value wires nothing, even with effects effective and ports supplied.
+
+    Every other gate is open here: the effects bit is effective under a test signature verifier,
+    the final-boundary ports are complete, the verifier opens and the store exists. So only the
+    exact-value check stands between this input and a wired sender (the same setup with
+    ``enabled`` sends; see the fully composed test below).
+    """
+    b = bound_harness(tmp_path, principal=AUTHENTICATED_CONTROL_PLANE_PRINCIPAL)
+    try:
+        values = environ(tmp_path, b.h.path)
+        values.pop("ORAMA_INERT_EFFECTS")
+        if value is not None:
+            values["ORAMA_INERT_EFFECTS"] = value
+        opener = Opener(FixedVerifier(b.verifier.projection))
+        app = module.build_app(
+            values, capability_config=effective(), final_boundary=ports(), open_verifier=opener,
+            clock=lambda: NOW,
+        )
+        dark(await post(app, {"attempt_id": ATTEMPT}))
+        assert spy.built == [] and opener.calls == []
+        untouched(b)
+    finally:
+        b.h.store.close()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,
+        CapabilityConfig(record=make_record(), expected_binary_digest=BIN, expected_config_digest=CFG),
+        CapabilityConfig(
+            record=signed(effects=True), expected_binary_digest="sha256:" + "0" * 64,
+            expected_config_digest=CFG, signature_verifier=Signer(), permit_verifier=object(),
+        ),
+    ],
+    ids=["no-record", "all-false", "digest-mismatch"],
+)
+async def test_an_ineffective_effects_bit_wires_no_sender_even_with_ports(
+    module: ModuleType, spy: type[SpySender], tmp_path: Path, config: CapabilityConfig | None
+) -> None:
+    """The composition root's own effects gate, isolated: requested, ports supplied, effects off.
+
+    None of these records refuses at startup, so build_app returns normally and the only thing
+    between the request and a wired sender is the root's effects check: no sender is built, the
+    verifier is never opened, the store is untouched and the route is the contract's 404.
+    """
+    b = bound_harness(tmp_path, principal=AUTHENTICATED_CONTROL_PLANE_PRINCIPAL)
+    try:
+        opener = Opener(FixedVerifier(b.verifier.projection))
+        app = module.build_app(
+            environ(tmp_path, b.h.path), capability_config=config, final_boundary=ports(),
+            open_verifier=opener, clock=lambda: NOW,
+        )
+        assert spy.built == [] and opener.calls == []
+        dark(await post(app, {"attempt_id": ATTEMPT}))
+        untouched(b)
+    finally:
+        b.h.store.close()
 
 
 def test_an_unsigned_effects_record_refuses_at_startup(module: ModuleType, tmp_path: Path) -> None:

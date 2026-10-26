@@ -1,8 +1,15 @@
 """``POST /effects/inert``: one inert send through the sealed final boundary (DRAFT).
 
 The route is dark (``404 serving.route_not_exposed``) unless BOTH an inert sender is wired AND the
-R0-2 ``effects`` capability is effective. In R0-2 no operator signature verifier is wired, so the
-``effects`` bit can never be effective and the route never answers anything but 404 outside tests.
+R0-2 ``effects`` capability is effective. The capability is asked when the app is built and again
+on every request (two independent gates); a view that denies or fails at either point keeps the
+route dark. In R0-2 no operator signature verifier is wired, so the ``effects`` bit can never be
+effective and the route never answers anything but 404 outside tests.
+
+Authentication stays in the middleware. While the route is exposed, a failed bearer is answered
+with the contract body (``401 deny.unauthorized_caller``) through the middleware's auth-failure
+hook, which can only shape a 401, never allow. While it is dark the hook answers nothing, so an
+unauthenticated caller gets the middleware's plain 401 and an authenticated one the 404.
 
 The only sender it accepts is ``FinalBoundarySender``: the grant composer verifies and binds, and
 the send goes through ``authorize_final_boundary`` and ``begin_bound_send``. A plain callable (for
@@ -101,19 +108,32 @@ async def _attempt_id(request: Request) -> str:
         raise _Denied(DENY_MALFORMED_GRANT) from None
 
 
+def _effects_effective(capabilities: CapabilityView) -> bool:
+    """Return True only when the view answers exactly True for ``effects``; a failure denies."""
+    try:
+        return capabilities.is_effective("effects") is True
+    except Exception:  # noqa: BLE001 - a failing capability view is a deny, never an allow
+        return False
+
+
 def install_inert_effect_route(
     app: FastAPI, *, capabilities: CapabilityView, sender: FinalBoundarySender | None
 ) -> None:
     """Register ``POST /effects/inert``; it answers 404 unless a sender is wired and effects hold.
 
-    Raises ``TypeError`` when ``sender`` is anything but a ``FinalBoundarySender``, so the plain
-    inert driver can never be reached from HTTP without the final boundary.
+    The ``effects`` capability is asked when the route is installed and again for every request;
+    both must hold. Raises ``TypeError`` when ``sender`` is anything but a ``FinalBoundarySender``,
+    so the plain inert driver can never be reached from HTTP without the final boundary.
     """
     if sender is not None and not isinstance(sender, FinalBoundarySender):
         raise TypeError("the inert route accepts only the final-boundary sender")
-    live = sender is not None and capabilities.is_effective("effects")
+    live = sender is not None and _effects_effective(capabilities)
     if sender is not None and not live:
         _log.warning("inert sender supplied but the effects capability is not effective; route stays dark")
+
+    def exposed() -> bool:
+        """Return True only while the route was live at startup AND effects is effective now."""
+        return live and _effects_effective(capabilities)
 
     def deny(
         correlation_id: str, code: str, reason: str | None = None, receipt_ref: str | None = None
@@ -132,8 +152,12 @@ def install_inert_effect_route(
         return error_response(DENY_STATUS[code], code, correlation_id, receipt_ref)
 
     def on_auth_failure(request: Request) -> JSONResponse | None:
-        """Answer a failed bearer check with the public denial, but only while the route is live."""
-        if not live:
+        """Answer a failed bearer check with the public denial, but only while the route is exposed.
+
+        A dark route returns None, so the middleware keeps its plain 401; the middleware also
+        ignores any answer that is not a 401, so this hook can never turn a denial into an allow.
+        """
+        if not exposed():
             return None
         return deny(new_correlation_id(), DENY_UNAUTHORIZED_CALLER, "bearer")
 
@@ -147,7 +171,7 @@ def install_inert_effect_route(
     async def send_inert(request: Request) -> JSONResponse:
         """Send only a prebound inert attempt as the authenticated control-plane caller."""
         correlation_id = new_correlation_id()
-        if not live or sender is None:
+        if sender is None or not exposed():
             return error_response(404, SERVING_ROUTE_NOT_EXPOSED, correlation_id)
         principal = authenticated_control_plane_principal(request)
         if principal is None:
