@@ -50,6 +50,7 @@ from orama.graph.effect_proposals import (
     record_proposal,
     reserve,
 )
+from orama.graph.final_boundary import StoredBinding
 from orama.graph.private_store import prepare_private_store
 
 AuthorizationRule: TypeAlias = Literal["rule1", "rule2", "rule3", "rule4", "rule5", "rule6"]
@@ -963,6 +964,48 @@ class SqliteAttemptStore:
             except FencingRefused as refused:
                 raise AttemptStateError(refused.reason) from refused
 
+    def attempt_binding(self, attempt_id: str) -> StoredBinding | None:
+        """Return what the store durably recorded for the attempt's final-boundary tuple, or None.
+
+        Principal, operation digest and target come from the scope the reservation consumed for this
+        attempt; the expiry is that reservation's expiry; the epoch is the one stamped in the
+        authorization transaction. Read-only.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT a.state, a.grant_id, p.principal, p.operation_digest, p.destination,"
+                " r.expires_at, a.fencing_epoch, o.send_started, o.outcome"
+                " FROM dispatch_attempts a"
+                " LEFT JOIN reservations r ON r.reservation_id = a.reservation_id"
+                "  AND r.consumed_attempt_id = a.attempt_id"
+                " LEFT JOIN effect_proposals p ON p.proposal_id = r.proposal_id"
+                " LEFT JOIN outbox o ON o.attempt_id = a.attempt_id"
+                " WHERE a.attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            state, grant_id, principal, digest, target, expires, epoch, started, outcome = row
+            return StoredBinding(
+                attempt_id=attempt_id, state=state, grant_id=grant_id, principal=principal,
+                operation_digest=digest, target=target,
+                expires_at=None if expires is None else datetime.strptime(
+                    expires, "%Y-%m-%dT%H:%M:%S.%fZ"
+                ).replace(tzinfo=UTC),
+                epoch=epoch, current_epoch=effect_fencing.current_epoch(self._db),
+                send_started=bool(started), outcome=outcome,
+                refusal=effect_fencing.stored_refusal(self._db, attempt_id),
+            )
+
+    def revocation_refusal(self, attempt_id: str, issuer_id: str) -> str | None:
+        """Return the locally recorded Rule 4 revocation reason for the attempt, or None."""
+        _require_text("issuer_id", issuer_id)
+        with self._lock:
+            attempt = _load_attempt(self._db, attempt_id)
+            return dispatch_revocations.refusal_reason(
+                self._db, issuer_id, attempt.grant_id, attempt.second_approval_ref
+            )
+
     def terminal_refusal(self, attempt_id: str) -> StoredRefusal | None:
         """Return the terminal pre-dispatch refusal recorded for the attempt identity, or None."""
         with self._lock:
@@ -1323,6 +1366,8 @@ class SqliteAttemptStore:
             if row is None:
                 raise AttemptStateError("no authorized outbox row for the attempt")
             attempt = _load_attempt(db, attempt_id)
+            if effect_fencing.stored_refusal(db, attempt_id) is not None:
+                raise OutcomeRefused("attempt_refused")
             if inert_only:
                 scope = db.execute(
                     "SELECT p.destination FROM effect_proposals p JOIN reservations r"
