@@ -17,6 +17,8 @@ PINNED = (
     "requirements/generations/m1-gen2/inputs/ownership-registry.json",
     "requirements/generations/transitions/0002-activate-m1-gen2.json",
     "src/tests/fixtures/graph-ownership-registry.json",
+    "src/tests/fixtures/graph-ownership-registry-m1-gen1.json",
+    "requirements/history/m1-gen1/compatibility-manifest.v3.json",
 )
 
 
