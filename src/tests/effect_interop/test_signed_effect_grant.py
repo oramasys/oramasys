@@ -111,7 +111,10 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     assert store.approval_state("attempt-1") == "consumed"
     before = store.outbox_row("attempt-1")
     authority.revoke(grant.grant_id)
+    # The send already settled: an exact replay is answered from the stored receipt (contract
+    # section 5) and is not re-authorized; the revoked grant still fails any fresh authorization.
+    assert composer.send(driver, "attempt-1", authenticated_principal="principal-1") == receipt
     with pytest.raises(EffectGrantRefused, match="grant.revoked"):
-        composer.send(driver, "attempt-1", authenticated_principal="principal-1")
+        composer.bound_binding(store, "attempt-1", authenticated_principal="principal-1")
     assert store.outbox_row("attempt-1") == before
     store.close()
