@@ -39,6 +39,8 @@ ROUTE_MANIFEST: tuple[RouteSpec, ...] = (
     RouteSpec("GET", "/readyz", RouteCapability.PUBLIC),
     RouteSpec("POST", "/run", RouteCapability.MUTATE),
     RouteSpec("POST", "/adjustments", RouteCapability.LIFECYCLE),
+    # Verification only (never spends); 404 serving.route_not_exposed unless serving is effective.
+    RouteSpec("POST", "/grants/verify", RouteCapability.READ),
     RouteSpec("GET", "/api/knowledge/search", RouteCapability.READ),
     RouteSpec("POST", "/api/mcp", RouteCapability.READ),
     RouteSpec("POST", "/api/a2a", RouteCapability.READ),

@@ -4,10 +4,13 @@ import logging
 import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from orama.api.authz import authenticated_control_plane_principal, install_authz
 from orama.api.capabilities import CapabilityConfig, evaluate
+from orama.api.denial_audit import DenialAuditLog
+from orama.api.verify_route import install_verify_route
 from orama.api.public_errors import SERVING_NOT_READY, error_response, new_correlation_id
 from orama.api.readiness import ReadinessProbes, collect_facts
 from orama.api.contracts import (
@@ -51,6 +54,8 @@ def create_app(
     capability_config: CapabilityConfig | None = None,
     grant_verifier: AdjustmentGrantVerifier | None = None,
     readiness_probes: ReadinessProbes | None = None,
+    denial_audit: DenialAuditLog | None = None,
+    verify_clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     """Build the API with an explicit graph runner; absent admission refuses work.
 
@@ -67,7 +72,8 @@ def create_app(
     matrix inspects; absent means every capability is denied. ``grant_verifier`` is the verify-only
     authority: it never spends a grant. A forbidden combination raises ``StartupRefused`` here,
     before any route can dispatch. ``readiness_probes`` supplies the independent issuer and
-    autonomous-policy facts; an absent probe reports false.
+    autonomous-policy facts; an absent probe reports false. ``denial_audit`` is the append-only
+    denial log behind ``POST /grants/verify``, which stays a 404 unless ``serving`` is effective.
     """
     capabilities = evaluate(
         capability_config or CapabilityConfig(),
@@ -162,6 +168,10 @@ def create_app(
             payload_digest=receipt.payload_digest,
         )
 
+    install_verify_route(
+        app, capabilities=capabilities, grant_verifier=grant_verifier,
+        audit=denial_audit, clock=verify_clock,
+    )
     probes = readiness_probes or ReadinessProbes()
 
     def facts():
