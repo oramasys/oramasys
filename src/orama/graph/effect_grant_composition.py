@@ -251,6 +251,16 @@ class TrustedEffectGrantComposer:
         if self._clock() >= grant.expires_at:
             raise EffectGrantRefused("grant.expired")
 
+    @staticmethod
+    def _require_principal(
+        store: SqliteAttemptStore, attempt_id: str, authenticated_principal: str
+    ) -> tuple[bytes, dict[str, Any]]:
+        """Return the durable grant binding, refusing a caller that is not the attempt's principal."""
+        wire, context = store.effect_grant_binding(attempt_id)
+        if context.get("principal") != authenticated_principal:
+            raise EffectGrantRefused(PRINCIPAL_MISMATCH)
+        return wire, context
+
     def bound_binding(
         self, store: SqliteAttemptStore, attempt_id: str, *, authenticated_principal: str
     ) -> tuple[FinalBoundaryBinding, Callable[[], None]]:
@@ -264,9 +274,7 @@ class TrustedEffectGrantComposer:
         terminal refusal record raises ``AttemptRefused`` right after the principal check, before
         any recheck, so a replay never depends on the verifier, the clock or the lease.
         """
-        wire, context = store.effect_grant_binding(attempt_id)
-        if context.get("principal") != authenticated_principal:
-            raise EffectGrantRefused(PRINCIPAL_MISMATCH)
+        wire, context = self._require_principal(store, attempt_id, authenticated_principal)
         refused = store.terminal_refusal(attempt_id)
         if refused is not None:
             # Replay of a refused attempt (contract section 4.4): answered from the stored record,
@@ -303,9 +311,17 @@ class TrustedEffectGrantComposer:
         There is no other send path: the envelope is sealed from the durable tuple and handed to
         ``SealedInertDriver``, which re-verifies at the final boundary, consumes the single-use
         approval and starts the send in one transaction that also re-runs the signed-grant check.
+        An attempt whose send already settled returns its stored receipt before any recheck (contract section 5).
         """
         if not isinstance(driver, SealedInertDriver):
             raise TypeError("the send must go through the sealed final boundary")
+        self._require_principal(driver.store, attempt_id, authenticated_principal)
+        settled = driver.store.receipt(attempt_id)
+        if settled is not None:
+            # Exact replay of a settled send (contract section 5): the stored receipt is returned
+            # right after the principal check, before any grant, expiry, lease or verifier recheck,
+            # so no later change can alter it and nothing is sent or consumed again.
+            return settled.receipt
         binding, recheck = self.bound_binding(
             driver.store, attempt_id, authenticated_principal=authenticated_principal
         )

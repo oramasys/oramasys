@@ -791,3 +791,45 @@ def test_the_sender_never_converts_a_principal_refusal_into_the_stored_record(bo
     sender = FinalBoundarySender(Mismatching(bound.verifier, clock=lambda: NOW), sealed(bound))
     with pytest.raises(FinalBoundaryRefused, match="principal_mismatch"):
         sender(ATTEMPT, "someone-else")
+
+
+# ------------------------------------------- an exact replay of a settled send returns its receipt
+
+
+def test_a_replay_of_a_settled_send_is_answered_from_the_stored_receipt_before_any_recheck(
+    bound: Bound,
+) -> None:
+    """Expiry, revocation, a lease change and a verifier outage cannot change a stored receipt."""
+    first_sim = Simulation()
+    receipt = FinalBoundarySender(bound.composer, sealed(bound, sim=first_sim))(ATTEMPT, PRINCIPAL)
+    assert first_sim.calls == 1
+    expires = bound.verifier.projection.expires_at
+
+    def outage(wire: bytes):
+        """Fail as an unreachable verifier would."""
+        raise OSError("verifier down")
+
+    scenarios = {
+        "expired": lambda: setattr(bound.composer, "_clock", lambda: expires + timedelta(hours=1)),
+        "revoked": lambda: setattr(bound.verifier, "revoked", True),
+        "lease_changed": lambda: composer_with(bound, lambda run_id: 99),
+        "verifier_outage": lambda: setattr(bound.verifier, "verify", outage),
+    }
+    for name, change in scenarios.items():
+        change()
+        sim, approvals = Simulation(), Approvals()
+        again = FinalBoundarySender(
+            bound.composer, sealed(bound, effects=None, approvals=approvals, sim=sim)
+        )(ATTEMPT, PRINCIPAL)
+        assert again == receipt, name
+        assert sim.calls == 0 and approvals.seen == [], name
+    assert bound.h.store.receipt(ATTEMPT).receipt == receipt
+    assert bound.h.store.approval_state(ATTEMPT) == "consumed"
+
+
+def test_a_settled_receipt_is_never_shown_to_another_principal(bound: Bound) -> None:
+    """The principal check runs before the stored receipt is read."""
+    sender = FinalBoundarySender(bound.composer, sealed(bound))
+    sender(ATTEMPT, PRINCIPAL)
+    with pytest.raises(EffectGrantRefused, match=PRINCIPAL_MISMATCH):
+        sender(ATTEMPT, "someone-else")
