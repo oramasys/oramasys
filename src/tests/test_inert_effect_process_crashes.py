@@ -121,6 +121,9 @@ def test_two_processes_cannot_send_the_same_inert_attempt(tmp_path: Path) -> Non
         for _ in range(2):
             workers.append(subprocess.Popen(
                 [sys.executable, "-c", source, str(h.path), ATTEMPT],
+                # Same source path as the crash worker: without it a stale
+                # non-editable install would be imported instead of src/.
+                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             ))
         outcomes = []
