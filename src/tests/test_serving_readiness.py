@@ -14,7 +14,7 @@ async def test_live_process_without_verifier_is_not_ready(monkeypatch):
         assert (await client.get("/healthz")).status_code == 200
         response = await client.get("/readyz")
         assert response.status_code == 503
-        assert response.json()["detail"]["code"] == "serving_unavailable"
+        assert response.json()["error"]["code"] == "serving.not_ready"
 
 
 async def test_unavailable_verifier_is_not_ready():
@@ -23,17 +23,19 @@ async def test_unavailable_verifier_is_not_ready():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/readyz")
         assert response.status_code == 503
-        assert response.json() == {"detail": {"code": "serving_unavailable"}}
+        body = response.json()
+        assert set(body) == {"error"} and set(body["error"]) == {"code", "correlation_id"}
+        assert body["error"]["code"] == "serving.not_ready"
 
 
-async def test_composed_consumer_reports_only_composition_readiness(tmp_path):
-    """Readiness does not claim valid grants, effect activation or issuer capability."""
+async def test_composed_consumer_alone_is_not_ready_without_serving_enabled(tmp_path):
+    """A wired consumer is a composition fact; it never turns serving on by itself."""
     ledger = StepLedger(tmp_path / "ledger.sqlite")
     try:
         app = create_app(adjustment_consumer=AdjustmentGrantConsumer(ledger, StubVerifier()))
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get("/readyz")
-            assert response.status_code == 200
-            assert response.json() == {"status": "ready", "scope": "grant_composition"}
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "serving.not_ready"
     finally:
         ledger.close()

@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from orama.api.authz import authenticated_control_plane_principal, install_authz
 from orama.api.capabilities import CapabilityConfig, evaluate
+from orama.api.public_errors import SERVING_NOT_READY, error_response, new_correlation_id
+from orama.api.readiness import ReadinessProbes, collect_facts
 from orama.api.contracts import (
     AdjustmentReceiptResponse,
     AdjustmentRequest,
@@ -48,6 +50,7 @@ def create_app(
     grant_cleanup: Callable[[], None] | None = None,
     capability_config: CapabilityConfig | None = None,
     grant_verifier: AdjustmentGrantVerifier | None = None,
+    readiness_probes: ReadinessProbes | None = None,
 ) -> FastAPI:
     """Build the API with an explicit graph runner; absent admission refuses work.
 
@@ -63,7 +66,8 @@ def create_app(
     ``capability_config`` carries the R0-2 capability record and the facts the startup refusal
     matrix inspects; absent means every capability is denied. ``grant_verifier`` is the verify-only
     authority: it never spends a grant. A forbidden combination raises ``StartupRefused`` here,
-    before any route can dispatch.
+    before any route can dispatch. ``readiness_probes`` supplies the independent issuer and
+    autonomous-policy facts; an absent probe reports false.
     """
     capabilities = evaluate(
         capability_config or CapabilityConfig(),
@@ -158,12 +162,33 @@ def create_app(
             payload_digest=receipt.payload_digest,
         )
 
+    probes = readiness_probes or ReadinessProbes()
+
+    def facts():
+        """Collect the four independent readiness facts for this request."""
+        return collect_facts(
+            capabilities,
+            verify_authority_present=grant_verifier is not None and state != "unavailable",
+            probes=probes,
+        )
+
     @app.get("/readyz")
-    async def readiness() -> dict:
-        """Report composition only, never grant validity or effect authorization."""
-        if state != "ready":
-            raise HTTPException(status_code=503, detail={"code": "serving_unavailable"})
-        return {"status": "ready", "scope": "grant_composition"}
+    async def readiness():
+        """Stable 503 serving.not_ready unless verification can actually be served."""
+        current = facts()
+        if not current.serving_facts_hold():
+            correlation_id = new_correlation_id()
+            _log.warning(
+                "readiness refused",
+                extra={"correlation_id": correlation_id, "facts": current.as_public()},
+            )
+            return error_response(503, SERVING_NOT_READY, correlation_id)
+        return {
+            "status": "ready",
+            "scope": "verification_only",
+            "facts": current.as_public(),
+            "capabilities": capabilities.as_public(),
+        }
 
     @app.get("/healthz")
     async def liveness() -> dict:
@@ -178,6 +203,7 @@ def create_app(
             "version": "2.0.0-alpha.1",
             "grants": state,
             "capabilities": capabilities.as_public(),
+            "facts": facts().as_public(),
         }
 
     return app
