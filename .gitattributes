@@ -1,0 +1,7 @@
+# Governance inputs are hashed over their raw bytes (generation digests, the consumer registry,
+# reviewed.json). Check them out byte-for-byte as committed (LF) on every OS: no text conversion,
+# so no core.autocrlf setting can change a digest.
+requirements/**/*.json -text
+requirements/**/*.txt -text
+requirements/generation-consumers.json -text
+requirements/generations/** -text
