@@ -13,9 +13,11 @@ from httpx import ASGITransport, AsyncClient
 from orama.api.authz import AUTHENTICATED_CONTROL_PLANE_PRINCIPAL
 from orama.api.capabilities import CapabilityConfig, StartupRefused
 from orama.graph.effect_grant_composition import FinalBoundaryPorts, FinalBoundarySender
+from orama.graph.effect_receipts import attempt_ref_for
+from orama.graph.sealed_inert_driver import SendOutcomeUnknown
 from tests.test_capabilities import BIN, CFG, Signer, make_record, signed
 from tests.test_dispatch_attempts import ATTEMPT, ISSUER, NOW, FakeRevocations
-from tests.test_effect_grant_composition import FixedVerifier, bound_harness, untouched
+from tests.test_effect_grant_composition import FixedVerifier, bound_harness, sealed, untouched
 from tests.test_final_boundary import Approvals
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "serve_with_effect_grants.py"
@@ -250,6 +252,39 @@ def test_effective_effects_without_final_boundary_ports_refuse_at_startup(
     with pytest.raises(StartupRefused, match="startup.effects_without_permit_verifier"):
         module.build_app(environ(tmp_path), capability_config=effective(), open_verifier=opener)
     assert opener.calls == []
+
+
+def timeout(envelope) -> str:
+    """Inert simulation double that fails after the send marker, leaving the outcome unknown."""
+    raise TimeoutError("simulated provider timeout")
+
+
+async def test_the_composed_root_reports_in_doubt_attempts_of_its_effect_store(
+    module: ModuleType, tmp_path: Path
+) -> None:
+    """When the root opens the effect store, the startup report covers it; otherwise there is none.
+
+    An attempt left in doubt (send marker set, outcome unknown) is listed by its opaque reference
+    and counted on /health; the report changes nothing. A root that opens no store has no report.
+    """
+    b = bound_harness(tmp_path, principal=AUTHENTICATED_CONTROL_PLANE_PRINCIPAL)
+    with pytest.raises(SendOutcomeUnknown):
+        FinalBoundarySender(b.composer, sealed(b, sim=timeout))(
+            ATTEMPT, AUTHENTICATED_CONTROL_PLANE_PRINCIPAL
+        )
+    b.h.store.close()
+    assert module.build_app(environ(tmp_path, b.h.path)).state.reconciliation_report is None
+    opener = Opener(FixedVerifier(b.verifier.projection))
+    app = module.build_app(
+        environ(tmp_path, b.h.path), capability_config=effective(), open_verifier=opener,
+        final_boundary=ports(), clock=lambda: NOW,
+    )
+    assert app.state.reconciliation_report.in_doubt == (attempt_ref_for(ATTEMPT),)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            body = (await client.get("/health")).json()
+    assert body["reconciliation"] == {"in_doubt": 1, "unsent": 0}
+    assert ATTEMPT not in str(body) and opener.closed == 1
 
 
 async def test_effective_effects_with_ports_send_only_through_the_final_boundary(

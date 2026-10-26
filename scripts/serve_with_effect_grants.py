@@ -70,6 +70,8 @@ def build_app(
     ``capability_config`` defaults to ``capability_config_from_environ(environ)``; it is a seam for
     tests and never bypasses ``evaluate``. ``final_boundary`` supplies the final-boundary ports; R0-2
     wires none. ``clock`` (default: the wall clock) is shared by the composer and the sealed driver.
+    When (and only when) the effect store is opened it is also passed to ``create_app`` as the
+    ``attempt_store``, so the startup reconciliation report lists its in-doubt attempts (report only).
     """
     config = capability_config if capability_config is not None else capability_config_from_environ(environ)
     if environ.get(ENABLE_VARIABLE) != ENABLED:
@@ -105,7 +107,8 @@ def build_app(
             clock=clock,
         )
         sender = FinalBoundarySender(TrustedEffectGrantComposer(verifier, clock=clock), driver)
-        app = create_app(capability_config=config, inert_sender=sender)
+        # The store this root opened is the effect store: its in-doubt rows are reported at startup.
+        app = create_app(capability_config=config, inert_sender=sender, attempt_store=store)
     except BaseException:
         close()
         raise
