@@ -119,6 +119,16 @@ enablement record, and `ORAMA_GRANT_SERVING` stays unset.
   Principal and binding mismatches have their own internal codes
   (`effect.principal_mismatch` maps to `deny.unauthorized_caller`,
   `effect.binding_mismatch` to `deny.malformed_grant`).
+- In-doubt dispatch on `/effects/inert`: when the send marker committed but
+  the outcome could not be proven or recorded (`SendOutcomeUnknown`: the
+  simulation failed, its evidence was invalid, or the settlement write
+  failed), the answer stays `503 deny.verifier_unavailable` and also carries
+  `receipt_ref`, the opaque attempt reference (`attempt_ref_for`) of the
+  durable attempt record. It is the same reference the startup reconciliation
+  report lists and the eventual receipt carries. A pre-dispatch deny never
+  carries a `receipt_ref`, so a caller can tell the two apart; an in-doubt
+  attempt is reconciled by an operator and never retried. No public code is
+  added.
 - The authenticated principal is the single shared control-plane bearer's
   principal. Checking it against the attempt's bound principal proves that the
   caller holds that bearer, not per-caller ownership of the attempt.

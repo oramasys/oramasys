@@ -430,6 +430,25 @@ def test_a_timeout_after_dispatch_leaves_the_outcome_unknown_and_never_retries(t
         reopened.close()
 
 
+def test_a_settlement_that_cannot_be_written_is_reported_as_unknown(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the send marker, a failed settlement write is ``SendOutcomeUnknown``, never a refusal."""
+
+    def broken(*args, **kwargs):
+        """Fail the settlement write as a damaged disk would."""
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(h.store, "settle_with_receipt", broken)
+    with pytest.raises(SendOutcomeUnknown) as excinfo:
+        send(driver(h))
+    assert excinfo.value.reason == "outcome_unrecorded"
+    assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+    row = h.store.outbox_row(ATTEMPT)
+    assert (row["send_started"], row["outcome"]) == (1, "unknown")
+    assert h.store.receipt(ATTEMPT) is None and h.store.terminal_refusal(ATTEMPT) is None
+
+
 @pytest.mark.parametrize("evidence", ["", "http://provider/ok", 5, None, "inert-simulation:" + "x" * 200,
                                       "inert-simulation:\n"],
                          ids=["empty", "url", "int", "none", "long", "newline"])

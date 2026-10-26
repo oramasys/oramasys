@@ -97,7 +97,9 @@ class SealedInertDriver:
 
         An exact replay returns the stored receipt. Raises ``EnvelopeRefused``,
         ``FinalBoundaryRefused``, ``SealedDriverRefused`` or ``OutcomeRefused`` before any dispatch,
-        and ``SendOutcomeUnknown`` when the send began but could not be proven. ``authority_check``
+        and ``SendOutcomeUnknown`` whenever the send began but its outcome was not proven and
+        recorded (the simulation failed, its evidence was invalid, or the settlement could not be
+        written); nothing raised after the send marker is anything else. ``authority_check``
         (for example the signed-grant re-verification of the composer) runs inside the transaction
         that sets the send marker; if it raises, nothing is sent or consumed.
         """
@@ -128,9 +130,13 @@ class SealedInertDriver:
                 )
             raise
         evidence = self._run(envelope)
-        receipt = self._store.settle_with_receipt(
-            envelope.attempt_id, "confirmed", evidence, envelope.digest, self._clock()
-        )
+        try:
+            receipt = self._store.settle_with_receipt(
+                envelope.attempt_id, "confirmed", evidence, envelope.digest, self._clock()
+            )
+        except Exception as error:  # noqa: BLE001 - after dispatch an unrecorded outcome is unproven
+            # The send marker committed; the outcome stays ``unknown`` for operator reconciliation.
+            raise SendOutcomeUnknown("outcome_unrecorded") from error
         self._publish(envelope.attempt_id, receipt)
         return receipt
 

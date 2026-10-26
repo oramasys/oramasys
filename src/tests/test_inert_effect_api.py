@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from orama.api.public_errors import public_effect_denial_code
 from orama.api.server import create_app
 from orama.graph.effect_grant_composition import FinalBoundarySender
 from orama.graph.effect_receipts import attempt_ref_for
+from orama.graph.effect_reconciliation import startup_reconciliation_report
 from orama.graph.inert_effect_driver import InertEffectDriver
 from tests.test_capabilities import BIN, CFG, Signer, make_record, signed
 from tests.test_dispatch_attempts import ATTEMPT, GRANT, NOW
@@ -203,6 +205,83 @@ async def test_a_revoked_signed_grant_is_the_public_revocation_denial(bound: Bou
     assert bound.h.store.approval_state(ATTEMPT) == "granted"
 
 
+class FailingSimulation:
+    """Inert simulation double that fails after the send marker committed (a timeout, say)."""
+
+    def __init__(self) -> None:
+        """Start with no calls."""
+        self.calls = 0
+
+    def __call__(self, envelope) -> str:
+        """Count the call and fail as a slow provider would."""
+        self.calls += 1
+        raise TimeoutError("simulated provider timeout")
+
+
+def in_doubt_error(response) -> dict:
+    """Assert the in-doubt answer: 503 deny.verifier_unavailable plus the attempt's receipt_ref."""
+    assert response.status_code == 503
+    body = response.json()
+    assert set(body) == {"error"}
+    assert set(body["error"]) == {"code", "correlation_id", "receipt_ref"}
+    assert body["error"]["code"] == "deny.verifier_unavailable"
+    assert body["error"]["receipt_ref"] == attempt_ref_for(ATTEMPT)
+    for secret in (GRANT, ATTEMPT, "outcome_unknown", "outcome_unrecorded", "Timeout", "sqlite"):
+        assert secret not in response.text
+    return body["error"]
+
+
+async def test_an_in_doubt_send_reports_the_durable_attempt_reference(bound: Bound) -> None:
+    """A failure after the send marker keeps 503 and the contract code, plus ``receipt_ref``.
+
+    The reference is the opaque attempt reference the startup reconciliation report lists, so the
+    caller can tell this in-doubt dispatch from a pre-dispatch deny (which never carries one). The
+    outcome stays unknown, and a retry dispatches nothing.
+    """
+    sim = FailingSimulation()
+    app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound, sim=sim)),
+    )
+    error = in_doubt_error(await post(app, {"attempt_id": ATTEMPT}))
+    row = bound.h.store.outbox_row(ATTEMPT)
+    assert (row["send_started"], row["outcome"]) == (1, "unknown") and sim.calls == 1
+    assert error["receipt_ref"] in startup_reconciliation_report(bound.h.store).in_doubt
+    retry = await post(app, {"attempt_id": ATTEMPT})
+    assert retry.status_code == 400 and retry.json()["error"]["code"] == "deny.malformed_grant"
+    assert sim.calls == 1 and bound.h.store.outbox_row(ATTEMPT)["outcome"] == "unknown"
+
+
+async def test_an_unrecorded_settlement_is_reported_in_doubt_too(
+    bound: Bound, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the outcome cannot be written after the marker, the answer is the in-doubt one as well."""
+
+    def broken(*args, **kwargs):
+        """Fail the settlement write as a damaged disk would."""
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(bound.h.store, "settle_with_receipt", broken)
+    app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound)),
+    )
+    in_doubt_error(await post(app, {"attempt_id": ATTEMPT}))
+    row = bound.h.store.outbox_row(ATTEMPT)
+    assert (row["send_started"], row["outcome"]) == (1, "unknown")
+    assert bound.h.store.receipt(ATTEMPT) is None
+
+
+async def test_a_pre_dispatch_deny_carries_no_receipt_ref(bound: Bound) -> None:
+    """A refusal before the send marker has no durable dispatch record and so no ``receipt_ref``."""
+    app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound, approvals=Approvals(False))),
+    )
+    public_error(await post(app, {"attempt_id": ATTEMPT}), 400, "deny.malformed_grant")
+    untouched(bound)
+
+
 async def test_a_failed_bearer_on_the_live_route_gets_the_public_denial(bound: Bound) -> None:
     """With the route live, a bad bearer answers 401 with the contract body."""
     app = create_app(
@@ -234,6 +313,7 @@ async def test_a_failed_bearer_on_the_live_route_gets_the_public_denial(bound: B
         ("revocation.stale", "deny.revocation_stale"),
         ("approval_verifier_unavailable", "deny.verifier_unavailable"),
         ("outcome_unknown", "deny.verifier_unavailable"),
+        ("outcome_unrecorded", "deny.verifier_unavailable"),
         ("something-new", "deny.verifier_unavailable"),
     ],
 )

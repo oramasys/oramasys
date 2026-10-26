@@ -1,7 +1,8 @@
 """Stable public error vocabulary for the serving surface (CONTRACT section 3; DRAFT).
 
 Every body is exactly ``{"error": {"code", "correlation_id"}}`` plus ``"receipt_ref"`` inside the
-error object when a durable audit record exists. Nothing else: no grant ids, key ids, paths or
+error object when a durable record exists (a denial audit record, or the attempt record of an
+in-doubt effect dispatch). Nothing else: no grant ids, key ids, paths or
 policy internals. Internal verifier reasons, and the reasons of the effect send path, are mapped
 to the closed public set here; an unmapped reason is reported as ``deny.verifier_unavailable``
 (deny, never allow). ``DENY_STATUS`` is the one HTTP status table for the public denial codes.
@@ -68,7 +69,10 @@ DENY_STATUS: Final[dict[str, int]] = {
 #   ``deny.missing_capability_record``;
 # * a verifier, clock or outcome that cannot be vouched for is ``deny.verifier_unavailable``,
 #   which is also the answer for every unmapped reason (deny, never allow).
-# The verifier codes in ``_INTERNAL_TO_PUBLIC`` apply unchanged.
+# The verifier codes in ``_INTERNAL_TO_PUBLIC`` apply unchanged. An in-doubt dispatch (the send
+# marker committed; ``outcome_unknown``, ``evidence_invalid``, ``outcome_unrecorded``) is also
+# ``deny.verifier_unavailable`` (503), and the route adds the attempt's opaque ``receipt_ref``
+# because a durable record exists; a pre-dispatch deny never carries one.
 _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
     "effect.principal_mismatch": DENY_UNAUTHORIZED_CALLER,
     "principal_mismatch": DENY_UNAUTHORIZED_CALLER,
@@ -96,7 +100,7 @@ _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
         reason: DENY_VERIFIER_UNAVAILABLE
         for reason in (
             "approval_verifier_missing", "approval_verifier_unavailable",
-            "send_clock_quarantined", "outcome_unknown", "evidence_invalid",
+            "send_clock_quarantined", "outcome_unknown", "evidence_invalid", "outcome_unrecorded",
             "effect_grant_recheck_required", "send_authority_issuer_mismatch",
         )
     },
