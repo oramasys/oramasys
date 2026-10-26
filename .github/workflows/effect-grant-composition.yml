@@ -7,6 +7,8 @@ permissions:
   contents: read
 jobs:
   effect-grant-composition:
+    env:
+      ORAMA_EFFECT_INTEROP_REQUIRED: "1"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,4 +33,4 @@ jobs:
       - name: Require real effect verifier and run composition refusals
         run: |
           python -c 'from phylax.effect_grant import EffectGrantVerifier'
-          python -m pytest -q src/tests/test_effect_grant_composition.py src/tests/test_inert_effect_api.py src/tests/test_inert_effect_integration.py src/tests/test_inert_effect_process_crashes.py
+          python -m pytest -q src/tests/test_effect_grant_composition.py src/tests/effect_interop src/tests/test_inert_effect_api.py src/tests/test_inert_effect_integration.py src/tests/test_inert_effect_process_crashes.py
