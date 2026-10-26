@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from orama.api.capabilities import CapabilityConfig
 from orama.api.denial_audit import DenialAuditLog, receipt_ref_for
 from orama.api.public_errors import DENY_CODES
 from orama.api.server import create_app
+from orama.api.verify_route import AUTH_FAILURE_AUDIT_LIMIT, _BODY_LIMIT
 from orama.graph.execution_guard import StepLedger
 from orama.graph.grant_verifier import (
     AdjustmentGrantConsumer,
@@ -151,6 +153,21 @@ async def test_an_oversized_stream_is_cut_off_at_the_limit(tmp_path: Path) -> No
     assert pulled < 200 and stub.calls == [] and audit.count() == 1
 
 
+async def test_an_oversized_chunk_is_rejected_before_it_is_buffered(tmp_path: Path) -> None:
+    """One streamed chunk larger than the body cap receives the usual malformed denial."""
+    stub = StubVerifier(result=verified(), revocation=observation())
+    app, audit = serving_app(stub, tmp_path)
+
+    async def chunks():
+        """Stream one chunk larger than the body cap."""
+        yield b"a" * (_BODY_LIMIT + 1)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        response = await client.post("/grants/verify", content=chunks(), headers=AUTH)
+    assert_public_error(response, 400, "deny.malformed_grant")
+    assert stub.calls == [] and audit.count() == 1
+
+
 async def test_missing_principal_is_denied_as_unauthorized_caller_and_audited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -161,6 +178,35 @@ async def test_missing_principal_is_denied_as_unauthorized_caller_and_audited(
     error = assert_public_error(await post(app, {"grant": "{}"}), 401, "deny.unauthorized_caller")
     assert stub.calls == []
     assert audit.has(error["receipt_ref"])
+
+
+async def test_unauthorized_failure_audits_are_bounded_per_window(tmp_path: Path) -> None:
+    """Repeated bad bearers retain their public denials without unbounded durable audit growth."""
+    app, audit = serving_app(StubVerifier(result=verified(), revocation=observation()), tmp_path)
+    for _ in range(AUTH_FAILURE_AUDIT_LIMIT + 1):
+        error = assert_public_error(
+            await post(app, {"grant": "{}"}, headers={}), 401, "deny.unauthorized_caller"
+        )
+    assert "receipt_ref" not in error
+    assert audit.count() == AUTH_FAILURE_AUDIT_LIMIT
+
+
+async def test_route_denial_audit_runs_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The asynchronous route delegates its synchronous durable audit write to a worker."""
+    app, audit = serving_app(StubVerifier(error=AdjustmentGrantRefused("grant.revoked")), tmp_path)  # type: ignore[arg-type]
+    thread_ids: list[int] = []
+    record = audit.record
+
+    def recording_audit(*args, **kwargs):
+        """Record the calling thread, then delegate to the real audit."""
+        thread_ids.append(threading.get_ident())
+        return record(*args, **kwargs)
+
+    monkeypatch.setattr(audit, "record", recording_audit)
+    assert_public_error(await post(app, {"grant": "{}"}), 403, "deny.revoked_grant")
+    assert thread_ids and thread_ids != [threading.get_ident()]
 
 
 # ------------------------------------------------------------- verification

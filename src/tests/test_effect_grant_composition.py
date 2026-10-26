@@ -16,6 +16,7 @@ from orama.graph.dispatch_attempts import (
 )
 from orama.graph.effect_grant_composition import (
     BINDING_MISMATCH,
+    AttemptRefused,
     PRINCIPAL_MISMATCH,
     EffectGrantRefused,
     FinalBoundaryPorts,
@@ -47,6 +48,7 @@ from tests.test_effect_seam import LIVE_UNTIL, SCOPE, authorize
 from tests.test_final_boundary import Approvals
 
 PRINCIPAL = "principal-1"
+LEASE = 1  # the consumer lease epoch the fixture grants carry; distinct from the fencing epoch (5)
 WIRE = b"trusted-effect-grant"
 INERT = "inert://simulation"
 PERMIT = vector_flow().permit
@@ -190,7 +192,7 @@ def bound_harness(
     path = tmp_path / "bound.sqlite"
     store = SqliteAttemptStore(path, governed=True)
     verifier = FixedVerifier(grant or projection(principal))
-    composer = TrustedEffectGrantComposer(verifier, clock=lambda: NOW)
+    composer = TrustedEffectGrantComposer(verifier, clock=lambda: NOW, lease_epoch_of=lambda run_id: LEASE)
     composer.create_attempt(
         store, attempt_id=ATTEMPT, reservation_id=RESERVATION, wire=WIRE, principal=principal,
         run_id="run-1", operation_id=PERMIT["operation_id"], request_digest=PERMIT["request_digest"],
@@ -359,7 +361,8 @@ def test_a_losing_concurrent_request_never_records_a_refusal_over_a_started_send
 
     The loser passes the durable pre-check, then its approval verifier is slow; meanwhile the
     winner sends and settles. The loser's verifier then says no. Its terminal refusal must not be
-    written over the started send, so the attempt carries the winner's receipt and no refusal.
+    written over the started send, so the attempt carries the winner's receipt and no refusal, and
+    the loser is refused with the non-terminal ``send_already_started``.
     """
     winner = FinalBoundarySender(bound.composer, sealed(bound))
     won = []
@@ -373,15 +376,17 @@ def test_a_losing_concurrent_request_never_records_a_refusal_over_a_started_send
             won.append(winner(ATTEMPT, PRINCIPAL))
             return False
 
-    with pytest.raises(FinalBoundaryRefused, match="approval_not_verified"):
+    with pytest.raises(FinalBoundaryRefused, match="send_already_started") as lost:
         bound.composer.send(
             sealed(bound, approvals=LosingApprovals()), ATTEMPT, authenticated_principal=PRINCIPAL,
         )
+    assert not lost.value.terminal
     store = bound.h.store
     assert won and won[0].outcome == "confirmed"
     assert store.receipt(ATTEMPT).receipt == won[0]
     assert store.terminal_refusal(ATTEMPT) is None
-    assert store.record_terminal_refusal(ATTEMPT, "final_boundary", None, "expired", NOW) is None
+    with pytest.raises(AttemptStateError, match="send_already_started"):
+        store.record_terminal_refusal(ATTEMPT, "final_boundary", None, "expired", NOW)
     assert store.terminal_refusal(ATTEMPT) is None
     assert winner(ATTEMPT, PRINCIPAL) == won[0]  # the replay still returns the stored receipt
 
@@ -427,7 +432,9 @@ def test_an_expired_or_non_inert_grant_refuses(tmp_path: Path) -> None:
     expired = bound_harness(tmp_path / "expired")
     real = bound_harness(tmp_path / "real", grant=projection(effect_class="external.effect"))
     try:
-        late = TrustedEffectGrantComposer(expired.verifier, clock=lambda: NOW + timedelta(hours=2))
+        late = TrustedEffectGrantComposer(
+            expired.verifier, clock=lambda: NOW + timedelta(hours=2), lease_epoch_of=lambda run_id: LEASE
+        )
         with pytest.raises(EffectGrantRefused, match="grant.expired"):
             late.send(sealed(expired), ATTEMPT, authenticated_principal=PRINCIPAL)
         with pytest.raises(EffectGrantRefused, match=BINDING_MISMATCH):
@@ -531,3 +538,172 @@ def test_final_boundary_ports_must_be_complete() -> None:
         FinalBoundaryPorts(Approvals(), None, ISSUER)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         FinalBoundaryPorts(Approvals(), FakeRevocations(), " ")
+
+
+# ------------------------------------------- lease epoch and fencing epoch are distinct gates
+
+
+def composer_with(b: Bound, lease_epoch_of) -> TrustedEffectGrantComposer:
+    """Build another composer over the bound attempt's verifier with its own lease view."""
+    return TrustedEffectGrantComposer(b.verifier, clock=lambda: NOW, lease_epoch_of=lease_epoch_of)
+
+
+def test_a_stale_lease_with_a_current_fencing_epoch_refuses_and_sends_nothing(bound: Bound) -> None:
+    """The consumer's lease moved on (2) while the fencing epoch (5) is still the stamped one."""
+    store = bound.h.store
+    assert store.current_fencing_epoch() == store.fencing_epoch(ATTEMPT) == 5
+    sim = Simulation()
+    with pytest.raises(EffectGrantRefused, match="effect.lease_stale"):
+        composer_with(bound, lambda run_id: 2).send(
+            sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL
+        )
+    assert sim.calls == 0 and store.terminal_refusal(ATTEMPT) is None
+    assert store.approval_state(ATTEMPT) == "granted"
+    untouched(bound)
+
+
+def test_a_current_lease_with_a_stale_fencing_epoch_refuses_and_sends_nothing(bound: Bound) -> None:
+    """The lease holds (1) but the fencing mark moved past the attempt's stamp."""
+    store = bound.h.store
+    store.advance_fencing_epoch(6, operator=Operator(), now=NOW)
+    sim = Simulation()
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        composer_with(bound, lambda run_id: LEASE).send(
+            sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL
+        )
+    assert excinfo.value.reason == "epoch_stale" and sim.calls == 0
+    assert store.approval_state(ATTEMPT) == "granted"
+    assert store.fencing_epoch(ATTEMPT) == 5  # the stamp is never rewritten by a lease
+    untouched(bound)
+
+
+def test_a_current_lease_and_a_current_fencing_epoch_send_once(bound: Bound) -> None:
+    """A send needs both to hold; with both holding, the one send settles."""
+    receipt = composer_with(bound, lambda run_id: LEASE).send(
+        sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL
+    )
+    assert receipt.outcome == "confirmed"
+
+
+def test_the_fencing_epoch_never_stands_in_for_the_lease_epoch(bound: Bound) -> None:
+    """A lease view answering the fencing epoch (5) is not the grant's lease epoch (1): refused."""
+    assert bound.h.store.current_fencing_epoch() == 5
+    with pytest.raises(EffectGrantRefused, match="effect.lease_stale"):
+        composer_with(bound, lambda run_id: 5).send(
+            sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL
+        )
+    untouched(bound)
+
+
+def test_the_lease_epoch_is_not_a_fencing_value(bound: Bound) -> None:
+    """The lease epoch lives in the grant binding, the fencing epoch in its own tables and stamp."""
+    store = bound.h.store
+    _, context = store.effect_grant_binding(ATTEMPT)
+    assert context["consumer_lease_epoch"] == LEASE
+    assert store.fencing_epoch(ATTEMPT) == 5 != LEASE
+    columns = {row[1] for row in store._db.execute("PRAGMA table_info(dispatch_attempts)")}
+    assert "consumer_lease_epoch" not in columns
+
+
+def test_a_missing_or_failing_lease_view_refuses_closed(bound: Bound) -> None:
+    """No lease view, or one that raises or answers a non-epoch, can never allow a send."""
+    def broken(run_id: str) -> int:
+        """Fail as an unreadable lease store would."""
+        raise OSError("lease store unreadable")
+
+    for view in (None, broken, lambda run_id: None, lambda run_id: True):
+        with pytest.raises(EffectGrantRefused) as excinfo:
+            composer_with(bound, view).send(sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL)
+        assert excinfo.value.code in ("verifier.unavailable", "effect.lease_stale")
+    untouched(bound)
+
+
+def test_a_lease_lost_inside_the_send_transaction_rolls_the_send_back(bound: Bound) -> None:
+    """The lease is read again inside the send transaction; losing it there leaves nothing behind."""
+    answers = iter([LEASE, 2])
+    sim = Simulation()
+    with pytest.raises(EffectGrantRefused, match="effect.lease_stale"):
+        composer_with(bound, lambda run_id: next(answers)).send(
+            sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL
+        )
+    assert sim.calls == 0
+    assert bound.h.store.approval_state(ATTEMPT) == "granted"
+    untouched(bound)
+
+
+# ------------------------------------------- the refusal record carries the public fields
+
+
+def refuse_once(bound: Bound) -> FinalBoundarySender:
+    """Refuse the attempt at the boundary (the approval verifier says no) and return the sender."""
+    sender = FinalBoundarySender(bound.composer, sealed(bound, approvals=Approvals(False)))
+    with pytest.raises(AttemptRefused):
+        sender(ATTEMPT, PRINCIPAL)
+    return sender
+
+
+def test_the_refusal_record_carries_the_public_fields(bound: Bound) -> None:
+    """disposition, refusal_code, receipt_ref and recorded_at are on the record; internals stay apart."""
+    refuse_once(bound)
+    record = bound.h.store.terminal_refusal(ATTEMPT)
+    assert record is not None
+    assert record.disposition == "authorization_refused"
+    assert record.refusal_code == "deny.malformed_grant"
+    assert record.receipt_ref == attempt_ref_for(ATTEMPT)
+    assert datetime.fromisoformat(record.recorded_at) == NOW
+    assert record.reason == "approval_not_verified" and record.kind == "final_boundary"
+    row = bound.h.store._db.execute(
+        "SELECT refusal_code, receipt_ref FROM attempt_refusals WHERE attempt_id = ?", (ATTEMPT,)
+    ).fetchone()
+    assert row == (record.refusal_code, record.receipt_ref)
+    for public in (record.refusal_code, record.receipt_ref):
+        assert GRANT not in public and ATTEMPT not in public and "approval_not_verified" not in public
+
+
+def test_a_replay_of_a_refused_attempt_returns_the_stored_code_and_receipt_ref(bound: Bound) -> None:
+    """The replay performs no new authorization or dispatch and answers from the record."""
+    sender = refuse_once(bound)
+    first = bound.h.store.terminal_refusal(ATTEMPT)
+    approvals, sim = Approvals(), Simulation()
+    replay = FinalBoundarySender(bound.composer, sealed(bound, approvals=approvals, sim=sim))
+    for sending in (sender, replay):
+        with pytest.raises(AttemptRefused) as again:
+            sending(ATTEMPT, PRINCIPAL)
+        assert (again.value.code, again.value.receipt_ref) == (first.refusal_code, first.receipt_ref)
+    assert approvals.seen == [] and sim.calls == 0
+    assert bound.h.store.terminal_refusal(ATTEMPT) == first
+    untouched(bound)
+
+
+def test_another_principal_never_learns_of_a_refusal_record(bound: Bound) -> None:
+    """A caller that is not the attempt's principal gets the principal refusal, not the record."""
+    sender = refuse_once(bound)
+    with pytest.raises(EffectGrantRefused, match=PRINCIPAL_MISMATCH):
+        sender(ATTEMPT, "someone-else")
+
+
+def test_a_refusal_row_written_before_the_public_fields_still_replays_safely(tmp_path: Path) -> None:
+    """A legacy row (no code, no ref) is migrated in place and replays as a deny, with its ref."""
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite"
+    SqliteAttemptStore(path, governed=True).close()
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        "DROP TABLE attempt_refusals;"
+        "CREATE TABLE attempt_refusals (attempt_id TEXT PRIMARY KEY, kind TEXT NOT NULL, rule TEXT,"
+        " reason TEXT NOT NULL, recorded_at TEXT NOT NULL);"
+        "INSERT INTO attempt_refusals VALUES ('old-attempt', 'final_boundary', NULL, 'expired',"
+        " '2026-10-26T00:00:00+00:00');"
+    )
+    raw.commit()
+    raw.close()
+    store = SqliteAttemptStore(path, governed=True)
+    try:
+        record = store.terminal_refusal("old-attempt")
+        assert record is not None
+        assert record.refusal_code == "deny.verifier_unavailable"
+        assert record.receipt_ref == attempt_ref_for("old-attempt")
+        assert record.disposition == "authorization_refused"
+    finally:
+        store.close()

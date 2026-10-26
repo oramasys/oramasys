@@ -90,10 +90,11 @@ def test_missing_record_denies_every_bit_with_a_reason() -> None:
         (b"\xff\xfe", "capability.record_unreadable"),
         (b"not json", "capability.record_unreadable"),
         (b"x" * 70_000, "capability.record_unreadable"),
+        (b"[" * 10_000, "capability.record_unreadable"),
         (b"[1, 2]", "capability.record_malformed"),
         (b"null", "capability.record_malformed"),
     ],
-    ids=["bad-utf8", "not-json", "oversize", "array", "null"],
+    ids=["bad-utf8", "not-json", "oversize", "recursive", "array", "null"],
 )
 def test_unreadable_or_non_object_record_denies(raw: bytes, reason: str) -> None:
     """Undecodable, oversize or non-object input denies every bit."""
@@ -357,6 +358,13 @@ def test_environment_unreadable_path_is_reported_unreadable(tmp_path: Path) -> N
     """A path that cannot be read denies with the unreadable reason."""
     cfg = capability_config_from_environ({"ORAMA_CAPABILITY_RECORD": str(tmp_path / "absent.json")})
     assert read_capability_record(cfg.record).record_state == "capability.record_unreadable"
+
+
+def test_deeply_nested_record_is_reported_unreadable() -> None:
+    """A bounded but recursively malformed record denies instead of escaping startup."""
+    view = read_capability_record(b"[" * 2_000)
+    all_denied(view)
+    assert view.record_state == "capability.record_unreadable"
 
 
 def test_environment_record_file_is_read_without_enabling_anything(tmp_path: Path) -> None:

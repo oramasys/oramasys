@@ -60,11 +60,19 @@ async def post(app, body=None, headers=AUTH, *, raw: bytes | None = None):
         return await client.post("/effects/inert", json=body, headers=headers)
 
 
-def public_error(response, status: int, code: str) -> dict:
-    """Assert the contract error body exactly, with no grant id or internal reason leaking."""
+def public_error(response, status: int, code: str, *, receipt_ref: str | None = None) -> dict:
+    """Assert the contract error body exactly, with no grant id or internal reason leaking.
+
+    ``receipt_ref`` (when given) must be nested inside the ``error`` object and equal this value;
+    it is never a sibling of ``error``.
+    """
     assert response.status_code == status
     body = response.json()
-    assert set(body) == {"error"} and set(body["error"]) == {"code", "correlation_id"}
+    assert set(body) == {"error"}
+    expected_keys = {"code", "correlation_id"} | ({"receipt_ref"} if receipt_ref is not None else set())
+    assert set(body["error"]) == expected_keys
+    if receipt_ref is not None:
+        assert body["error"]["receipt_ref"] == receipt_ref
     assert body["error"]["code"] == code
     for secret in (GRANT, ATTEMPT, "effect.", "grant.", "effects_denied", "principal_mismatch"):
         assert secret not in response.text
@@ -230,7 +238,10 @@ async def test_final_boundary_refusals_map_to_public_codes(bound: Bound) -> None
         capability_config=effects_config(),
         inert_sender=FinalBoundarySender(bound.composer, sealed(bound, effects=None)),
     )
-    public_error(await post(denied, {"attempt_id": ATTEMPT}), 403, "deny.missing_capability_record")
+    public_error(
+        await post(denied, {"attempt_id": ATTEMPT}), 403, "deny.missing_capability_record",
+        receipt_ref=attempt_ref_for(ATTEMPT),
+    )
     untouched(bound)
 
 
@@ -321,13 +332,29 @@ async def test_an_unrecorded_settlement_is_reported_in_doubt_too(
     assert bound.h.store.receipt(ATTEMPT) is None
 
 
-async def test_a_pre_dispatch_deny_carries_no_receipt_ref(bound: Bound) -> None:
-    """A refusal before the send marker has no durable dispatch record and so no ``receipt_ref``."""
+async def test_a_pre_dispatch_deny_without_a_record_carries_no_receipt_ref(bound: Bound) -> None:
+    """A deny that leaves no durable record (here a malformed request) has no ``receipt_ref``."""
+    app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound)),
+    )
+    public_error(await post(app, {"attempt_id": ""}), 400, "deny.malformed_grant")
+    assert bound.h.store.terminal_refusal(ATTEMPT) is None
+    untouched(bound)
+
+
+async def test_a_recorded_refusal_carries_its_stored_code_and_nested_receipt_ref(bound: Bound) -> None:
+    """A refusal that wrote the terminal record answers with its public code and the record's ref."""
     app = create_app(
         capability_config=effects_config(),
         inert_sender=FinalBoundarySender(bound.composer, sealed(bound, approvals=Approvals(False))),
     )
-    public_error(await post(app, {"attempt_id": ATTEMPT}), 400, "deny.malformed_grant")
+    error = public_error(
+        await post(app, {"attempt_id": ATTEMPT}), 400, "deny.malformed_grant",
+        receipt_ref=attempt_ref_for(ATTEMPT),
+    )
+    stored = bound.h.store.terminal_refusal(ATTEMPT)
+    assert stored is not None and error["receipt_ref"] == stored.receipt_ref
     untouched(bound)
 
 
@@ -420,3 +447,61 @@ async def test_an_auth_failure_hook_can_never_turn_a_denial_into_an_allow(bound:
 def test_effect_reasons_map_to_the_closed_public_vocabulary(reason: str, code: str) -> None:
     """Every internal send-path reason has one public code; unknown reasons deny as unavailable."""
     assert public_effect_denial_code(reason) == code
+
+
+async def test_a_replay_of_a_refused_attempt_answers_the_stored_code_and_receipt_ref(bound: Bound) -> None:
+    """The refusal and every replay carry the same code and nested receipt_ref, with fresh correlation."""
+    app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound, approvals=Approvals(False))),
+    )
+    ref = attempt_ref_for(ATTEMPT)
+    first = public_error(await post(app, {"attempt_id": ATTEMPT}), 400, "deny.malformed_grant", receipt_ref=ref)
+    # A replay with a verifier that would now approve still performs no new authorization or dispatch.
+    sim = FailingSimulation()
+    replay_app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound, sim=sim)),
+    )
+    response = await post(replay_app, {"attempt_id": ATTEMPT})
+    again = public_error(response, 400, "deny.malformed_grant", receipt_ref=ref)
+    assert again["correlation_id"] != first["correlation_id"]
+    assert "receipt_ref" not in response.json()  # nested in ``error``, never a sibling
+    assert sim.calls == 0
+    untouched(bound)
+
+
+async def test_a_replay_of_a_refusal_with_a_different_public_code_keeps_that_code(bound: Bound) -> None:
+    """The stored code is replayed, not recomputed: an effects refusal stays 403 on replay."""
+    denied = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound, effects=None)),
+    )
+    ref = attempt_ref_for(ATTEMPT)
+    for _ in range(2):
+        public_error(
+            await post(denied, {"attempt_id": ATTEMPT}), 403, "deny.missing_capability_record",
+            receipt_ref=ref,
+        )
+    allowed = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound)),
+    )
+    public_error(
+        await post(allowed, {"attempt_id": ATTEMPT}), 403, "deny.missing_capability_record",
+        receipt_ref=ref,
+    )
+    untouched(bound)
+
+
+async def test_an_in_doubt_dispatch_is_503_with_a_nested_receipt_ref_and_never_a_refusal(bound: Bound) -> None:
+    """After the send marker an unproven outcome is 503 deny.verifier_unavailable plus receipt_ref."""
+    app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound, sim=FailingSimulation())),
+    )
+    response = await post(app, {"attempt_id": ATTEMPT})
+    public_error(response, 503, "deny.verifier_unavailable", receipt_ref=attempt_ref_for(ATTEMPT))
+    assert "receipt_ref" not in response.json()
+    assert bound.h.store.terminal_refusal(ATTEMPT) is None
+    assert bound.h.store.outbox_row(ATTEMPT)["outcome"] == "unknown"

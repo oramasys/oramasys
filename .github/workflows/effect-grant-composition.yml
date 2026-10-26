@@ -23,9 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install immutable candidate and noneditable consumer
         run: |
-          PIN="$(tr -d '[:space:]' < requirements/compatibility-phylax-effect-grant.txt)"
-          [[ "$PIN" =~ ^[0-9a-f]{40}$ ]]
-          python -m pip install '.[dev]' "oramasys-phylax @ git+https://github.com/oramasys/phylax.git@$PIN"
+          python -m pip install '.[dev,effect-grant-test]'
           python -m pip check
       - name: Verify installed producer provenance
         working-directory: ${{ runner.temp }}

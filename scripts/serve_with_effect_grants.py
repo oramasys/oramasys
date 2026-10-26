@@ -64,12 +64,15 @@ def build_app(
     final_boundary: FinalBoundaryPorts | None = None,
     open_verifier: VerifierOpener = open_public_verifier,
     clock: Callable[[], datetime] | None = None,
+    lease_epoch_of: Callable[[str], int | None] | None = None,
 ) -> FastAPI:
     """Wire the canonical inert sender only when requested AND the effects bit is effective.
 
     ``capability_config`` defaults to ``capability_config_from_environ(environ)``; it is a seam for
     tests and never bypasses ``evaluate``. ``final_boundary`` supplies the final-boundary ports; R0-2
     wires none. ``clock`` (default: the wall clock) is shared by the composer and the sealed driver.
+    ``lease_epoch_of`` is the consumer's current-lease view the composer's send-time recheck needs;
+    R0-2 wires none, so no bound attempt can be sent (fail closed).
     When (and only when) the effect store is opened it is also passed to ``create_app`` as the
     ``attempt_store``, so the startup reconciliation report lists its in-doubt attempts (report only).
     """
@@ -106,7 +109,7 @@ def build_app(
             revocations=final_boundary.revocations, issuer_id=final_boundary.issuer_id,
             clock=clock,
         )
-        sender = FinalBoundarySender(TrustedEffectGrantComposer(verifier, clock=clock), driver)
+        sender = FinalBoundarySender(TrustedEffectGrantComposer(verifier, clock=clock, lease_epoch_of=lease_epoch_of), driver)
         # The store this root opened is the effect store: its in-doubt rows are reported at startup.
         app = create_app(capability_config=config, inert_sender=sender, attempt_store=store)
     except BaseException:

@@ -150,9 +150,26 @@ behaviour stricter.
   an attempt that already authorized without a binding.
 - `begin_bound_send` refuses a caller issuer other than the one recorded in
   the attempt's send authority (`send_authority_issuer_mismatch`).
-- A final-boundary refusal is never recorded over a started send: a request
-  that loses the race to the send marker still gets its own refusal, but the
-  attempt keeps only the winner's receipt.
+- A final-boundary refusal is never recorded over a started send. The store
+  raises `send_already_started` and records nothing; the final boundary and the
+  sealed driver share one helper (`record_boundary_refusal`) that turns it into
+  the non-terminal `send_already_started` refusal, so the attempt keeps only the
+  winner's receipt and the losing request is denied with that reason.
+- The refusal record carries the contract's public fields (`disposition`
+  `authorization_refused`, `refusal_code`, `receipt_ref`, `recorded_at`); the
+  internal kind, rule and reason stay beside them and never reach a response.
+  A refusal and every replay of it answer with the stored `deny.*` code and
+  the `receipt_ref` nested inside the `error` object. A caller that is not the
+  attempt's principal never learns of the record.
+- The lease epoch (the grant's `consumer_lease_epoch`) and the fencing epoch
+  (the attempt store's mark and stamp) are separate gates with separate
+  storage. The composer's send-time recheck compares the grant's lease epoch
+  with the consumer's current lease (an injected view; none wired means no bound
+  send) inside the send transaction; the final boundary enforces the fencing
+  epoch. A stale lease refuses with a current fencing epoch, and a stale fencing
+  epoch refuses with a current lease.
+- The effect-interop tests get Phylax through the test-only `effect-grant-test`
+  extra, pinned to the commit in `requirements/compatibility-phylax-effect-grant.txt`.
 - Approval and reconciliation-ticket expiry compare parsed instants, never
   formatted text; an unreadable stored expiry refuses.
 - `/effects/inert` asks the `effects` capability when it is installed and

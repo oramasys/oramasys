@@ -24,6 +24,13 @@ consumer-side codes, mapped to the public vocabulary in ``orama.api.public_error
   different principal than the one bound to the attempt (public ``deny.unauthorized_caller``);
 * ``effect.binding_mismatch``: a verified fact differs from the bound request or attempt
   (public ``deny.malformed_grant``).
+
+Two distinct epochs gate a send and neither implies the other. The **lease epoch** is the grant's
+verified ``consumer_lease_epoch``; the send-time recheck compares it with the consumer's current
+lease for the run (the injected ``lease_epoch_of`` view) and refuses ``effect.lease_stale`` on any
+difference, and refuses ``verifier.unavailable`` when no view is wired or it fails. The **fencing
+epoch** is owned by the attempt store (``effect_fencing``) and enforced by the final boundary
+(``epoch_stale``). They are never compared with, derived from or stored in each other.
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from orama.graph.dispatch_attempts import SqliteAttemptStore, VerifiedDispatchGrant
+from orama.graph.effect_outcomes import OutcomeRefused
 from orama.graph.dispatch_consumer_wire import is_canonical_identifier
 from orama.graph.effect_receipts import RedactedReceipt
 from orama.graph.final_boundary import (
@@ -46,13 +54,14 @@ from orama.graph.sealed_inert_driver import SealedInertDriver
 
 PRINCIPAL_MISMATCH = "effect.principal_mismatch"
 BINDING_MISMATCH = "effect.binding_mismatch"
+LEASE_STALE = "effect.lease_stale"
 INERT_EFFECT_CLASS = "inert.simulation"
 
 _REFUSAL_CODES = frozenset({
     "grant.malformed", "grant.schema_unsupported", "grant.key_unknown",
     "grant.signature_invalid", "grant.expired", "grant.future_dated",
     "grant.revoked", "revocation.stale", "verifier.unavailable",
-    PRINCIPAL_MISMATCH, BINDING_MISMATCH,
+    PRINCIPAL_MISMATCH, BINDING_MISMATCH, LEASE_STALE,
 })
 
 
@@ -167,11 +176,31 @@ class TrustedEffectGrantComposer:
     """Verify and bind a v2 effect grant; every send goes through the sealed final boundary."""
 
     def __init__(
-        self, verifier: EffectGrantVerifier, *, clock: Callable[[], datetime] | None = None
+        self,
+        verifier: EffectGrantVerifier,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        lease_epoch_of: Callable[[str], int | None] | None = None,
     ) -> None:
-        """Keep only the public verifier port, never issuer or signing capabilities."""
+        """Keep only the public verifier port, never issuer or signing capabilities.
+
+        ``lease_epoch_of(run_id)`` returns the consumer's current lease epoch for the run (or None
+        when it holds none). Without it no bound attempt can be sent: lease validity is unknown.
+        """
         self._verifier = verifier
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._lease_epoch_of = lease_epoch_of
+
+    def _check_lease(self, grant: VerifiedEffectGrant) -> None:
+        """Refuse unless the grant's lease epoch is the consumer's current lease epoch for its run."""
+        if self._lease_epoch_of is None:
+            raise EffectGrantRefused("verifier.unavailable")
+        try:
+            current = self._lease_epoch_of(grant.run_id)
+        except Exception as error:  # noqa: BLE001 - an unreadable lease view is a deny
+            raise EffectGrantRefused("verifier.unavailable") from error
+        if type(current) is not int or current != grant.consumer_lease_epoch:
+            raise EffectGrantRefused(LEASE_STALE)
 
     def _verified(self, wire: bytes) -> VerifiedEffectGrant:
         """Verify the wire and return the validated projection, or raise a closed refusal."""
@@ -229,7 +258,7 @@ class TrustedEffectGrantComposer:
         self, grant: VerifiedEffectGrant, context: dict[str, Any], grant_id: str,
         second_approval_ref: str | None,
     ) -> None:
-        """Refuse unless the verified grant still equals the durable binding and is live and inert."""
+        """Refuse unless the verified grant still equals the durable binding, is live and inert, and holds the lease."""
         if grant.grant_id != grant_id or grant.second_approval_ref != (second_approval_ref or ""):
             raise EffectGrantRefused(BINDING_MISMATCH)
         differing = [name for name, value in context.items() if getattr(grant, name) != value]
@@ -239,6 +268,7 @@ class TrustedEffectGrantComposer:
             raise EffectGrantRefused(BINDING_MISMATCH)
         if self._clock() >= grant.expires_at:
             raise EffectGrantRefused("grant.expired")
+        self._check_lease(grant)
 
     def bound_binding(
         self, store: SqliteAttemptStore, attempt_id: str, *, authenticated_principal: str
@@ -301,6 +331,20 @@ class TrustedEffectGrantComposer:
         )
 
 
+class AttemptRefused(Exception):
+    """The attempt holds a terminal refusal record; it is answered from that record, every time.
+
+    ``code`` is the stored public ``deny.*`` code and ``receipt_ref`` the stored opaque reference.
+    Nothing internal (kind, rule, reason) is carried.
+    """
+
+    def __init__(self, code: str, receipt_ref: str) -> None:
+        """Keep the stored public code and the opaque receipt reference."""
+        super().__init__(code)
+        self.code = code
+        self.receipt_ref = receipt_ref
+
+
 class FinalBoundarySender:
     """The only sender ``POST /effects/inert`` accepts: verify-and-bind, then the final boundary."""
 
@@ -314,5 +358,20 @@ class FinalBoundarySender:
         self._driver = driver
 
     def __call__(self, attempt_id: str, principal: str) -> RedactedReceipt:
-        """Send the attempt as the authenticated principal through the canonical path."""
-        return self._composer.send(self._driver, attempt_id, authenticated_principal=principal)
+        """Send the attempt as the authenticated principal through the canonical path.
+
+        A refusal at or after the final boundary is answered from the attempt's terminal refusal
+        record when one exists (``AttemptRefused``): the first request that was refused and every
+        replay get the same stored public code and ``receipt_ref``. A caller that is not the
+        attempt's principal never learns of the record, and an in-doubt dispatch
+        (``SendOutcomeUnknown``) is never converted into a refusal.
+        """
+        try:
+            return self._composer.send(self._driver, attempt_id, authenticated_principal=principal)
+        except (FinalBoundaryRefused, OutcomeRefused) as refusal:
+            if getattr(refusal, "reason", None) in ("principal_mismatch", "attempt_not_authorized"):
+                raise
+            stored = self._driver.store.terminal_refusal(attempt_id)
+            if stored is None:
+                raise
+            raise AttemptRefused(stored.refusal_code, stored.receipt_ref) from refusal

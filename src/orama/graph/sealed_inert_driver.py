@@ -30,6 +30,7 @@ from orama.graph.final_boundary import (
     FinalBoundaryRefused,
     RevocationLookup,
     authorize_final_boundary,
+    record_boundary_refusal,
 )
 from orama.graph.sealed_envelope import SealedEnvelope, open_envelope
 
@@ -125,8 +126,8 @@ class SealedInertDriver:
             )
         except FinalBoundaryRefused as refusal:
             if refusal.terminal and refusal.reason in TERMINAL_REASONS:
-                self._store.record_terminal_refusal(
-                    binding.attempt_id, "final_boundary", None, refusal.reason, self._clock()
+                record_boundary_refusal(
+                    self._store, binding.attempt_id, refusal.reason, self._clock()
                 )
             raise
         evidence = self._run(envelope)

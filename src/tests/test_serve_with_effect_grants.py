@@ -298,6 +298,7 @@ async def test_effective_effects_with_ports_send_only_through_the_final_boundary
     app = module.build_app(
         environ(tmp_path, b.h.path), capability_config=effective(), open_verifier=opener,
         final_boundary=FinalBoundaryPorts(approvals, FakeRevocations(), ISSUER), clock=lambda: NOW,
+        lease_epoch_of=lambda run_id: 1,
     )
     response = await post(app, {"attempt_id": ATTEMPT})
     assert response.status_code == 200 and response.json()["receipt"]["outcome"] == "confirmed"

@@ -112,8 +112,12 @@ class BindingStore(Protocol):
 
     def record_terminal_refusal(
         self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
-    ) -> StoredRefusal | None:
-        """Record a terminal refusal for the attempt identity; None when its send already started."""
+    ) -> StoredRefusal:
+        """Record a terminal refusal for the attempt identity.
+
+        Raises ``AttemptStateError("send_already_started")`` and records nothing when the attempt's
+        send has already started.
+        """
 
 
 def _normal_digest(value: str) -> str:
@@ -177,7 +181,7 @@ def authorize_final_boundary(
     switch, then revocation, then the injected approval verifier. Any refusal that concerns this
     attempt is recorded as terminal before it is raised, unless a concurrent request started the
     send in the meantime: the store never records a refusal over a started send, and this request
-    still raises its own refusal.
+    is refused with the non-terminal ``send_already_started``.
     """
     stored = store.attempt_binding(binding.attempt_id)
     try:
@@ -191,10 +195,29 @@ def authorize_final_boundary(
     except FinalBoundaryRefused as refusal:
         if refusal.terminal and refusal.reason in TERMINAL_REASONS and stored is not None \
                 and stored.refusal is None:
-            store.record_terminal_refusal(
-                binding.attempt_id, "final_boundary", None, refusal.reason, now
-            )
+            record_boundary_refusal(store, binding.attempt_id, refusal.reason, now)
         raise
+
+
+def record_boundary_refusal(
+    store: BindingStore, attempt_id: str, reason: str, now: datetime
+) -> None:
+    """Record a terminal boundary refusal unless another caller already started the send.
+
+    The one place that turns the store's ``send_already_started`` state error into a non-terminal
+    ``FinalBoundaryRefused("send_already_started")``; ``authorize_final_boundary`` and
+    ``SealedInertDriver`` both call it, so a refusal is never written over a started send and the
+    losing request is denied with the same reason on every entry point.
+    """
+    # dispatch_attempts imports this module, so resolve its state error only after both load.
+    from orama.graph.dispatch_attempts import AttemptStateError
+
+    try:
+        store.record_terminal_refusal(attempt_id, "final_boundary", None, reason, now)
+    except AttemptStateError as error:
+        if str(error) != "send_already_started":
+            raise
+        raise FinalBoundaryRefused("send_already_started") from error
 
 
 def _verify_revocation_and_approval(

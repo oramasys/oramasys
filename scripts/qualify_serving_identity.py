@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 from pathlib import Path
 
 
@@ -39,14 +38,8 @@ def main() -> None:
     verifier = open_effect_grant_verifier(GrantVerifierConfig(state_dir=args.public_state))
     try:
         database = args.public_state / "grants.sqlite3"
-        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
-            try:
-                connection.execute("DELETE FROM issued_grants WHERE 0")
-            except sqlite3.OperationalError as error:
-                if "readonly" not in str(error).lower():
-                    raise
-            else:
-                raise SystemExit("public verifier database accepted a write")
+        if not denied(database, os.O_RDWR):
+            raise SystemExit("serving identity can write the public verifier database")
         print(json.dumps({"uid": os.geteuid(), "seed_read_denied": True, "issuer_write_denied": True, "public_verifier_opened": True, "public_write_denied": True}))
     finally:
         verifier.close()

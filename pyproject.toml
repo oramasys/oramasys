@@ -31,6 +31,15 @@ dependencies = [
 grant-serving = [
     "oramasys-phylax @ git+https://github.com/oramasys/phylax.git@0c3e860749b3ff8f62e102679f1f415f8acf0a61",
 ]
+# Test-only delivery of the Phylax effect-grant candidate that the effect-interop tests import
+# (``phylax.effect_grant``), which the ``grant-serving`` pin predates. Never combine it with
+# ``grant-serving`` (one distribution, two commits) and never use it to serve. The commit must equal
+# requirements/compatibility-phylax-effect-grant.txt (a test enforces it). The URL omits ``.git`` so
+# the grant-serving pin registry, which counts ``phylax.git@<sha>`` references, still sees one.
+# perpetua-core, which those tests also import, is already a base dependency.
+effect-grant-test = [
+    "oramasys-phylax @ git+https://github.com/oramasys/phylax@6b9ad5673ac402c0909c0218ccdcdd25c9ef90c6",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

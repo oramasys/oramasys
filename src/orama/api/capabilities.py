@@ -139,7 +139,7 @@ def _parse(raw: bytes | str | Mapping[str, Any] | None) -> tuple[dict[str, Any] 
         return None, REASON_UNREADABLE
     try:
         decoded = json.loads(bytes(raw).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None, REASON_UNREADABLE
     if not isinstance(decoded, dict):
         return None, REASON_MALFORMED

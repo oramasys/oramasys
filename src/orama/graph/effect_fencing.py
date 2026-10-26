@@ -7,7 +7,10 @@ the same ``BEGIN IMMEDIATE`` transaction as the ledger transition:
   An attempt is stamped with the epoch it was authorized under. Authorizing under an epoch below the
   current one is refused, and a later send is refused when the epoch moved on (stale epoch).
 * the **terminal refusal**: a pre-dispatch refusal recorded for an attempt identity. It is terminal;
-  a replay with the same identity gets the same refusal back, and the table is append-only.
+  a replay with the same identity gets the same refusal back, and the table is append-only. The
+  record carries the contract's public fields (``disposition``, ``refusal_code``, ``receipt_ref``,
+  ``recorded_at``); the internal ``kind``, ``rule`` and ``reason`` stay beside them for logs and
+  internals only and never reach a response.
 
 Functions take an open connection: the caller owns the transaction. This module holds no policy and
 no I/O beyond that connection.
@@ -19,6 +22,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
+from orama.graph.effect_receipts import attempt_ref_for
+
 FENCING_SCHEMA: Final = (
     "CREATE TABLE IF NOT EXISTS fencing_epoch_current ("
     " id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL CHECK (epoch >= 1))",
@@ -27,7 +32,7 @@ FENCING_SCHEMA: Final = (
     " recorded_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS attempt_refusals ("
     " attempt_id TEXT PRIMARY KEY, kind TEXT NOT NULL, rule TEXT, reason TEXT NOT NULL,"
-    " recorded_at TEXT NOT NULL)",
+    " recorded_at TEXT NOT NULL, refusal_code TEXT, receipt_ref TEXT)",
     "CREATE TRIGGER IF NOT EXISTS attempt_refusals_no_update BEFORE UPDATE ON attempt_refusals"
     " BEGIN SELECT RAISE(ABORT, 'attempt_refusals is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS attempt_refusals_no_delete BEFORE DELETE ON attempt_refusals"
@@ -39,6 +44,9 @@ FENCING_SCHEMA: Final = (
 )
 
 REFUSAL_KINDS: Final = frozenset({"authorization", "reservation", "final_boundary"})
+REFUSAL_DISPOSITION: Final = "authorization_refused"
+# A row written before ``refusal_code`` existed has none; it replays as the deny that never allows.
+LEGACY_REFUSAL_CODE: Final = "deny.verifier_unavailable"
 
 
 class FencingRefused(Exception):
@@ -52,12 +60,24 @@ class FencingRefused(Exception):
 
 @dataclass(frozen=True, slots=True)
 class StoredRefusal:
-    """A terminal pre-dispatch refusal recorded for one attempt identity."""
+    """A terminal pre-dispatch refusal recorded for one attempt identity.
+
+    ``refusal_code`` (a public ``deny.*`` code), ``receipt_ref`` (opaque), ``disposition`` and
+    ``recorded_at`` are the public fields; ``kind``, ``rule`` and ``reason`` are internal.
+    """
 
     attempt_id: str
     kind: str
     rule: str | None
     reason: str
+    recorded_at: str
+    refusal_code: str
+    receipt_ref: str
+
+    @property
+    def disposition(self) -> str:
+        """Return the contract discriminator: a refusal is a disposition, never an outcome."""
+        return REFUSAL_DISPOSITION
 
 
 def require_epoch(epoch: object) -> int:
@@ -123,22 +143,36 @@ def advance_epoch(db: sqlite3.Connection, epoch: int, operator_ref: str, now: da
 def stored_refusal(db: sqlite3.Connection, attempt_id: str) -> StoredRefusal | None:
     """Return the terminal refusal recorded for the attempt identity, or None."""
     row = db.execute(
-        "SELECT attempt_id, kind, rule, reason FROM attempt_refusals WHERE attempt_id = ?",
+        "SELECT attempt_id, kind, rule, reason, recorded_at, refusal_code, receipt_ref"
+        " FROM attempt_refusals WHERE attempt_id = ?",
         (attempt_id,),
     ).fetchone()
-    return None if row is None else StoredRefusal(*row)
+    if row is None:
+        return None
+    return StoredRefusal(
+        row[0], row[1], row[2], row[3], row[4], row[5] or LEGACY_REFUSAL_CODE,
+        row[6] or attempt_ref_for(row[0]),
+    )
 
 
 def record_refusal(
-    db: sqlite3.Connection, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
+    db: sqlite3.Connection, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime,
+    refusal_code: str = LEGACY_REFUSAL_CODE,
 ) -> StoredRefusal:
-    """Record a terminal refusal once; the first one for an identity wins and is returned forever."""
+    """Record a terminal refusal once; the first one for an identity wins and is returned forever.
+
+    ``refusal_code`` is the public ``deny.*`` code the refusal answers with, now and on every
+    replay; the opaque ``receipt_ref`` is derived from the attempt identity and stored with it.
+    """
     if kind not in REFUSAL_KINDS:
         raise ValueError(f"unknown refusal kind {kind!r}")
     db.execute(
-        "INSERT OR IGNORE INTO attempt_refusals (attempt_id, kind, rule, reason, recorded_at)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (attempt_id, kind, rule, reason, now.astimezone(UTC).isoformat()),
+        "INSERT OR IGNORE INTO attempt_refusals (attempt_id, kind, rule, reason, recorded_at,"
+        " refusal_code, receipt_ref) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            attempt_id, kind, rule, reason, now.astimezone(UTC).isoformat(), refusal_code,
+            attempt_ref_for(attempt_id),
+        ),
     )
     kept = stored_refusal(db, attempt_id)
     if kept is None:  # pragma: no cover - the INSERT OR IGNORE guarantees a row

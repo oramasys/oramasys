@@ -3,15 +3,17 @@
 The route calls the injected verify-only authority and reports only ``verified`` or a stable public
 denial. It holds no ledger handle, so it cannot consume a grant, settle a hold or touch an effect
 attempt. Unless the ``serving`` capability is effective the route answers ``404
-serving.route_not_exposed``. Every denial is appended to the durable audit log (when one is wired)
-and the response carries its opaque ``receipt_ref``. Grant text and identifiers never appear in a
-response, a log line or the audit record.
+serving.route_not_exposed``. Durable audit entries are bounded for repeated authentication failures;
+other denials are appended when an audit log is wired. A recorded denial carries an opaque
+``receipt_ref``. Grant text and identifiers never appear in a response, a log line or the audit
+record.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -46,6 +48,8 @@ REVOCATION_MAX_AGE: Final = timedelta(seconds=60)
 MAX_BODY_BYTES: Final = 65_536
 _BODY_LIMIT: Final = MAX_BODY_BYTES + 64
 _STATUS: Final[dict[str, int]] = DENY_STATUS
+AUTH_FAILURE_AUDIT_WINDOW: Final = timedelta(minutes=1)
+AUTH_FAILURE_AUDIT_LIMIT: Final = 60
 
 
 class _Denied(Exception):
@@ -86,7 +90,7 @@ async def _read_bounded_body(request: Request) -> bytes:
     """Read the request body in chunks and stop as soon as it exceeds the size limit.
 
     A declared ``Content-Length`` over the limit is refused without reading; a streamed body is cut
-    off at the limit, so a rejected upload never buffers more than one chunk past it.
+    off at the limit, so a rejected upload never buffers more than the limit.
     """
     declared = request.headers.get("content-length")
     if declared is not None:
@@ -97,9 +101,9 @@ async def _read_bounded_body(request: Request) -> bytes:
             raise _Denied(DENY_MALFORMED_GRANT) from None
     received = bytearray()
     async for chunk in request.stream():
-        received.extend(chunk)
-        if len(received) > _BODY_LIMIT:
+        if len(received) + len(chunk) > _BODY_LIMIT:
             raise _Denied(DENY_MALFORMED_GRANT)
+        received.extend(chunk)
     return bytes(received)
 
 
@@ -131,13 +135,34 @@ def install_verify_route(
 ) -> None:
     """Register ``POST /grants/verify``; it answers 404 unless ``serving`` is effective."""
     now_of = clock or (lambda: datetime.now(UTC))
+    auth_failure_lock = threading.Lock()
+    auth_failure_window_start: datetime | None = None
+    audited_auth_failures = 0
+
+    def audit_timestamp(code: str) -> datetime | None:
+        """Return a timestamp when this denial may be appended to the durable audit log."""
+        nonlocal auth_failure_window_start, audited_auth_failures
+        now = now_of()
+        if code != DENY_UNAUTHORIZED_CALLER:
+            return now
+        with auth_failure_lock:
+            if auth_failure_window_start is None or now - auth_failure_window_start >= AUTH_FAILURE_AUDIT_WINDOW:
+                auth_failure_window_start = now
+                audited_auth_failures = 0
+            elif now < auth_failure_window_start:
+                return None
+            if audited_auth_failures >= AUTH_FAILURE_AUDIT_LIMIT:
+                return None
+            audited_auth_failures += 1
+        return now
 
     def deny(correlation_id: str, code: str) -> JSONResponse:
         """Record the denial durably when possible and answer with the public error."""
         receipt_ref: str | None = None
-        if audit is not None:
+        audit_now = audit_timestamp(code)
+        if audit is not None and audit_now is not None:
             try:
-                receipt_ref = audit.record(correlation_id, code, now_of())
+                receipt_ref = audit.record(correlation_id, code, audit_now)
             except Exception:  # noqa: BLE001 - audit trouble must not turn a denial into an allow
                 _log.warning("denial audit unavailable", extra={"correlation_id": correlation_id})
         _log.warning("verify denied", extra={"correlation_id": correlation_id, "code": code})
@@ -168,10 +193,10 @@ def install_verify_route(
         if grant_verifier is None:
             return error_response(503, SERVING_NOT_READY, correlation_id)
         if authenticated_control_plane_principal(request) is None:
-            return deny(correlation_id, DENY_UNAUTHORIZED_CALLER)
+            return await asyncio.to_thread(deny, correlation_id, DENY_UNAUTHORIZED_CALLER)
         try:
             wire = _parse_grant(await _read_bounded_body(request))
             await asyncio.to_thread(_verify_only, grant_verifier, wire, now_of())
         except _Denied as denied:
-            return deny(correlation_id, denied.code)
+            return await asyncio.to_thread(deny, correlation_id, denied.code)
         return JSONResponse({"status": "verified", "correlation_id": correlation_id})

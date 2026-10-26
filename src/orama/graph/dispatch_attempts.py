@@ -732,6 +732,10 @@ class SqliteAttemptStore:
         present = {row[1] for row in self._db.execute("PRAGMA table_info(dispatch_attempts)")}
         if "fencing_epoch" not in present:
             self._db.execute("ALTER TABLE dispatch_attempts ADD COLUMN fencing_epoch INTEGER")
+        refused = {row[1] for row in self._db.execute("PRAGMA table_info(attempt_refusals)")}
+        for column in ("refusal_code", "receipt_ref"):
+            if column not in refused:
+                self._db.execute(f"ALTER TABLE attempt_refusals ADD COLUMN {column} TEXT")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -1129,7 +1133,7 @@ class SqliteAttemptStore:
 
     def record_terminal_refusal(
         self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
-    ) -> StoredRefusal | None:
+    ) -> StoredRefusal:
         """Record a pre-dispatch refusal as terminal for the attempt; the first one wins.
 
         An attempt that already holds a durable authorization intent can only be refused by the
@@ -1138,8 +1142,10 @@ class SqliteAttemptStore:
 
         A refusal is never written over a send that started. When ``send_started`` is already set
         (a concurrent request won the race to the send marker after this request's pre-check),
-        nothing is recorded and None is returned, so an attempt never carries both a send (and its
-        receipt) and a terminal refusal. That check runs in the same transaction as the write.
+        nothing is recorded and ``AttemptStateError("send_already_started")`` is raised, so an
+        attempt never carries both a send (and its receipt) and a terminal refusal. That check runs
+        in the same transaction as the write; the final boundary turns it into the non-terminal
+        ``send_already_started`` refusal (``record_boundary_refusal``).
         """
         _require_aware(now)
         if kind not in effect_fencing.REFUSAL_KINDS:
@@ -1158,8 +1164,13 @@ class SqliteAttemptStore:
                 "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
             ).fetchone()
             if started is not None and started[0]:
-                return None
-            return effect_fencing.record_refusal(db, attempt_id, kind, rule, reason, now)
+                raise AttemptStateError("send_already_started")
+            # The public deny.* code is decided once, here, and replayed from the record forever.
+            from orama.api.public_errors import public_effect_denial_code
+
+            return effect_fencing.record_refusal(
+                db, attempt_id, kind, rule, reason, now, public_effect_denial_code(reason)
+            )
 
     def authorize_dispatch_terminal(
         self,
@@ -1496,10 +1507,13 @@ class SqliteAttemptStore:
         """
         if inert_only and now is None:
             now = datetime.now(UTC)
+        clock_refusal: str | None = None
         with self._immediate() as db:
             if _effect_grant_bound(db, attempt_id):
                 raise OutcomeRefused(BOUND_SEND_REQUIRED)
-            self._begin_send_in(db, attempt_id, inert_only, now)
+            clock_refusal = self._begin_send_in(db, attempt_id, inert_only, now)
+        if clock_refusal is not None:
+            raise OutcomeRefused(clock_refusal)
 
     def begin_bound_send(
         self,
@@ -1538,6 +1552,7 @@ class SqliteAttemptStore:
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
+        clock_refusal: str | None = None
         with self._immediate() as db:
             recorded = db.execute(
                 "SELECT issuer_id FROM send_authority WHERE attempt_id = ?", (binding.attempt_id,)
@@ -1558,12 +1573,15 @@ class SqliteAttemptStore:
             )
             if revoked is not None:
                 raise FinalBoundaryRefused(revoked, terminal=True)
-            effect_approvals.consume_approval(db, binding, at)
-            self._begin_send_in(db, binding.attempt_id, True, at)
-            if envelope_digest is not None:
-                effect_receipts.record_send_envelope(db, binding.attempt_id, envelope_digest, at)
-            if authority_check is not None:
-                authority_check()
+            clock_refusal = self._begin_send_in(db, binding.attempt_id, True, at)
+            if clock_refusal is None:
+                effect_approvals.consume_approval(db, binding, at)
+                if envelope_digest is not None:
+                    effect_receipts.record_send_envelope(db, binding.attempt_id, envelope_digest, at)
+                if authority_check is not None:
+                    authority_check()
+        if clock_refusal is not None:
+            raise OutcomeRefused(clock_refusal)
 
     def grant_effect_approval(
         self, binding: FinalBoundaryBinding, *, approver: OperatorAuthority, now: datetime
@@ -1642,7 +1660,7 @@ class SqliteAttemptStore:
         attempt_id: str,
         inert_only: bool,
         now: datetime | None = None,
-    ) -> None:
+    ) -> str | None:
         """Run the send preconditions and set ``send_started`` inside the caller's transaction.
 
         A saved terminal refusal is checked first. Then, whenever ``now`` is given (and always for
@@ -1660,7 +1678,9 @@ class SqliteAttemptStore:
         if inert_only and now is None:
             now = datetime.now(UTC)
         if now is not None:
-            _recheck_send_authority(db, attempt_id, now)
+            clock_refusal = _recheck_send_authority(db, attempt_id, now, self._clock_skew)
+            if clock_refusal is not None:
+                return clock_refusal
         if inert_only:
             scope = db.execute(
                 "SELECT p.destination FROM effect_proposals p JOIN reservations r"
@@ -1680,6 +1700,7 @@ class SqliteAttemptStore:
         if row[0]:
             raise OutcomeRefused("send_already_started")
         db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+        return None
 
     def record_outcome(
         self, attempt_id: str, outcome: str, evidence_ref: str | None = None
@@ -1764,7 +1785,9 @@ def _earliest_expiry(*stamps: str) -> str:
     return min(stamps, key=parse_timestamp)
 
 
-def _recheck_send_authority(db: sqlite3.Connection, attempt_id: str, now: datetime) -> None:
+def _recheck_send_authority(
+    db: sqlite3.Connection, attempt_id: str, now: datetime, clock_skew: timedelta
+) -> str | None:
     """Re-check the durable send authority inside the caller's send transaction.
 
     One shared helper for every send path (``begin_send`` with a time, inert sends, and
@@ -1775,9 +1798,12 @@ def _recheck_send_authority(db: sqlite3.Connection, attempt_id: str, now: dateti
     """
     _require_aware(now)
     attempt = _load_attempt(db, attempt_id)
-    clock = db.execute("SELECT quarantined FROM clock_high_water WHERE id = 1").fetchone()
-    if clock is not None and clock[0]:
+    clock = db.execute("SELECT utc, quarantined FROM clock_high_water WHERE id = 1").fetchone()
+    if clock is not None and clock[1]:
         raise OutcomeRefused("send_clock_quarantined")
+    if clock is not None and now < datetime.fromisoformat(clock[0]) - clock_skew:
+        db.execute("UPDATE clock_high_water SET quarantined = 1 WHERE id = 1")
+        return "send_clock_regressed"
     authority = db.execute(
         "SELECT issuer_id, expires_at FROM send_authority WHERE attempt_id = ?",
         (attempt_id,),
@@ -1790,6 +1816,7 @@ def _recheck_send_authority(db: sqlite3.Connection, attempt_id: str, now: dateti
     if fact is not None or _diverged(db, authority[0]):
         raise OutcomeRefused("send_authority_revoked")
     dispatch_anchor.assert_not_quarantined(db, authority[0])
+    return None
 
 
 def _binding_in(db: sqlite3.Connection, attempt_id: str) -> StoredBinding | None:

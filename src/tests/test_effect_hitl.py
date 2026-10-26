@@ -19,7 +19,7 @@ from orama.graph.effect_reconciliation import (
 )
 from orama.graph.effect_receipts import attempt_ref_for
 from orama.graph.final_boundary import FinalBoundaryRefused
-from orama.graph.sealed_inert_driver import SealedInertDriver
+from orama.graph.sealed_inert_driver import SendOutcomeUnknown, SealedInertDriver
 from tests.test_dispatch_attempts import ATTEMPT, ISSUER, NOW, Harness
 from tests.test_effect_fencing import Operator
 from tests.test_effect_seam import LIVE_UNTIL, quiet_snapshot
@@ -153,7 +153,7 @@ def test_consumption_and_the_send_marker_commit_together(h: Harness, monkeypatch
 def test_a_consumed_approval_always_has_a_send_marker(h: Harness) -> None:
     """After a send that ended unknown the approval is spent and the marker is set."""
     approve(h)
-    with pytest.raises(Exception):
+    with pytest.raises(SendOutcomeUnknown):
         send(driver(h, simulation=Recorder(error=TimeoutError("slow"))))
     assert h.store.approval_state(ATTEMPT) == "consumed"
     assert h.store.outbox_row(ATTEMPT)["send_started"] == 1
@@ -436,7 +436,7 @@ def test_a_restart_reports_but_never_auto_settles(tmp_path: Path) -> None:
     """After a crash-equivalent reopen the unknown row is listed and still unknown, never retried."""
     h = inert_harness(tmp_path)
     approve(h)
-    with pytest.raises(Exception):
+    with pytest.raises(SendOutcomeUnknown):
         send(driver(h, simulation=Recorder(error=TimeoutError("slow"))))
     h.store.close()
     reopened = SqliteAttemptStore(h.path, governed=True)

@@ -125,7 +125,10 @@ def build_app(
         )
     except BaseException:
         # A refused startup must not leave the verifier or ledger open.
-        close_resources(close, ledger)
+        try:
+            close_resources(close, ledger)
+        except Exception as error:  # noqa: BLE001 - preserve the startup refusal
+            _warning_with_cause("grant cleanup failed", error)
         raise
 
 

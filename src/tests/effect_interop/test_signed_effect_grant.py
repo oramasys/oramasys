@@ -53,7 +53,7 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     from tests.test_dispatch_attempts import FakeGates, FakeRevocations
     from tests.test_effect_fencing import Operator
     from tests.test_final_boundary import Approvals
-    composer = TrustedEffectGrantComposer(authority)
+    composer = TrustedEffectGrantComposer(authority, lease_epoch_of=lambda run_id: 3)
     # The canonical send path: the composer only verifies and binds; the send itself goes through
     # the sealed final boundary (effects switch, revocation view and approval verifier are doubles).
     driver = SealedInertDriver(

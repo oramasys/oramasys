@@ -18,6 +18,8 @@ example one wrapping ``InertEffectDriver``) is refused when the app is built.
 The request carries only ``{"attempt_id": "<id>"}``; authority and scope are server-owned. Every
 error uses the contract body ``{"error": {"code", "correlation_id"}}`` with a public code (see
 ``public_effect_denial_code``); no grant id, internal reason or verifier text reaches a response.
+When the attempt holds a terminal refusal record, the refusal and every replay of it answer with the
+record's stored public code and its ``receipt_ref``, nested inside the ``error`` object.
 Success returns the redacted receipt ``{attempt_ref, outcome, receipt_digest, recorded_at}``.
 
 In-doubt dispatch: when the send marker committed but the outcome could not be proven
@@ -51,7 +53,7 @@ from orama.api.public_errors import (
     new_correlation_id,
     public_effect_denial_code,
 )
-from orama.graph.effect_grant_composition import FinalBoundarySender
+from orama.graph.effect_grant_composition import AttemptRefused, FinalBoundarySender
 from orama.graph.effect_receipts import RedactedReceipt, attempt_ref_for
 from orama.graph.sealed_inert_driver import SendOutcomeUnknown
 
@@ -181,6 +183,12 @@ def install_inert_effect_route(
             receipt = await asyncio.to_thread(sender, attempt_id, principal)
         except _Denied as denied:
             return deny(correlation_id, denied.code, "request")
+        except AttemptRefused as refused:
+            # A terminal refusal record exists: answer with its stored public code and receipt_ref
+            # (nested in the error object), on the first refusal and on every replay.
+            return deny(
+                correlation_id, refused.code, "attempt_refused", receipt_ref=refused.receipt_ref
+            )
         except SendOutcomeUnknown as unknown:
             # The send marker committed: in doubt, not refused. Same status and code, plus the
             # opaque reference of the durable attempt record for operator reconciliation.
