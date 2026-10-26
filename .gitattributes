@@ -5,3 +5,5 @@ requirements/**/*.json -text
 requirements/**/*.txt -text
 requirements/generation-consumers.json -text
 requirements/generations/** -text
+# The one non-requirements file a declared consumer pins by raw-byte digest (file-sha256 check).
+src/tests/fixtures/graph-ownership-registry.json -text
