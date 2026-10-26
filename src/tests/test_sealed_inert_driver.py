@@ -367,6 +367,29 @@ def test_the_epoch_advancing_during_verification_still_stops_the_send(h: Harness
     assert h.store.terminal_refusal(ATTEMPT).reason == "epoch_stale"
 
 
+def test_a_sender_configured_for_another_issuer_is_refused_outright(h: Harness) -> None:
+    """``begin_bound_send`` refuses an issuer other than the one in the attempt's send authority.
+
+    The attempt's real issuer is revoked in the injected revocation view. A driver configured with
+    a different issuer would ask that view (and the local facts) about the wrong issuer and pass;
+    the store refuses the mismatch before anything is consumed, and records nothing terminal.
+    """
+    h.revocations.revoked_issuers.add(ISSUER)
+    sim = Recorder()
+    d = SealedInertDriver(
+        h.store, effects_allowed=lambda: True, approval_verifier=Approvals(),
+        revocations=h.revocations, issuer_id="issuer-other", simulation=sim, clock=lambda: NOW,
+    )
+    with pytest.raises(FinalBoundaryRefused, match="send_authority_issuer_mismatch") as excinfo:
+        send(d)
+    assert not excinfo.value.terminal and sim.calls == 0
+    with pytest.raises(FinalBoundaryRefused, match="send_authority_issuer_mismatch"):
+        h.store.begin_bound_send(binding(), NOW, issuer_id="issuer-other")
+    untouched(h)
+    assert h.store.approval_state(ATTEMPT) == "granted"
+    assert h.store.terminal_refusal(ATTEMPT) is None
+
+
 def test_an_expired_envelope_refuses(h: Harness) -> None:
     """At or after expiry the sealed command is dead."""
     d = SealedInertDriver(

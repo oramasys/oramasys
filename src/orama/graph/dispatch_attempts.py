@@ -652,6 +652,8 @@ BOUND_SEND_REQUIRED: Final = "effect_grant_bound_send_required"
 """Refusal reason: an attempt with an effect-grant binding may only start through ``begin_bound_send``."""
 GRANT_RECHECK_REQUIRED: Final = "effect_grant_recheck_required"
 """Refusal reason: a bound attempt's send needs the signed-grant recheck (``authority_check``)."""
+ISSUER_MISMATCH: Final = "send_authority_issuer_mismatch"
+"""Refusal reason: the sender's issuer is not the issuer recorded in the attempt's send authority."""
 
 
 class SqliteAttemptStore:
@@ -1518,10 +1520,19 @@ class SqliteAttemptStore:
         call back into this store. For an attempt with an effect-grant binding the recheck is
         mandatory: without ``authority_check`` the send is refused (``effect_grant_recheck_required``,
         not terminal) before anything is consumed or written.
+
+        ``issuer_id`` must equal the issuer recorded in the attempt's send authority at
+        authorization; a different issuer is refused outright (``send_authority_issuer_mismatch``,
+        not terminal), so no revocation fact is ever looked up under the wrong issuer.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
         with self._immediate() as db:
+            recorded = db.execute(
+                "SELECT issuer_id FROM send_authority WHERE attempt_id = ?", (binding.attempt_id,)
+            ).fetchone()
+            if recorded is not None and recorded[0] != issuer_id:
+                raise FinalBoundaryRefused(ISSUER_MISMATCH)
             if authority_check is None and _effect_grant_bound(db, binding.attempt_id):
                 raise FinalBoundaryRefused(GRANT_RECHECK_REQUIRED)
             at = now

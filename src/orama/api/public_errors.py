@@ -97,7 +97,7 @@ _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
         for reason in (
             "approval_verifier_missing", "approval_verifier_unavailable",
             "send_clock_quarantined", "outcome_unknown", "evidence_invalid",
-            "effect_grant_recheck_required",
+            "effect_grant_recheck_required", "send_authority_issuer_mismatch",
         )
     },
 }
