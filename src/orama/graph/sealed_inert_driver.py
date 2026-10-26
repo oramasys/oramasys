@@ -20,7 +20,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Final
 
-from orama.graph.dispatch_attempts import SqliteAttemptStore
+from orama.graph.dispatch_attempts import AttemptStateError, SqliteAttemptStore
 from orama.graph.effect_outcomes import OutcomeRefused
 from orama.graph.effect_receipts import RedactedReceipt
 from orama.graph.final_boundary import (
@@ -123,9 +123,14 @@ class SealedInertDriver:
             )
         except FinalBoundaryRefused as refusal:
             if refusal.terminal and refusal.reason in TERMINAL_REASONS:
-                self._store.record_terminal_refusal(
-                    binding.attempt_id, "final_boundary", None, refusal.reason, self._clock()
-                )
+                try:
+                    self._store.record_terminal_refusal(
+                        binding.attempt_id, "final_boundary", None, refusal.reason, self._clock()
+                    )
+                except AttemptStateError as error:
+                    if str(error) != "send_already_started":
+                        raise
+                    raise FinalBoundaryRefused("send_already_started") from error
             raise
         evidence = self._run(envelope)
         receipt = self._store.settle_with_receipt(

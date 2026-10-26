@@ -189,10 +189,23 @@ def authorize_final_boundary(
     except FinalBoundaryRefused as refusal:
         if refusal.terminal and refusal.reason in TERMINAL_REASONS and stored is not None \
                 and stored.refusal is None:
-            store.record_terminal_refusal(
-                binding.attempt_id, "final_boundary", None, refusal.reason, now
-            )
+            _record_terminal_refusal(store, binding.attempt_id, refusal.reason, now)
         raise
+
+
+def _record_terminal_refusal(
+    store: BindingStore, attempt_id: str, reason: str, now: datetime
+) -> None:
+    """Record a boundary refusal unless another caller already started the send."""
+    # dispatch_attempts imports this module, so resolve its state error only after both load.
+    from orama.graph.dispatch_attempts import AttemptStateError
+
+    try:
+        store.record_terminal_refusal(attempt_id, "final_boundary", None, reason, now)
+    except AttemptStateError as error:
+        if str(error) != "send_already_started":
+            raise
+        raise FinalBoundaryRefused("send_already_started") from error
 
 
 def _verify_revocation_and_approval(

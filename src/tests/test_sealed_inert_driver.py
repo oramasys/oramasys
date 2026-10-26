@@ -367,6 +367,23 @@ def test_the_epoch_advancing_during_verification_still_stops_the_send(h: Harness
     assert h.store.terminal_refusal(ATTEMPT).reason == "epoch_stale"
 
 
+def test_a_late_driver_refusal_reports_the_started_send_without_writing_a_refusal(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The driver's late terminal-refusal path preserves a competing started send."""
+    def start_then_refuse(*args, **kwargs) -> None:
+        """Make the send durable before returning the delayed terminal refusal."""
+        h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
+        raise FinalBoundaryRefused("expired", terminal=True)
+
+    monkeypatch.setattr(h.store, "begin_bound_send", start_then_refuse)
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        send(driver(h))
+    assert excinfo.value.reason == "send_already_started"
+    assert h.store.outbox_row(ATTEMPT)["send_started"] == 1
+    assert h.store.terminal_refusal(ATTEMPT) is None
+
+
 def test_an_expired_envelope_refuses(h: Harness) -> None:
     """At or after expiry the sealed command is dead."""
     d = SealedInertDriver(

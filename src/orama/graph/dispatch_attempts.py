@@ -1064,6 +1064,11 @@ class SqliteAttemptStore:
                 return kept
             if committed is not None and kind != "final_boundary":
                 raise AttemptStateError("attempt already authorized; it cannot be refused at that stage")
+            started = db.execute(
+                "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if started is not None and started[0]:
+                raise AttemptStateError("send_already_started")
             return effect_fencing.record_refusal(db, attempt_id, kind, rule, reason, now)
 
     def authorize_dispatch_terminal(

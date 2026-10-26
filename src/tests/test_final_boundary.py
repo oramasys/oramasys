@@ -305,6 +305,20 @@ def test_revocation_after_dispatch_never_rewrites_an_unknown_outcome(h: Harness)
         h.store.record_outcome(ATTEMPT, "unknown", None)
 
 
+def test_a_late_boundary_refusal_reports_the_started_send_without_writing_a_refusal(h: Harness) -> None:
+    """A failed boundary gate cannot write a pre-dispatch refusal after another caller sends."""
+    def starts_send() -> bool:
+        """Commit the competing send after durable facts were read."""
+        h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
+        return False
+
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        run(h, effects=starts_send)
+    assert excinfo.value.reason == "send_already_started"
+    assert h.store.outbox_row(ATTEMPT)["send_started"] == 1
+    assert h.store.terminal_refusal(ATTEMPT) is None
+
+
 def test_a_terminal_refusal_cannot_be_recorded_over_by_a_different_reason(h: Harness) -> None:
     """The first terminal refusal wins; a later boundary reports it, not a new reason."""
     with pytest.raises(FinalBoundaryRefused):
