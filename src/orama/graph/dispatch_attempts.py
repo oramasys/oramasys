@@ -988,7 +988,7 @@ class SqliteAttemptStore:
             effect_fencing.stamp_attempt(db, attempt_id, expected.authority_epoch)
             db.execute(
                 "INSERT INTO send_authority VALUES (?, ?, ?)",
-                (attempt_id, issuer_id, min(permit["expires_at"], fin["expires_at"])),
+                (attempt_id, issuer_id, _earliest_expiry(permit["expires_at"], fin["expires_at"])),
             )
 
     def fencing_epoch(self, attempt_id: str) -> int | None:
@@ -1637,6 +1637,15 @@ class SqliteAttemptStore:
             if row is None:
                 return None
             return dict(zip((c[0] for c in cursor.description), row, strict=True))
+
+
+def _earliest_expiry(*stamps: str) -> str:
+    """Return the wire text of the earliest expiry, comparing parsed instants, never raw text.
+
+    The stored text is the original six-digit UTC wire stamp, so ``parse_timestamp`` reads it back
+    unchanged at send time.
+    """
+    return min(stamps, key=parse_timestamp)
 
 
 def _recheck_send_authority(db: sqlite3.Connection, attempt_id: str, now: datetime) -> None:
