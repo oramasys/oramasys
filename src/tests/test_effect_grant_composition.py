@@ -775,3 +775,19 @@ def test_a_backward_clock_on_the_bound_send_quarantines_and_consumes_no_approval
         bound.composer.send(sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL)
     assert latched.value.reason == "send_clock_quarantined" and sim.calls == 0
     untouched(bound)
+
+
+def test_the_sender_never_converts_a_principal_refusal_into_the_stored_record(bound: Bound) -> None:
+    """Even if a boundary refusal names the principal, the record stays hidden from that caller."""
+    refuse_once(bound)
+
+    class Mismatching(TrustedEffectGrantComposer):
+        """A composer whose boundary reports a principal mismatch after the record exists."""
+
+        def send(self, driver, attempt_id, *, authenticated_principal):
+            """Raise the boundary's principal refusal."""
+            raise FinalBoundaryRefused("principal_mismatch")
+
+    sender = FinalBoundarySender(Mismatching(bound.verifier, clock=lambda: NOW), sealed(bound))
+    with pytest.raises(FinalBoundaryRefused, match="principal_mismatch"):
+        sender(ATTEMPT, "someone-else")
