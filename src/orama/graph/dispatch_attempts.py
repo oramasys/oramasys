@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -50,7 +51,9 @@ from orama.graph.effect_proposals import (
     record_proposal,
     reserve,
 )
-from orama.graph import effect_receipts
+from orama.graph import effect_approvals, effect_reconciliation, effect_receipts
+from orama.graph.effect_approvals import APPROVAL_SCHEMA
+from orama.graph.effect_reconciliation import RECONCILIATION_SCHEMA
 from orama.graph.effect_receipts import RECEIPT_SCHEMA, RedactedReceipt, StoredReceipt
 from orama.graph.final_boundary import FinalBoundaryBinding, StoredBinding, check_store_facts
 from orama.graph.private_store import prepare_private_store
@@ -254,6 +257,8 @@ _SCHEMA: Final = (
     *PROPOSAL_SCHEMA,
     *FENCING_SCHEMA,
     *RECEIPT_SCHEMA,
+    *APPROVAL_SCHEMA,
+    *RECONCILIATION_SCHEMA,
     *ANCHOR_SCHEMA,
     *dispatch_revocations.REVOCATION_SCHEMA,
     "CREATE TABLE IF NOT EXISTS clock_high_water ("
@@ -1347,13 +1352,87 @@ class SqliteAttemptStore:
 
         The final-boundary store facts are checked again inside the same ``BEGIN IMMEDIATE``
         transaction that sets ``send_started``, so an epoch that advanced, an expiry that passed or a
-        terminal refusal recorded after the pre-check still stops the send. The inert-scope guard of
-        ``begin_send`` applies.
+        terminal refusal recorded after the pre-check still stops the send. The single-use human
+        approval for exactly this tuple is consumed in that same transaction: no approval, no send,
+        and no consumed approval without a send marker. The inert-scope guard of ``begin_send``
+        applies.
         """
         _require_aware(now)
         with self._immediate() as db:
             check_store_facts(_binding_in(db, binding.attempt_id), binding, now)
+            effect_approvals.consume_approval(db, binding, now)
             self._begin_send_in(db, binding.attempt_id, True)
+
+    def grant_effect_approval(
+        self, binding: FinalBoundaryBinding, *, approver: OperatorAuthority, now: datetime
+    ) -> str:
+        """Record a single-use human approval for exactly ``binding``; return its opaque id.
+
+        The approver is authenticated through the injected ``OperatorAuthority``. The binding must
+        equal the attempt's durable authorized tuple right now, so an approval cannot be created for
+        a refused, unauthorized, stale or altered attempt. A repeat for the same unconsumed tuple
+        returns the same id; a different tuple or a consumed approval is refused.
+        """
+        reference = approver.authorize("approve_effect", subject=binding.attempt_id)
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to approve this effect")
+        _require_aware(now)
+        with self._immediate() as db:
+            check_store_facts(_binding_in(db, binding.attempt_id), binding, now)
+            return effect_approvals.create_approval(
+                db, "approval-" + uuid.uuid4().hex, binding, reference, now
+            )
+
+    def approval_state(self, attempt_id: str) -> str | None:
+        """Return ``granted``, ``consumed`` or None for the attempt's approval."""
+        with self._lock:
+            return effect_approvals.approval_state(self._db, attempt_id)
+
+    def open_reconciliation(
+        self, attempt_id: str, *, operator: OperatorAuthority, ttl: timedelta, now: datetime
+    ) -> str:
+        """Open an expiring single-use reconciliation ticket scoped to one in-doubt attempt.
+
+        Needs an authenticated operator. Only an attempt whose send started with an unproven outcome
+        qualifies, and the ticket lives at most fifteen minutes.
+        """
+        reference = operator.authorize("open_reconciliation", subject=attempt_id)
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to open a reconciliation")
+        _require_aware(now)
+        with self._immediate() as db:
+            return effect_reconciliation.open_ticket(
+                db, "ticket-" + uuid.uuid4().hex, attempt_id, reference, ttl, now
+            )
+
+    def reconcile_unknown(
+        self, ticket_id: str, attempt_id: str, outcome: str, evidence_ref: str, *,
+        operator: OperatorAuthority, now: datetime,
+    ) -> None:
+        """Spend the ticket once to settle an ``unknown`` outcome by hand, with evidence.
+
+        The operator is authenticated again at spend time, the ticket must be for this attempt,
+        unexpired and unspent, and the transition is the ordinary ``unknown`` to final one. Nothing
+        else can rewrite an unknown outcome.
+        """
+        reference = operator.authorize("reconcile_unknown", subject=attempt_id)
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to reconcile this attempt")
+        _require_aware(now)
+        with self._immediate() as db:
+            effect_reconciliation.spend_ticket(
+                db, ticket_id, attempt_id, outcome, evidence_ref, reference, now
+            )
+
+    def unknown_outbox_attempts(self) -> list[str]:
+        """Return attempt ids whose send started and whose outcome is still unproven (read-only)."""
+        with self._lock:
+            return effect_reconciliation.unknown_attempts(self._db)
+
+    def unsent_outbox_count(self) -> int:
+        """Return how many authorized outbox rows have not started their send (read-only)."""
+        with self._lock:
+            return effect_reconciliation.unsent_count(self._db)
 
     def _begin_send_in(self, db: sqlite3.Connection, attempt_id: str, inert_only: bool) -> None:
         """Run the send preconditions and set ``send_started`` inside the caller's transaction."""

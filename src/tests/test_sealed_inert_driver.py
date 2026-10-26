@@ -29,7 +29,7 @@ from orama.graph.sealed_inert_driver import (
 from tests.test_dispatch_attempts import ATTEMPT, GRANT, ISSUER, NOW, Harness
 from tests.test_effect_fencing import Operator
 from tests.test_effect_seam import LIVE_UNTIL, SCOPE
-from tests.test_final_boundary import Approvals, untouched
+from tests.test_final_boundary import Approvals, binding, untouched
 from tests.test_inert_effect_integration import inert_harness
 
 OP = "sha256:" + SCOPE.operation_digest
@@ -75,10 +75,16 @@ def send(d: SealedInertDriver, env=None, principal: str = SCOPE.principal):
     return d.send(env.raw, env.digest, principal=principal)
 
 
+def approve(h: Harness) -> str:
+    """Record the single-use human approval for the genuine tuple."""
+    return h.store.grant_effect_approval(binding(), approver=Operator(), now=NOW)
+
+
 @pytest.fixture
 def h(tmp_path: Path) -> Harness:
-    """An authorized inert attempt."""
+    """An authorized inert attempt with its human approval granted."""
     harness = inert_harness(tmp_path)
+    approve(harness)
     yield harness
     harness.store.close()
 
@@ -232,6 +238,7 @@ def test_exact_replay_returns_the_stored_receipt_without_dispatching(h: Harness)
 def test_replay_after_restart_returns_the_same_receipt(tmp_path: Path) -> None:
     """The receipt is durable: a new process-equivalent (reopened store, new driver) gets it back."""
     h = inert_harness(tmp_path)
+    approve(h)
     first = send(driver(h))
     h.store.close()
     reopened = SqliteAttemptStore(h.path, governed=True)
@@ -373,6 +380,7 @@ def test_an_expired_envelope_refuses(h: Harness) -> None:
 def test_a_timeout_after_dispatch_leaves_the_outcome_unknown_and_never_retries(tmp_path: Path) -> None:
     """The send marker is durable; a timeout does not fail, roll back or retry the effect."""
     h = inert_harness(tmp_path)
+    approve(h)
     sim = Recorder(error=TimeoutError("provider slow"))
     with pytest.raises(SendOutcomeUnknown) as excinfo:
         send(driver(h, simulation=sim))

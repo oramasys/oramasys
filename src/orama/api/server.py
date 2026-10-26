@@ -10,6 +10,10 @@ from fastapi import FastAPI, HTTPException, Request
 from orama.api.authz import authenticated_control_plane_principal, install_authz
 from orama.api.capabilities import CapabilityConfig, evaluate
 from orama.api.denial_audit import DenialAuditLog
+from orama.graph.effect_reconciliation import (
+    ReconciliationReport,
+    startup_reconciliation_report,
+)
 from orama.api.verify_route import install_verify_route
 from orama.api.public_errors import SERVING_NOT_READY, error_response, new_correlation_id
 from orama.api.readiness import ReadinessProbes, collect_facts
@@ -44,6 +48,30 @@ _log = logging.getLogger(__name__)
 GRANT_CAPABILITY_STATES = ("disabled", "ready", "unavailable")
 
 
+def _startup_report(store: object | None) -> ReconciliationReport | None:
+    """List unknown outbox rows at startup; report only. A failure to read is logged, not settled."""
+    if store is None:
+        return None
+    try:
+        report = startup_reconciliation_report(store)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 - observation trouble must not change any effect record
+        _log.warning("startup reconciliation report unavailable")
+        return None
+    if report.in_doubt:
+        _log.warning(
+            "effects in doubt need operator reconciliation",
+            extra={"in_doubt": len(report.in_doubt), "unsent": report.unsent},
+        )
+    return report
+
+
+def _reconciliation_public(report: ReconciliationReport | None) -> dict[str, object]:
+    """Return the data-free reconciliation counts for ``/health``, or nothing when none was taken."""
+    if report is None:
+        return {}
+    return {"reconciliation": {"in_doubt": len(report.in_doubt), "unsent": report.unsent}}
+
+
 def create_app(
     *,
     runner: GraphRunner | None = None,
@@ -56,6 +84,7 @@ def create_app(
     readiness_probes: ReadinessProbes | None = None,
     denial_audit: DenialAuditLog | None = None,
     verify_clock: Callable[[], datetime] | None = None,
+    attempt_store: object | None = None,
 ) -> FastAPI:
     """Build the API with an explicit graph runner; absent admission refuses work.
 
@@ -74,6 +103,8 @@ def create_app(
     before any route can dispatch. ``readiness_probes`` supplies the independent issuer and
     autonomous-policy facts; an absent probe reports false. ``denial_audit`` is the append-only
     denial log behind ``POST /grants/verify``, which stays a 404 unless ``serving`` is effective.
+    ``attempt_store`` is the effect attempt store: at startup its in-doubt (unknown) outbox rows are
+    listed for the operator. That report never settles, retries or alters anything.
     """
     capabilities = evaluate(
         capability_config or CapabilityConfig(),
@@ -100,6 +131,7 @@ def create_app(
 
     app = FastAPI(title="oramasys", version="2.0.0-alpha.1", lifespan=lifespan)
     app.state.capabilities = capabilities
+    app.state.reconciliation_report = _startup_report(attempt_store)
     install_authz(app)
     from orama.workspace.api import router as workspace_router
     app.include_router(workspace_router)
@@ -214,6 +246,7 @@ def create_app(
             "grants": state,
             "capabilities": capabilities.as_public(),
             "facts": facts().as_public(),
+            **_reconciliation_public(app.state.reconciliation_report),
         }
 
     return app
