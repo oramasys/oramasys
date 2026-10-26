@@ -652,6 +652,17 @@ def test_begin_send_refuses_a_fenced_abandoned_or_incomplete_attempt(tmp_path: P
     assert row is not None and row["send_started"] == 0
 
 
+def test_begin_send_quarantines_a_backward_clock_before_setting_the_marker(tmp_path: Path) -> None:
+    """A backward send-time clock is durably quarantined before a send can start."""
+    h = authorized(tmp_path)
+    h.store.observe_clock(NOW + timedelta(minutes=2))
+    with pytest.raises(OutcomeRefused) as refusal:
+        h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
+    assert refusal.value.reason == "send_clock_regressed"
+    assert h.store.outbox_row(ATTEMPT)["send_started"] == 0
+    assert h.store._db.execute("SELECT quarantined FROM clock_high_water WHERE id = 1").fetchone() == (1,)
+
+
 # ----------------------------------------------------------- availability gate
 
 

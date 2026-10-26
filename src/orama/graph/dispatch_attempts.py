@@ -1243,6 +1243,7 @@ class SqliteAttemptStore:
         """Durably mark the one allowed send as started; a second send is always refused."""
         if inert_only and now is None:
             now = datetime.now(UTC)
+        clock_refusal: str | None = None
         with self._immediate() as db:
             row = db.execute(
                 "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
@@ -1252,22 +1253,33 @@ class SqliteAttemptStore:
             attempt = _load_attempt(db, attempt_id)
             if now is not None:
                 _require_aware(now)
-                clock = db.execute("SELECT quarantined FROM clock_high_water WHERE id = 1").fetchone()
-                if clock is not None and clock[0]:
-                    raise OutcomeRefused("send_clock_quarantined")
-                authority = db.execute(
-                    "SELECT issuer_id, expires_at FROM send_authority WHERE attempt_id = ?",
-                    (attempt_id,),
+                clock = db.execute(
+                    "SELECT utc, quarantined FROM clock_high_water WHERE id = 1"
                 ).fetchone()
-                if authority is None or now >= parse_timestamp(authority[1]):
-                    raise OutcomeRefused("send_authority_expired_or_missing")
-                fact = dispatch_revocations.refusal_reason(
-                    db, authority[0], attempt.grant_id, attempt.second_approval_ref
-                )
-                if fact is not None or _diverged(db, authority[0]):
-                    raise OutcomeRefused("send_authority_revoked")
-                dispatch_anchor.assert_not_quarantined(db, authority[0])
-            if inert_only:
+                if clock is not None and clock[1]:
+                    raise OutcomeRefused("send_clock_quarantined")
+                if (
+                    clock is not None
+                    and now < datetime.fromisoformat(clock[0]) - self._clock_skew
+                ):
+                    # Commit the quarantine latch before refusing so a backward clock cannot
+                    # make an already-authorized, expired send appear live again.
+                    db.execute("UPDATE clock_high_water SET quarantined = 1 WHERE id = 1")
+                    clock_refusal = "send_clock_regressed"
+                if clock_refusal is None:
+                    authority = db.execute(
+                        "SELECT issuer_id, expires_at FROM send_authority WHERE attempt_id = ?",
+                        (attempt_id,),
+                    ).fetchone()
+                    if authority is None or now >= parse_timestamp(authority[1]):
+                        raise OutcomeRefused("send_authority_expired_or_missing")
+                    fact = dispatch_revocations.refusal_reason(
+                        db, authority[0], attempt.grant_id, attempt.second_approval_ref
+                    )
+                    if fact is not None or _diverged(db, authority[0]):
+                        raise OutcomeRefused("send_authority_revoked")
+                    dispatch_anchor.assert_not_quarantined(db, authority[0])
+            if clock_refusal is None and inert_only:
                 scope = db.execute(
                     "SELECT p.destination FROM effect_proposals p JOIN reservations r"
                     " ON r.proposal_id = p.proposal_id WHERE r.reservation_id = ?"
@@ -1276,16 +1288,20 @@ class SqliteAttemptStore:
                 ).fetchone()
                 if not self._governed or scope != ("inert://simulation",):
                     raise OutcomeRefused("inert_scope_required")
-            complete = db.execute(
-                "SELECT " + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
-                + " FROM outbox WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-            if attempt.fenced or attempt.state != "authorized" or not complete[0]:
-                raise OutcomeRefused("send_precondition_failed")
-            if row[0]:
-                raise OutcomeRefused("send_already_started")
-            db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+            if clock_refusal is None:
+                complete = db.execute(
+                    "SELECT "
+                    + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
+                    + " FROM outbox WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if attempt.fenced or attempt.state != "authorized" or not complete[0]:
+                    raise OutcomeRefused("send_precondition_failed")
+                if row[0]:
+                    raise OutcomeRefused("send_already_started")
+                db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+        if clock_refusal is not None:
+            raise OutcomeRefused(clock_refusal)
 
     def record_outcome(
         self, attempt_id: str, outcome: str, evidence_ref: str | None = None
