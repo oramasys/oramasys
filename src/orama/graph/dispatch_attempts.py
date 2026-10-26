@@ -687,7 +687,9 @@ class SqliteAttemptStore:
         ``lease_epoch_of(run_id)`` is the consumer's current lease view. The shared send-time
         recheck compares it with the lease epoch the effect-grant binding stored for the attempt;
         without a view (or when it fails) no effect-grant-bound attempt can be sent. The lease
-        epoch is never the fencing epoch and is stored apart from it.
+        epoch is never the fencing epoch and is stored apart from it. The view runs inside the
+        send's ``BEGIN IMMEDIATE`` transaction, so it must be a quick read of the consumer's own
+        state and must not touch this store (the same rule as ``authority_check``).
         """
         if (
             not isinstance(clock_skew_tolerance, timedelta)

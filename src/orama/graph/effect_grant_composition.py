@@ -30,7 +30,9 @@ verified ``consumer_lease_epoch``; it is stored with the binding, and the attemp
 send-time recheck (``_recheck_send_authority``) compares it with the consumer's current lease for
 the run, so this composer only verifies and binds and no callback can skip the check. The **fencing
 epoch** is owned by the attempt store (``effect_fencing``) and enforced by the final boundary
-(``epoch_stale``). They are never compared with, derived from or stored in each other.
+(``epoch_stale``). They are never compared with, derived from or stored in each other. The store's
+``lease_epoch_of`` view is called inside the send's ``BEGIN IMMEDIATE`` transaction and, like
+``authority_check``, must not touch the store.
 """
 from __future__ import annotations
 
