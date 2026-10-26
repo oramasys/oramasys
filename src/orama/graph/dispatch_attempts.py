@@ -1533,7 +1533,8 @@ class SqliteAttemptStore:
 
         ``issuer_id`` must equal the issuer recorded in the attempt's send authority at
         authorization; a different issuer is refused outright (``send_authority_issuer_mismatch``,
-        not terminal), so no revocation fact is ever looked up under the wrong issuer.
+        not terminal) before anything else in this transaction, so the send can never start on
+        revocation facts looked up under the wrong issuer.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
