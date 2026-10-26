@@ -38,10 +38,13 @@ from orama.graph.dispatch_consumer_wire import (
     validate_finalization_wire,
     validate_permit_wire,
 )
+from orama.graph import effect_fencing
+from orama.graph.effect_fencing import FENCING_SCHEMA, FencingRefused, StoredRefusal
 from orama.graph.effect_outcomes import OutcomeRefused, check_transition
 from orama.graph.effect_proposals import (
     PROPOSAL_SCHEMA,
     EffectScope,
+    ReservationRefused,
     bind_scope_to_permit,
     consume_reservation,
     record_proposal,
@@ -246,6 +249,7 @@ _SCHEMA: Final = (
     " outcome_evidence TEXT,"
     " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
     *PROPOSAL_SCHEMA,
+    *FENCING_SCHEMA,
     *ANCHOR_SCHEMA,
     *dispatch_revocations.REVOCATION_SCHEMA,
     "CREATE TABLE IF NOT EXISTS clock_high_water ("
@@ -600,6 +604,7 @@ class SqliteAttemptStore:
             self._db.execute(statement)
         self._migrate_outbox()
         self._migrate_attempts()
+        self._migrate_fencing()
 
     def _migrate_outbox(self) -> None:
         """Add the T3 outcome columns to an outbox created before they existed."""
@@ -617,6 +622,16 @@ class SqliteAttemptStore:
         present = {row[1] for row in self._db.execute("PRAGMA table_info(dispatch_attempts)")}
         if "second_approval_ref" not in present:
             self._db.execute("ALTER TABLE dispatch_attempts ADD COLUMN second_approval_ref TEXT")
+
+    def _migrate_fencing(self) -> None:
+        """Add the explicit integer fencing epoch to an attempts table created before it existed.
+
+        Existing rows get NULL: an attempt that was never stamped has no epoch and so can never
+        pass a final-boundary epoch check.
+        """
+        present = {row[1] for row in self._db.execute("PRAGMA table_info(dispatch_attempts)")}
+        if "fencing_epoch" not in present:
+            self._db.execute("ALTER TABLE dispatch_attempts ADD COLUMN fencing_epoch INTEGER")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -914,7 +929,104 @@ class SqliteAttemptStore:
             _check_event(db, fin, issuer_id, now)
             pair = expected.authority_pair()
             _check_rule6(db, attempt, gates, pair, now)
+            try:
+                effect_fencing.admit_epoch(db, expected.authority_epoch)
+            except FencingRefused as refused:
+                raise AuthorizationRefused("rule6", refused.reason) from refused
             _write_authorization(db, attempt, permit, fin, issuer_id, pair, now)
+            effect_fencing.stamp_attempt(db, attempt_id, expected.authority_epoch)
+
+    def fencing_epoch(self, attempt_id: str) -> int | None:
+        """Return the integer fencing epoch the attempt was authorized under, or None."""
+        with self._lock:
+            return effect_fencing.attempt_epoch(self._db, attempt_id)
+
+    def current_fencing_epoch(self) -> int | None:
+        """Return the store's current fencing epoch, or None before any authorization."""
+        with self._lock:
+            return effect_fencing.current_epoch(self._db)
+
+    def advance_fencing_epoch(
+        self, epoch: int, *, operator: OperatorAuthority, now: datetime
+    ) -> None:
+        """Raise the current fencing epoch strictly, as an authenticated and logged operator action.
+
+        Every attempt authorized under a lower epoch is thereafter stale at the final boundary.
+        """
+        reference = operator.authorize("advance_fencing_epoch", subject="fencing")
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to advance the fencing epoch")
+        _require_aware(now)
+        with self._immediate() as db:
+            try:
+                effect_fencing.advance_epoch(db, epoch, reference, now)
+            except FencingRefused as refused:
+                raise AttemptStateError(refused.reason) from refused
+
+    def terminal_refusal(self, attempt_id: str) -> StoredRefusal | None:
+        """Return the terminal pre-dispatch refusal recorded for the attempt identity, or None."""
+        with self._lock:
+            return effect_fencing.stored_refusal(self._db, attempt_id)
+
+    def record_terminal_refusal(
+        self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
+    ) -> StoredRefusal:
+        """Record a pre-dispatch refusal as terminal for the attempt; the first one wins.
+
+        An attempt that already holds a durable authorization intent can only be refused by the
+        final boundary (``kind == "final_boundary"``): an earlier-stage refusal is never written
+        over an authorization that committed.
+        """
+        _require_aware(now)
+        if kind not in effect_fencing.REFUSAL_KINDS:
+            raise ValueError(f"unknown refusal kind {kind!r}")
+        with self._immediate() as db:
+            _load_attempt(db, attempt_id)
+            committed = db.execute(
+                "SELECT 1 FROM dispatch_intents WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            kept = effect_fencing.stored_refusal(db, attempt_id)
+            if kept is not None:
+                return kept
+            if committed is not None and kind != "final_boundary":
+                raise AttemptStateError("attempt already authorized; it cannot be refused at that stage")
+            return effect_fencing.record_refusal(db, attempt_id, kind, rule, reason, now)
+
+    def authorize_dispatch_terminal(
+        self,
+        attempt_id: str,
+        permit_wire: Mapping[str, Any],
+        finalization_wire: Mapping[str, Any],
+        now: datetime,
+        **ports: Any,
+    ) -> None:
+        """Step 4.3 where a refusal is terminal for the attempt identity (CONTRACT section 4).
+
+        A replay with the same identity returns the stored refusal without re-evaluating anything,
+        and a refusal is never recorded over an attempt that already authorized. Clock quarantine is
+        operational, not a decision about the attempt, so it is not recorded. Accepts the same
+        keyword ports as ``authorize_dispatch``.
+        """
+        stored = self.terminal_refusal(attempt_id)
+        if stored is not None:
+            raise _raise_stored(stored)
+        try:
+            self.authorize_dispatch(attempt_id, permit_wire, finalization_wire, now, **ports)
+        except AuthorizationRefused as refusal:
+            self._record_if_unauthorized(attempt_id, "authorization", refusal.rule, refusal.reason, now)
+            raise
+        except ReservationRefused as refusal:
+            self._record_if_unauthorized(attempt_id, "reservation", None, refusal.reason, now)
+            raise
+
+    def _record_if_unauthorized(
+        self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
+    ) -> None:
+        """Record the refusal unless the attempt already authorized (a replayed authorize)."""
+        try:
+            self.record_terminal_refusal(attempt_id, kind, rule, reason, now)
+        except AttemptStateError:
+            pass
 
     def bootstrap_anchor(
         self,
@@ -1258,6 +1370,15 @@ class SqliteAttemptStore:
             if row is None:
                 return None
             return dict(zip((c[0] for c in cursor.description), row, strict=True))
+
+
+def _raise_stored(stored: StoredRefusal) -> Exception:
+    """Rebuild the exact refusal that was recorded as terminal for an attempt identity."""
+    if stored.kind == "reservation":
+        return ReservationRefused(stored.reason)
+    if stored.kind == "authorization" and stored.rule in AUTHORIZATION_RULES:
+        return AuthorizationRefused(stored.rule, stored.reason)  # type: ignore[arg-type]
+    return OutcomeRefused(stored.reason)
 
 
 def sender_precondition(store: SqliteAttemptStore, attempt_id: str) -> bool:
