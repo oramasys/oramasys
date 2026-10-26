@@ -39,6 +39,7 @@ ROUTE_MANIFEST: tuple[RouteSpec, ...] = (
     RouteSpec("GET", "/readyz", RouteCapability.PUBLIC),
     RouteSpec("POST", "/run", RouteCapability.MUTATE),
     RouteSpec("POST", "/adjustments", RouteCapability.LIFECYCLE),
+    RouteSpec("POST", "/effects/inert", RouteCapability.LIFECYCLE),
     RouteSpec("GET", "/api/knowledge/search", RouteCapability.READ),
     RouteSpec("POST", "/api/mcp", RouteCapability.READ),
     RouteSpec("POST", "/api/a2a", RouteCapability.READ),

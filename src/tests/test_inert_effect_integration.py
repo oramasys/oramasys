@@ -18,7 +18,7 @@ def test_real_effect_cannot_be_settled_by_simulation(tmp_path):
         authorized(h)
         before = h.store.outbox_row(ATTEMPT)
         with pytest.raises(OutcomeRefused, match="inert_scope_required"):
-            InertEffectDriver(h.store).send(ATTEMPT)
+            InertEffectDriver(h.store, clock=lambda: NOW).send(ATTEMPT)
         assert h.store.outbox_row(ATTEMPT) == before
     finally:
         h.store.close()
@@ -38,11 +38,36 @@ def inert_harness(tmp_path: Path, *, authorize_attempt: bool = True) -> Harness:
     return h
 
 
+@pytest.mark.parametrize("cause", ["expired", "revoked", "missing"])
+def test_final_send_boundary_refuses_stale_authority(tmp_path: Path, cause: str) -> None:
+    """Expiry, acknowledged revocation and legacy missing context cannot start a send."""
+    from datetime import timedelta
+    from tests.test_dispatch_attempts import ISSUER
+    h = inert_harness(tmp_path)
+    try:
+        now = NOW
+        if cause == "expired":
+            now += timedelta(days=1)
+        elif cause == "revoked":
+            h.store._db.execute(
+                "INSERT INTO issuer_revocations VALUES (?, ?, 'grant', ?)",
+                (ISSUER, 100, GRANT),
+            )
+        else:
+            h.store._db.execute("DELETE FROM send_authority")
+        before = h.store.outbox_row(ATTEMPT)
+        with pytest.raises(OutcomeRefused):
+            InertEffectDriver(h.store, clock=lambda: now).send(ATTEMPT)
+        assert h.store.outbox_row(ATTEMPT) == before
+    finally:
+        h.store.close()
+
+
 def test_inert_send_is_durable_and_single_use(tmp_path):
     """A simulated send requires authority and cannot be replayed after reopening."""
     h = inert_harness(tmp_path)
     try:
-        driver = InertEffectDriver(h.store)
+        driver = InertEffectDriver(h.store, clock=lambda: NOW)
         assert driver.send(ATTEMPT) == "inert-simulation:v1"
         row = h.store.outbox_row(ATTEMPT)
         assert row["send_started"] == 1
@@ -55,7 +80,7 @@ def test_inert_send_is_durable_and_single_use(tmp_path):
     reopened = SqliteAttemptStore(h.path, governed=True)
     try:
         with pytest.raises(OutcomeRefused):
-            InertEffectDriver(reopened).send(ATTEMPT)
+            InertEffectDriver(reopened, clock=lambda: NOW).send(ATTEMPT)
     finally:
         reopened.close()
 
@@ -63,13 +88,13 @@ def test_inert_send_is_durable_and_single_use(tmp_path):
 def test_crash_after_send_marker_preserves_unknown_and_refuses_retry(tmp_path):
     """Restart cannot retry a send whose settlement never became durable."""
     h = inert_harness(tmp_path)
-    h.store.begin_send(ATTEMPT, inert_only=True)
+    h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
     h.store.close()
     reopened = SqliteAttemptStore(h.path, governed=True)
     try:
         assert reopened.outbox_row(ATTEMPT)["outcome"] == "unknown"
         with pytest.raises(OutcomeRefused):
-            InertEffectDriver(reopened).send(ATTEMPT)
+            InertEffectDriver(reopened, clock=lambda: NOW).send(ATTEMPT)
         assert reopened.outbox_row(ATTEMPT)["outcome"] == "unknown"
     finally:
         reopened.close()

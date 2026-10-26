@@ -7,19 +7,23 @@ be retried automatically.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
+
 from orama.graph.dispatch_attempts import SqliteAttemptStore
 
 
 class InertEffectDriver:
     """Exercise the real outbox lifecycle without an external side effect."""
 
-    def __init__(self, store: SqliteAttemptStore) -> None:
+    def __init__(self, store: SqliteAttemptStore, *, clock: Callable[[], datetime] | None = None) -> None:
         """Use the caller-owned store; never manufacture authorization."""
         self._store = store
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def send(self, attempt_id: str) -> str:
         """Consume one authorized send and durably settle the inert simulation."""
-        self._store.begin_send(attempt_id, inert_only=True)
+        self._store.begin_send(attempt_id, inert_only=True, now=self._clock())
         evidence = "inert-simulation:v1"
         self._store.record_outcome(attempt_id, "confirmed", evidence)
         return evidence

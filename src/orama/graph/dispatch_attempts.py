@@ -217,6 +217,10 @@ class VerifiedDispatchGrant:
 
 
 _SCHEMA: Final = (
+    "CREATE TABLE IF NOT EXISTS effect_grant_bindings ("
+    " attempt_id TEXT PRIMARY KEY, grant_wire BLOB NOT NULL, context TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS send_authority ("
+    " attempt_id TEXT PRIMARY KEY, issuer_id TEXT NOT NULL, expires_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS dispatch_attempts ("
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, reservation_id TEXT NOT NULL,"
     " state TEXT NOT NULL, fenced INTEGER NOT NULL DEFAULT 0,"
@@ -709,6 +713,26 @@ class SqliteAttemptStore:
             except ValueError:
                 return None
 
+    def bind_effect_grant(self, attempt_id: str, wire: bytes, context: Mapping[str, Any]) -> None:
+        """Persist immutable verified request facts; a partially prepared attempt cannot send."""
+        encoded = json.dumps(dict(context), sort_keys=True, separators=(",", ":"))
+        with self._immediate() as db:
+            _load_attempt(db, attempt_id)
+            prior = db.execute("SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if prior is not None:
+                if tuple(prior) != (wire, encoded):
+                    raise AttemptStateError("effect grant binding conflict")
+                return
+            db.execute("INSERT INTO effect_grant_bindings VALUES (?, ?, ?)", (attempt_id, wire, encoded))
+
+    def effect_grant_binding(self, attempt_id: str) -> tuple[bytes, dict[str, Any]]:
+        """Return the immutable authority context required by the trusted sender."""
+        with self._lock:
+            row = self._db.execute("SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if row is None:
+                raise OutcomeRefused("effect_grant_binding_missing")
+            return bytes(row[0]), json.loads(row[1])
+
     def mark_transmitted(self, attempt_id: str) -> None:
         """Record that the first issuer call may have started (durable, never undone)."""
         with self._immediate() as db:
@@ -897,6 +921,15 @@ class SqliteAttemptStore:
             except WireError as error:
                 raise AuthorizationRefused("rule1", "malformed_wire") from error
             _check_rule1(db, attempt, permit, now, verifier, expected)
+            binding = db.execute("SELECT context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if binding is not None:
+                context = json.loads(binding[0])
+                if scope is None or scope.principal != context["principal"]:
+                    raise AuthorizationRefused("rule1", "effect_grant_principal")
+                if (permit["grant_payload_digest"], permit["operation_id"], permit["request_digest"], permit["ledger_store_id"]) != (
+                    context["payload_digest"], context["operation_id"], context["request_digest"], context["ledger_store_id"],
+                ):
+                    raise AuthorizationRefused("rule1", "effect_grant_binding")
             if self._governed:
                 bind_scope_to_permit(scope, permit)
             dispatch_anchor.assert_permit_at_or_above_floor(
@@ -915,6 +948,10 @@ class SqliteAttemptStore:
             pair = expected.authority_pair()
             _check_rule6(db, attempt, gates, pair, now)
             _write_authorization(db, attempt, permit, fin, issuer_id, pair, now)
+            db.execute(
+                "INSERT INTO send_authority VALUES (?, ?, ?)",
+                (attempt_id, issuer_id, min(permit["expires_at"], fin["expires_at"])),
+            )
 
     def bootstrap_anchor(
         self,
@@ -1202,8 +1239,10 @@ class SqliteAttemptStore:
         with self._immediate() as db:
             reserve(db, reservation_id, proposal_id, scope, expires_at, now)
 
-    def begin_send(self, attempt_id: str, *, inert_only: bool = False) -> None:
+    def begin_send(self, attempt_id: str, *, inert_only: bool = False, now: datetime | None = None) -> None:
         """Durably mark the one allowed send as started; a second send is always refused."""
+        if inert_only and now is None:
+            now = datetime.now(UTC)
         with self._immediate() as db:
             row = db.execute(
                 "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
@@ -1211,6 +1250,23 @@ class SqliteAttemptStore:
             if row is None:
                 raise AttemptStateError("no authorized outbox row for the attempt")
             attempt = _load_attempt(db, attempt_id)
+            if now is not None:
+                _require_aware(now)
+                clock = db.execute("SELECT quarantined FROM clock_high_water WHERE id = 1").fetchone()
+                if clock is not None and clock[0]:
+                    raise OutcomeRefused("send_clock_quarantined")
+                authority = db.execute(
+                    "SELECT issuer_id, expires_at FROM send_authority WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if authority is None or now >= parse_timestamp(authority[1]):
+                    raise OutcomeRefused("send_authority_expired_or_missing")
+                fact = dispatch_revocations.refusal_reason(
+                    db, authority[0], attempt.grant_id, attempt.second_approval_ref
+                )
+                if fact is not None or _diverged(db, authority[0]):
+                    raise OutcomeRefused("send_authority_revoked")
+                dispatch_anchor.assert_not_quarantined(db, authority[0])
             if inert_only:
                 scope = db.execute(
                     "SELECT p.destination FROM effect_proposals p JOIN reservations r"
