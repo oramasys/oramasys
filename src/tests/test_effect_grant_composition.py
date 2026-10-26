@@ -352,6 +352,40 @@ def test_a_composed_attempt_needs_the_signed_grant_recheck_in_its_send(bound: Bo
     assert receipt.outcome == "confirmed"
 
 
+def test_a_losing_concurrent_request_never_records_a_refusal_over_a_started_send(
+    bound: Bound,
+) -> None:
+    """Two requests race for one attempt: the winner sends, the loser's refusal is not recorded.
+
+    The loser passes the durable pre-check, then its approval verifier is slow; meanwhile the
+    winner sends and settles. The loser's verifier then says no. Its terminal refusal must not be
+    written over the started send, so the attempt carries the winner's receipt and no refusal.
+    """
+    winner = FinalBoundarySender(bound.composer, sealed(bound))
+    won = []
+
+    class LosingApprovals(Approvals):
+        """The losing request's verifier: the concurrent winner sends meanwhile, then it refuses."""
+
+        def verify(self, binding):
+            """Let the winning request send and settle, then refuse this one."""
+            super().verify(binding)
+            won.append(winner(ATTEMPT, PRINCIPAL))
+            return False
+
+    with pytest.raises(FinalBoundaryRefused, match="approval_not_verified"):
+        bound.composer.send(
+            sealed(bound, approvals=LosingApprovals()), ATTEMPT, authenticated_principal=PRINCIPAL,
+        )
+    store = bound.h.store
+    assert won and won[0].outcome == "confirmed"
+    assert store.receipt(ATTEMPT).receipt == won[0]
+    assert store.terminal_refusal(ATTEMPT) is None
+    assert store.record_terminal_refusal(ATTEMPT, "final_boundary", None, "expired", NOW) is None
+    assert store.terminal_refusal(ATTEMPT) is None
+    assert winner(ATTEMPT, PRINCIPAL) == won[0]  # the replay still returns the stored receipt
+
+
 def test_a_signed_grant_revoked_during_the_boundary_stops_the_send_in_its_transaction(
     bound: Bound,
 ) -> None:

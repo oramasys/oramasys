@@ -112,8 +112,8 @@ class BindingStore(Protocol):
 
     def record_terminal_refusal(
         self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
-    ) -> StoredRefusal:
-        """Record a terminal refusal for the attempt identity."""
+    ) -> StoredRefusal | None:
+        """Record a terminal refusal for the attempt identity; None when its send already started."""
 
 
 def _normal_digest(value: str) -> str:
@@ -175,7 +175,9 @@ def authorize_final_boundary(
 
     Order: durable facts (a mismatch is a different attempt and is not recorded), then the effects
     switch, then revocation, then the injected approval verifier. Any refusal that concerns this
-    attempt is recorded as terminal before it is raised.
+    attempt is recorded as terminal before it is raised, unless a concurrent request started the
+    send in the meantime: the store never records a refusal over a started send, and this request
+    still raises its own refusal.
     """
     stored = store.attempt_binding(binding.attempt_id)
     try:

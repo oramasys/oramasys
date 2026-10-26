@@ -1129,12 +1129,17 @@ class SqliteAttemptStore:
 
     def record_terminal_refusal(
         self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
-    ) -> StoredRefusal:
+    ) -> StoredRefusal | None:
         """Record a pre-dispatch refusal as terminal for the attempt; the first one wins.
 
         An attempt that already holds a durable authorization intent can only be refused by the
         final boundary (``kind == "final_boundary"``): an earlier-stage refusal is never written
         over an authorization that committed.
+
+        A refusal is never written over a send that started. When ``send_started`` is already set
+        (a concurrent request won the race to the send marker after this request's pre-check),
+        nothing is recorded and None is returned, so an attempt never carries both a send (and its
+        receipt) and a terminal refusal. That check runs in the same transaction as the write.
         """
         _require_aware(now)
         if kind not in effect_fencing.REFUSAL_KINDS:
@@ -1149,6 +1154,11 @@ class SqliteAttemptStore:
                 return kept
             if committed is not None and kind != "final_boundary":
                 raise AttemptStateError("attempt already authorized; it cannot be refused at that stage")
+            started = db.execute(
+                "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if started is not None and started[0]:
+                return None
             return effect_fencing.record_refusal(db, attempt_id, kind, rule, reason, now)
 
     def authorize_dispatch_terminal(
