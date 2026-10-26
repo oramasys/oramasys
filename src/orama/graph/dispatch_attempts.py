@@ -50,7 +50,9 @@ from orama.graph.effect_proposals import (
     record_proposal,
     reserve,
 )
-from orama.graph.final_boundary import StoredBinding
+from orama.graph import effect_receipts
+from orama.graph.effect_receipts import RECEIPT_SCHEMA, RedactedReceipt, StoredReceipt
+from orama.graph.final_boundary import FinalBoundaryBinding, StoredBinding, check_store_facts
 from orama.graph.private_store import prepare_private_store
 
 AuthorizationRule: TypeAlias = Literal["rule1", "rule2", "rule3", "rule4", "rule5", "rule6"]
@@ -251,6 +253,7 @@ _SCHEMA: Final = (
     " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
     *PROPOSAL_SCHEMA,
     *FENCING_SCHEMA,
+    *RECEIPT_SCHEMA,
     *ANCHOR_SCHEMA,
     *dispatch_revocations.REVOCATION_SCHEMA,
     "CREATE TABLE IF NOT EXISTS clock_high_water ("
@@ -972,30 +975,7 @@ class SqliteAttemptStore:
         authorization transaction. Read-only.
         """
         with self._lock:
-            row = self._db.execute(
-                "SELECT a.state, a.grant_id, p.principal, p.operation_digest, p.destination,"
-                " r.expires_at, a.fencing_epoch, o.send_started, o.outcome"
-                " FROM dispatch_attempts a"
-                " LEFT JOIN reservations r ON r.reservation_id = a.reservation_id"
-                "  AND r.consumed_attempt_id = a.attempt_id"
-                " LEFT JOIN effect_proposals p ON p.proposal_id = r.proposal_id"
-                " LEFT JOIN outbox o ON o.attempt_id = a.attempt_id"
-                " WHERE a.attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            state, grant_id, principal, digest, target, expires, epoch, started, outcome = row
-            return StoredBinding(
-                attempt_id=attempt_id, state=state, grant_id=grant_id, principal=principal,
-                operation_digest=digest, target=target,
-                expires_at=None if expires is None else datetime.strptime(
-                    expires, "%Y-%m-%dT%H:%M:%S.%fZ"
-                ).replace(tzinfo=UTC),
-                epoch=epoch, current_epoch=effect_fencing.current_epoch(self._db),
-                send_started=bool(started), outcome=outcome,
-                refusal=effect_fencing.stored_refusal(self._db, attempt_id),
-            )
+            return _binding_in(self._db, attempt_id)
 
     def revocation_refusal(self, attempt_id: str, issuer_id: str) -> str | None:
         """Return the locally recorded Rule 4 revocation reason for the attempt, or None."""
@@ -1360,33 +1340,50 @@ class SqliteAttemptStore:
     def begin_send(self, attempt_id: str, *, inert_only: bool = False) -> None:
         """Durably mark the one allowed send as started; a second send is always refused."""
         with self._immediate() as db:
-            row = db.execute(
-                "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            self._begin_send_in(db, attempt_id, inert_only)
+
+    def begin_bound_send(self, binding: FinalBoundaryBinding, now: datetime) -> None:
+        """Start the one inert send only if the durable tuple still equals ``binding``.
+
+        The final-boundary store facts are checked again inside the same ``BEGIN IMMEDIATE``
+        transaction that sets ``send_started``, so an epoch that advanced, an expiry that passed or a
+        terminal refusal recorded after the pre-check still stops the send. The inert-scope guard of
+        ``begin_send`` applies.
+        """
+        _require_aware(now)
+        with self._immediate() as db:
+            check_store_facts(_binding_in(db, binding.attempt_id), binding, now)
+            self._begin_send_in(db, binding.attempt_id, True)
+
+    def _begin_send_in(self, db: sqlite3.Connection, attempt_id: str, inert_only: bool) -> None:
+        """Run the send preconditions and set ``send_started`` inside the caller's transaction."""
+        row = db.execute(
+            "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+        ).fetchone()
+        if row is None:
+            raise AttemptStateError("no authorized outbox row for the attempt")
+        attempt = _load_attempt(db, attempt_id)
+        if effect_fencing.stored_refusal(db, attempt_id) is not None:
+            raise OutcomeRefused("attempt_refused")
+        if inert_only:
+            scope = db.execute(
+                "SELECT p.destination FROM effect_proposals p JOIN reservations r"
+                " ON r.proposal_id = p.proposal_id WHERE r.reservation_id = ?"
+                " AND r.consumed_attempt_id = ?",
+                (attempt.reservation_id, attempt_id),
             ).fetchone()
-            if row is None:
-                raise AttemptStateError("no authorized outbox row for the attempt")
-            attempt = _load_attempt(db, attempt_id)
-            if effect_fencing.stored_refusal(db, attempt_id) is not None:
-                raise OutcomeRefused("attempt_refused")
-            if inert_only:
-                scope = db.execute(
-                    "SELECT p.destination FROM effect_proposals p JOIN reservations r"
-                    " ON r.proposal_id = p.proposal_id WHERE r.reservation_id = ?"
-                    " AND r.consumed_attempt_id = ?",
-                    (attempt.reservation_id, attempt_id),
-                ).fetchone()
-                if not self._governed or scope != ("inert://simulation",):
-                    raise OutcomeRefused("inert_scope_required")
-            complete = db.execute(
-                "SELECT " + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
-                + " FROM outbox WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-            if attempt.fenced or attempt.state != "authorized" or not complete[0]:
-                raise OutcomeRefused("send_precondition_failed")
-            if row[0]:
-                raise OutcomeRefused("send_already_started")
-            db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+            if not self._governed or scope != ("inert://simulation",):
+                raise OutcomeRefused("inert_scope_required")
+        complete = db.execute(
+            "SELECT " + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
+            + " FROM outbox WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        if attempt.fenced or attempt.state != "authorized" or not complete[0]:
+            raise OutcomeRefused("send_precondition_failed")
+        if row[0]:
+            raise OutcomeRefused("send_already_started")
+        db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
 
     def record_outcome(
         self, attempt_id: str, outcome: str, evidence_ref: str | None = None
@@ -1407,6 +1404,51 @@ class SqliteAttemptStore:
                 (outcome, evidence_ref, attempt_id),
             )
 
+    def settle_with_receipt(
+        self, attempt_id: str, outcome: str, evidence_ref: str | None, envelope_digest: str,
+        now: datetime,
+    ) -> RedactedReceipt:
+        """Settle ``unknown`` to a final outcome and write its redacted receipt in one transaction.
+
+        The receipt exists exactly when the settlement does. The transition rules of
+        ``record_outcome`` apply, so an unproven outcome stays ``unknown`` and a settled one is final.
+        """
+        _require_aware(now)
+        _require_text("envelope_digest", envelope_digest)
+        with self._immediate() as db:
+            row = db.execute(
+                "SELECT outcome, send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise AttemptStateError("no authorized outbox row for the attempt")
+            current, started = row
+            if not started:
+                raise OutcomeRefused("send_not_started")
+            check_transition(current, outcome, evidence_ref)
+            db.execute(
+                "UPDATE outbox SET outcome = ?, outcome_evidence = ? WHERE attempt_id = ?",
+                (outcome, evidence_ref, attempt_id),
+            )
+            return effect_receipts.insert_receipt(db, attempt_id, outcome, envelope_digest, now)
+
+    def receipt(self, attempt_id: str) -> StoredReceipt | None:
+        """Return the stored receipt for the attempt identity, or None."""
+        with self._lock:
+            return effect_receipts.get_receipt(self._db, attempt_id)
+
+    def mark_receipt_published(self, attempt_id: str, now: datetime) -> bool:
+        """Stamp the receipt as delivered to its observer; True only for the first stamp."""
+        _require_aware(now)
+        with self._immediate() as db:
+            return effect_receipts.mark_published(db, attempt_id, now)
+
+    def unpublished_receipts(self, limit: int = 100) -> list[StoredReceipt]:
+        """Return up to ``limit`` receipts whose publication never completed, oldest first."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be an integer from 1 to 1000")
+        with self._lock:
+            return effect_receipts.unpublished(self._db, limit)
+
     def outbox_row(self, attempt_id: str) -> dict[str, Any] | None:
         """Return the outbox row for the attempt as a dict, or None."""
         with self._lock:
@@ -1415,6 +1457,34 @@ class SqliteAttemptStore:
             if row is None:
                 return None
             return dict(zip((c[0] for c in cursor.description), row, strict=True))
+
+
+def _binding_in(db: sqlite3.Connection, attempt_id: str) -> StoredBinding | None:
+    """Read the durable final-boundary tuple for an attempt on an open connection."""
+    row = db.execute(
+        "SELECT a.state, a.grant_id, p.principal, p.operation_digest, p.destination,"
+        " r.expires_at, a.fencing_epoch, o.send_started, o.outcome"
+        " FROM dispatch_attempts a"
+        " LEFT JOIN reservations r ON r.reservation_id = a.reservation_id"
+        "  AND r.consumed_attempt_id = a.attempt_id"
+        " LEFT JOIN effect_proposals p ON p.proposal_id = r.proposal_id"
+        " LEFT JOIN outbox o ON o.attempt_id = a.attempt_id"
+        " WHERE a.attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    state, grant_id, principal, digest, target, expires, epoch, started, outcome = row
+    return StoredBinding(
+        attempt_id=attempt_id, state=state, grant_id=grant_id, principal=principal,
+        operation_digest=digest, target=target,
+        expires_at=None if expires is None else datetime.strptime(
+            expires, "%Y-%m-%dT%H:%M:%S.%fZ"
+        ).replace(tzinfo=UTC),
+        epoch=epoch, current_epoch=effect_fencing.current_epoch(db),
+        send_started=bool(started), outcome=outcome,
+        refusal=effect_fencing.stored_refusal(db, attempt_id),
+    )
 
 
 def _raise_stored(stored: StoredRefusal) -> Exception:
