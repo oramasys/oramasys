@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
 from orama.api.authz import AUTHENTICATED_CONTROL_PLANE_PRINCIPAL, install_authz
@@ -338,6 +339,57 @@ async def test_a_failed_bearer_on_the_live_route_gets_the_public_denial(bound: B
     )
     response = await post(app, {"attempt_id": ATTEMPT}, headers={"Authorization": "Bearer wrong-token-0000000000000"})
     public_error(response, 401, "deny.unauthorized_caller")
+    untouched(bound)
+
+
+def live_app(bound: Bound) -> FastAPI:
+    """Build the full app with the route exposed (effects effective under a test signature)."""
+    return create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound)),
+    )
+
+
+async def test_a_missing_bearer_on_the_live_route_gets_the_public_denial(bound: Bound) -> None:
+    """With the route exposed, no bearer at all also answers 401 with the contract body."""
+    response = await post(live_app(bound), {"attempt_id": ATTEMPT}, headers={})
+    public_error(response, 401, "deny.unauthorized_caller")
+    untouched(bound)
+
+
+async def test_the_dark_route_keeps_the_plain_401_and_the_404(bound: Bound) -> None:
+    """Dark at startup, or dark for this request: the auth-failure hook stays silent.
+
+    An unauthenticated caller gets the middleware's plain 401 (unchanged) and an authenticated
+    caller the contract's 404 ``serving.route_not_exposed``; neither reaches the sender.
+    """
+    sender = FinalBoundarySender(bound.composer, sealed(bound))
+    for app in (create_app(inert_sender=sender), bare_app(StartupOnlyEffects(), sender)):
+        for headers in ({}, {"Authorization": "Bearer wrong-token-0000000000000"}):
+            response = await post(app, {"attempt_id": ATTEMPT}, headers=headers)
+            assert response.status_code == 401
+            assert response.json() == {"detail": "Unauthorized"}
+        public_error(await post(app, {"attempt_id": ATTEMPT}), 404, "serving.route_not_exposed")
+    untouched(bound)
+
+
+async def test_an_auth_failure_hook_can_never_turn_a_denial_into_an_allow(bound: Bound) -> None:
+    """The middleware takes only a 401 from a route's hook; anything else is its plain 401."""
+
+    def allow(request):
+        """A misbehaving hook that tries to answer a failed bearer with a success."""
+        return JSONResponse({"receipt": "forged"}, status_code=200)
+
+    def broken(request):
+        """A hook that fails outright."""
+        raise RuntimeError("hook failure")
+
+    for hook in (allow, broken):
+        app = live_app(bound)
+        app.state.auth_failure_handlers["/effects/inert"] = hook
+        response = await post(app, {"attempt_id": ATTEMPT}, headers={})
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Unauthorized"}
     untouched(bound)
 
 
