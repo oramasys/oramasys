@@ -132,3 +132,35 @@ enablement record, and `ORAMA_GRANT_SERVING` stays unset.
 - The authenticated principal is the single shared control-plane bearer's
   principal. Checking it against the attempt's bound principal proves that the
   caller holds that bearer, not per-caller ownership of the attempt.
+
+### D2 hardening after the second verification round
+
+Each item has a test that fails without the change; all of them only make
+behaviour stricter.
+
+- The single send path is enforced by the store. `begin_send` (and so the
+  plain `InertEffectDriver`) refuses an attempt that has an effect-grant
+  binding (`effect_grant_bound_send_required`), and `begin_bound_send`
+  refuses one without the signed-grant recheck
+  (`effect_grant_recheck_required`). Both refuse inside the send transaction
+  before any write and record nothing, so the canonical path stays available.
+- The composer commits the attempt and its effect-grant binding in one
+  transaction (`create_bound_attempt`), so an authorization can never run in
+  between and skip the effect-grant cross-check; `bind_effect_grant` refuses
+  an attempt that already authorized without a binding.
+- `begin_bound_send` refuses a caller issuer other than the one recorded in
+  the attempt's send authority (`send_authority_issuer_mismatch`).
+- A final-boundary refusal is never recorded over a started send: a request
+  that loses the race to the send marker still gets its own refusal, but the
+  attempt keeps only the winner's receipt.
+- Approval and reconciliation-ticket expiry compare parsed instants, never
+  formatted text; an unreadable stored expiry refuses.
+- `/effects/inert` asks the `effects` capability when it is installed and
+  again on every request. Its auth-failure hook answers the contract's
+  `401 deny.unauthorized_caller` only while the route is exposed; on a dark
+  route the middleware's plain 401 and the 404 for authenticated callers are
+  unchanged, and a hook can never turn a denial into an allow.
+- The composition root passes the effect store it opened to `create_app`, so
+  the startup reconciliation report covers its in-doubt attempts.
+- The internal reasons added here map to existing public codes; the closed
+  public vocabulary is unchanged.
