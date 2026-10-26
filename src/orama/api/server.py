@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from orama.api.authz import authenticated_control_plane_principal, install_authz
+from orama.api.capabilities import CapabilityConfig, evaluate
 from orama.api.contracts import (
     AdjustmentReceiptResponse,
     AdjustmentRequest,
@@ -23,6 +24,7 @@ from orama.graph.grant_verifier import (
     VERIFICATION_REFUSAL_CODES,
     AdjustmentGrantConsumer,
     AdjustmentGrantRefused,
+    AdjustmentGrantVerifier,
 )
 from orama.graph.perpetua_graph import graph
 from orama.knowledge import router as knowledge_router
@@ -44,6 +46,8 @@ def create_app(
     adjustment_consumer: AdjustmentGrantConsumer | None = None,
     grant_capability: str | None = None,
     grant_cleanup: Callable[[], None] | None = None,
+    capability_config: CapabilityConfig | None = None,
+    grant_verifier: AdjustmentGrantVerifier | None = None,
 ) -> FastAPI:
     """Build the API with an explicit graph runner; absent admission refuses work.
 
@@ -55,7 +59,16 @@ def create_app(
     ``/health``. Only ``ready`` carries a consumer. ``grant_cleanup`` belongs to
     the composition root that opened a managed verifier; it releases retained
     read resources at shutdown and does not expose issuer operations to the API.
+
+    ``capability_config`` carries the R0-2 capability record and the facts the startup refusal
+    matrix inspects; absent means every capability is denied. ``grant_verifier`` is the verify-only
+    authority: it never spends a grant. A forbidden combination raises ``StartupRefused`` here,
+    before any route can dispatch.
     """
+    capabilities = evaluate(
+        capability_config or CapabilityConfig(),
+        verify_authority_available=grant_verifier is not None,
+    )
     state = grant_capability if grant_capability is not None else (
         "ready" if adjustment_consumer is not None else "disabled"
     )
@@ -76,6 +89,7 @@ def create_app(
                 await asyncio.to_thread(grant_cleanup)
 
     app = FastAPI(title="oramasys", version="2.0.0-alpha.1", lifespan=lifespan)
+    app.state.capabilities = capabilities
     install_authz(app)
     from orama.workspace.api import router as workspace_router
     app.include_router(workspace_router)
@@ -159,7 +173,12 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         """Report process availability and non-sensitive grant composition state."""
-        return {"status": "ok", "version": "2.0.0-alpha.1", "grants": state}
+        return {
+            "status": "ok",
+            "version": "2.0.0-alpha.1",
+            "grants": state,
+            "capabilities": capabilities.as_public(),
+        }
 
     return app
 
