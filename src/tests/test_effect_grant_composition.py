@@ -707,3 +707,20 @@ def test_a_refusal_row_written_before_the_public_fields_still_replays_safely(tmp
         assert record.disposition == "authorization_refused"
     finally:
         store.close()
+
+
+def test_a_backward_clock_on_the_bound_send_quarantines_and_consumes_no_approval(bound: Bound) -> None:
+    """The shared recheck latches a regressed clock on the canonical path before anything is consumed."""
+    store = bound.h.store
+    store.observe_clock(NOW + timedelta(minutes=2))
+    sim = Simulation()
+    with pytest.raises(OutcomeRefused) as first:
+        bound.composer.send(sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL)
+    assert first.value.reason == "send_clock_regressed" and sim.calls == 0
+    assert store._db.execute("SELECT quarantined FROM clock_high_water WHERE id = 1").fetchone() == (1,)
+    assert store.approval_state(ATTEMPT) == "granted"
+    untouched(bound)
+    with pytest.raises(OutcomeRefused) as latched:
+        bound.composer.send(sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL)
+    assert latched.value.reason == "send_clock_quarantined" and sim.calls == 0
+    untouched(bound)

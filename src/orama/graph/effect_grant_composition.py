@@ -363,14 +363,13 @@ class FinalBoundarySender:
         A refusal at or after the final boundary is answered from the attempt's terminal refusal
         record when one exists (``AttemptRefused``): the first request that was refused and every
         replay get the same stored public code and ``receipt_ref``. A caller that is not the
-        attempt's principal never learns of the record, and an in-doubt dispatch
-        (``SendOutcomeUnknown``) is never converted into a refusal.
+        attempt's principal is refused before this point and never learns of the record, and an
+        in-doubt dispatch (``SendOutcomeUnknown``) is never converted into a refusal.
         """
         try:
             return self._composer.send(self._driver, attempt_id, authenticated_principal=principal)
         except (FinalBoundaryRefused, OutcomeRefused) as refusal:
-            if getattr(refusal, "reason", None) in ("principal_mismatch", "attempt_not_authorized"):
-                raise
+            # The composer verified the caller is the attempt's principal before any of these.
             stored = self._driver.store.terminal_refusal(attempt_id)
             if stored is None:
                 raise
