@@ -107,11 +107,14 @@ class SealedInertDriver:
             issuer_id=self._issuer_id, now=now,
         )
         try:
-            self._store.begin_bound_send(binding, now)
+            self._store.begin_bound_send(
+                binding, now, issuer_id=self._issuer_id, clock=self._clock,
+                envelope_digest=envelope.digest,
+            )
         except FinalBoundaryRefused as refusal:
             if refusal.terminal and refusal.reason in TERMINAL_REASONS:
                 self._store.record_terminal_refusal(
-                    binding.attempt_id, "final_boundary", None, refusal.reason, now
+                    binding.attempt_id, "final_boundary", None, refusal.reason, self._clock()
                 )
             raise
         evidence = self._run(envelope)

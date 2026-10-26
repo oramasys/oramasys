@@ -28,6 +28,12 @@ RECEIPT_SCHEMA: Final = (
     " OR OLD.envelope_digest IS NOT NEW.envelope_digest OR OLD.recorded_at IS NOT NEW.recorded_at"
     " OR OLD.published_at IS NOT NULL"
     " BEGIN SELECT RAISE(ABORT, 'effect_receipts only allows a first publication stamp'); END",
+    "CREATE TABLE IF NOT EXISTS send_envelopes ("
+    " attempt_id TEXT PRIMARY KEY, envelope_digest TEXT NOT NULL, recorded_at TEXT NOT NULL)",
+    "CREATE TRIGGER IF NOT EXISTS send_envelopes_no_delete BEFORE DELETE ON send_envelopes"
+    " BEGIN SELECT RAISE(ABORT, 'send_envelopes is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS send_envelopes_no_update BEFORE UPDATE ON send_envelopes"
+    " BEGIN SELECT RAISE(ABORT, 'send_envelopes is append-only'); END",
 )
 
 
@@ -83,6 +89,27 @@ def insert_receipt(
         (attempt_id, ref, outcome, digest, envelope_digest, stamp),
     )
     return RedactedReceipt(ref, outcome, digest, stamp)
+
+
+def record_send_envelope(
+    db: sqlite3.Connection, attempt_id: str, envelope_digest: str, now: datetime
+) -> None:
+    """Remember which envelope digest started the send, so a later settlement can write its receipt.
+
+    Called in the transaction that sets ``send_started``; a second record for one identity is refused.
+    """
+    db.execute(
+        "INSERT INTO send_envelopes (attempt_id, envelope_digest, recorded_at) VALUES (?, ?, ?)",
+        (attempt_id, envelope_digest, now.astimezone(UTC).isoformat()),
+    )
+
+
+def send_envelope_digest(db: sqlite3.Connection, attempt_id: str) -> str | None:
+    """Return the envelope digest recorded when the attempt's send started, or None."""
+    row = db.execute(
+        "SELECT envelope_digest FROM send_envelopes WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 def _row_to_stored(row: tuple) -> StoredReceipt:

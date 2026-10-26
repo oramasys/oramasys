@@ -283,3 +283,15 @@ def test_the_plain_store_path_is_unchanged_by_the_terminal_wrapper(h: Harness) -
     h.verifier.permit_ok = True
     authorize(h, SCOPE)
     assert h.store.outbox_row(ATTEMPT) is not None
+
+
+def test_a_saved_refusal_beats_a_racing_authorization(h: Harness) -> None:
+    """The saved refusal is checked inside the authorization transaction, so it cannot be bypassed."""
+    ready(h, vector_flow())
+    h.store.record_terminal_refusal(ATTEMPT, "authorization", "rule1", "malformed_wire", NOW)
+    before = quiet_snapshot(h.path)
+    with pytest.raises(AuthorizationRefused) as excinfo:
+        authorize(h, SCOPE)
+    assert (excinfo.value.rule, excinfo.value.reason) == ("rule1", "malformed_wire")
+    assert quiet_snapshot(h.path) == before
+    assert h.store.outbox_row(ATTEMPT) is None

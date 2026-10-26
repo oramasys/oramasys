@@ -43,6 +43,7 @@ _log = logging.getLogger(__name__)
 VERIFY_PATH: Final = "/grants/verify"
 REVOCATION_MAX_AGE: Final = timedelta(seconds=60)
 MAX_BODY_BYTES: Final = 65_536
+_BODY_LIMIT: Final = MAX_BODY_BYTES + 64
 _STATUS: Final[dict[str, int]] = {
     "deny.malformed_grant": 400,
     "deny.unauthorized_caller": 401,
@@ -88,18 +89,43 @@ def _verify_only(verifier: AdjustmentGrantVerifier, wire: bytes, now: datetime) 
         raise _Denied(DENY_VERIFIER_UNAVAILABLE) from None
 
 
+async def _read_bounded_body(request: Request) -> bytes:
+    """Read the request body in chunks and stop as soon as it exceeds the size limit.
+
+    A declared ``Content-Length`` over the limit is refused without reading; a streamed body is cut
+    off at the limit, so a rejected upload never buffers more than one chunk past it.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _BODY_LIMIT:
+                raise _Denied(DENY_MALFORMED_GRANT)
+        except ValueError:
+            raise _Denied(DENY_MALFORMED_GRANT) from None
+    received = bytearray()
+    async for chunk in request.stream():
+        received.extend(chunk)
+        if len(received) > _BODY_LIMIT:
+            raise _Denied(DENY_MALFORMED_GRANT)
+    return bytes(received)
+
+
 def _parse_grant(body: bytes) -> bytes:
     """Return the grant wire from ``{"grant": "<text>"}`` or raise ``_Denied`` (malformed)."""
-    if len(body) > MAX_BODY_BYTES + 64:
+    if len(body) > _BODY_LIMIT:
         raise _Denied(DENY_MALFORMED_GRANT)
     try:
         decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        grant = (
+            decoded.get("grant") if isinstance(decoded, dict) and set(decoded) == {"grant"} else None
+        )
+        if not isinstance(grant, str) or not 2 <= len(grant) <= MAX_BODY_BYTES:
+            raise _Denied(DENY_MALFORMED_GRANT)
+        return grant.encode("utf-8")
+    except _Denied:
+        raise
+    except (ValueError, RecursionError, MemoryError):  # includes bad UTF-8 and lone surrogates
         raise _Denied(DENY_MALFORMED_GRANT) from None
-    grant = decoded.get("grant") if isinstance(decoded, dict) and set(decoded) == {"grant"} else None
-    if not isinstance(grant, str) or not 2 <= len(grant) <= MAX_BODY_BYTES:
-        raise _Denied(DENY_MALFORMED_GRANT)
-    return grant.encode("utf-8")
 
 
 def install_verify_route(
@@ -124,6 +150,22 @@ def install_verify_route(
         _log.warning("verify denied", extra={"correlation_id": correlation_id, "code": code})
         return error_response(_STATUS[code], code, correlation_id, receipt_ref)
 
+    def on_auth_failure(request: Request) -> JSONResponse | None:
+        """Answer a failed bearer check on this route with the public denial and its audit record.
+
+        Only when the route is live (serving effective and a verifier wired); otherwise return None
+        so the middleware keeps its plain 401. Bearer enforcement itself stays in the middleware.
+        """
+        if not capabilities.is_effective("serving") or grant_verifier is None:
+            return None
+        return deny(new_correlation_id(), DENY_UNAUTHORIZED_CALLER)
+
+    handlers = getattr(app.state, "auth_failure_handlers", None)
+    if not isinstance(handlers, dict):
+        handlers = {}
+        app.state.auth_failure_handlers = handlers
+    handlers[VERIFY_PATH] = on_auth_failure
+
     @app.post(VERIFY_PATH)
     async def verify_grant(request: Request) -> JSONResponse:
         """Verify one grant for verification only; no spend, no ledger, no effect."""
@@ -135,7 +177,7 @@ def install_verify_route(
         if authenticated_control_plane_principal(request) is None:
             return deny(correlation_id, DENY_UNAUTHORIZED_CALLER)
         try:
-            wire = _parse_grant(await request.body())
+            wire = _parse_grant(await _read_bounded_body(request))
             await asyncio.to_thread(_verify_only, grant_verifier, wire, now_of())
         except _Denied as denied:
             return deny(correlation_id, denied.code)

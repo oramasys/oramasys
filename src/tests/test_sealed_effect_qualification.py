@@ -16,7 +16,7 @@ import pytest
 from orama.graph.dispatch_attempts import SqliteAttemptStore
 from orama.graph.effect_reconciliation import startup_reconciliation_report
 from orama.graph.final_boundary import FinalBoundaryRefused
-from tests.test_dispatch_attempts import ATTEMPT, NOW, Harness
+from tests.test_dispatch_attempts import ATTEMPT, ISSUER, NOW, Harness
 from tests.test_effect_fencing import Operator
 from tests.test_final_boundary import binding
 from tests.test_inert_effect_integration import inert_harness
@@ -30,7 +30,7 @@ def _crash_worker(directory: Path, boundary: str) -> None:
     h = inert_harness(directory)
     h.store.grant_effect_approval(binding(), approver=Operator(), now=NOW)
     if boundary == "after_send_marker":
-        h.store.begin_bound_send(binding(), NOW)
+        h.store.begin_bound_send(binding(), NOW, issuer_id=ISSUER)
         os._exit(CRASH_EXIT)
     if boundary == "during_settle":
         touched = False

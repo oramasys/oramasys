@@ -12,7 +12,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -55,7 +55,12 @@ from orama.graph import effect_approvals, effect_reconciliation, effect_receipts
 from orama.graph.effect_approvals import APPROVAL_SCHEMA
 from orama.graph.effect_reconciliation import RECONCILIATION_SCHEMA
 from orama.graph.effect_receipts import RECEIPT_SCHEMA, RedactedReceipt, StoredReceipt
-from orama.graph.final_boundary import FinalBoundaryBinding, StoredBinding, check_store_facts
+from orama.graph.final_boundary import (
+    FinalBoundaryBinding,
+    FinalBoundaryRefused,
+    StoredBinding,
+    check_store_facts,
+)
 from orama.graph.private_store import prepare_private_store
 
 AuthorizationRule: TypeAlias = Literal["rule1", "rule2", "rule3", "rule4", "rule5", "rule6"]
@@ -902,6 +907,10 @@ class SqliteAttemptStore:
         """Check clock and authorization atomically; commit a clock latch before refusing."""
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
+            kept = effect_fencing.stored_refusal(db, attempt_id)
+            if kept is not None:
+                # A saved terminal refusal wins; it is decided under the same lock as the authorization.
+                raise _raise_stored(kept)
             dispatch_anchor.assert_not_quarantined(db, issuer_id)
             if self._governed:
                 clock = db.execute(
@@ -1347,21 +1356,46 @@ class SqliteAttemptStore:
         with self._immediate() as db:
             self._begin_send_in(db, attempt_id, inert_only)
 
-    def begin_bound_send(self, binding: FinalBoundaryBinding, now: datetime) -> None:
+    def begin_bound_send(
+        self,
+        binding: FinalBoundaryBinding,
+        now: datetime,
+        *,
+        issuer_id: str,
+        clock: Callable[[], datetime] | None = None,
+        envelope_digest: str | None = None,
+    ) -> None:
         """Start the one inert send only if the durable tuple still equals ``binding``.
 
         The final-boundary store facts are checked again inside the same ``BEGIN IMMEDIATE``
-        transaction that sets ``send_started``, so an epoch that advanced, an expiry that passed or a
-        terminal refusal recorded after the pre-check still stops the send. The single-use human
-        approval for exactly this tuple is consumed in that same transaction: no approval, no send,
-        and no consumed approval without a send marker. The inert-scope guard of ``begin_send``
-        applies.
+        transaction that sets ``send_started``, so an epoch that advanced, an expiry that passed, a
+        revocation recorded locally or a terminal refusal recorded after the pre-check still stops
+        the send. When ``clock`` is given it is read again inside the transaction and that fresh time
+        (never earlier than ``now``) decides expiry, so a slow verifier cannot start an expired
+        attempt. The single-use human approval for exactly this tuple is consumed in that same
+        transaction: no approval, no send, and no consumed approval without a send marker. When
+        ``envelope_digest`` is given it is stored with the send marker so a later reconciliation can
+        write the receipt. The inert-scope guard of ``begin_send`` applies.
         """
         _require_aware(now)
+        _require_text("issuer_id", issuer_id)
         with self._immediate() as db:
-            check_store_facts(_binding_in(db, binding.attempt_id), binding, now)
-            effect_approvals.consume_approval(db, binding, now)
+            at = now
+            if clock is not None:
+                fresh = clock()
+                _require_aware(fresh)
+                at = max(now, fresh)
+            check_store_facts(_binding_in(db, binding.attempt_id), binding, at)
+            attempt = _load_attempt(db, binding.attempt_id)
+            revoked = dispatch_revocations.refusal_reason(
+                db, issuer_id, attempt.grant_id, attempt.second_approval_ref
+            )
+            if revoked is not None:
+                raise FinalBoundaryRefused(revoked, terminal=True)
+            effect_approvals.consume_approval(db, binding, at)
             self._begin_send_in(db, binding.attempt_id, True)
+            if envelope_digest is not None:
+                effect_receipts.record_send_envelope(db, binding.attempt_id, envelope_digest, at)
 
     def grant_effect_approval(
         self, binding: FinalBoundaryBinding, *, approver: OperatorAuthority, now: datetime

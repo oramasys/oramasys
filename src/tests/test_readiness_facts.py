@@ -88,6 +88,7 @@ def test_issuer_and_policy_readiness_never_satisfy_the_serving_facts() -> None:
 def test_a_probe_that_fails_or_is_not_exactly_true_is_false(answer) -> None:
     """Raising or truthy-but-not-True probe answers are not-ready."""
     def probe():
+        """Raise or return the scripted answer."""
         if isinstance(answer, Exception):
             raise answer
         return answer

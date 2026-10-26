@@ -105,15 +105,19 @@ def test_unreadable_or_non_object_record_denies(raw: bytes, reason: str) -> None
 def _mutations() -> list[tuple[str, Any, str]]:
     """Build (name, mutator, reason) cases over a well-formed record."""
     def drop_bit(r):
+        """Remove the effects bit."""
         del r["capabilities"]["effects"]
 
     def string_bit(r):
+        """Make the serving bit a string."""
         r["capabilities"]["serving"] = "true"
 
     def int_bit(r):
+        """Make the serving bit an integer."""
         r["capabilities"]["serving"] = 1
 
     def null_bit(r):
+        """Make the transport bit null."""
         r["capabilities"]["transport"] = None
 
     return [

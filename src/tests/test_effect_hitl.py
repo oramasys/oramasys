@@ -139,6 +139,7 @@ def test_consumption_and_the_send_marker_commit_together(h: Harness, monkeypatch
     approve(h)
 
     def refuse(db, attempt_id, inert_only):
+        """Refuse the send precondition."""
         raise OutcomeRefused("send_precondition_failed")
 
     monkeypatch.setattr(h.store, "_begin_send_in", refuse)

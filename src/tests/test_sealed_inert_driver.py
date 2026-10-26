@@ -109,10 +109,12 @@ def _bad_envelopes() -> list[tuple[str, bytes, str]]:
     good = json.loads(envelope().raw)
 
     def raw(**changes) -> bytes:
+        """Return the envelope bytes with fields changed."""
         body = {**good, **changes}
         return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
     def without(key: str) -> bytes:
+        """Return the envelope bytes with one field removed."""
         body = {k: v for k, v in good.items() if k != key}
         return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
@@ -278,6 +280,7 @@ def test_concurrent_double_submit_dispatches_exactly_once(h: Harness) -> None:
     results, errors = [], []
 
     def worker() -> None:
+        """Send once and record the receipt or the refusal reason."""
         try:
             results.append(d.send(env.raw, env.digest, principal=SCOPE.principal))
         except OutcomeRefused as refusal:
@@ -432,6 +435,7 @@ def test_publication_delivers_only_the_redacted_receipt_and_stamps_it(h: Harness
 def test_a_failing_observer_leaves_the_receipt_for_bounded_redelivery(h: Harness) -> None:
     """Publication trouble never affects the effect; pending receipts are delivered later."""
     def broken(receipt) -> None:
+        """Publisher that always fails."""
         raise ConnectionError("observer down")
 
     first = send(driver(h, publisher=broken))
@@ -465,3 +469,72 @@ def test_receipts_are_append_only_except_the_first_publication_stamp(h: Harness)
     db.execute("UPDATE effect_receipts SET published_at = 'stamp'")
     with pytest.raises(sqlite3.DatabaseError, match="first publication"):
         db.execute("UPDATE effect_receipts SET published_at = 'again'")
+
+
+def test_an_attempt_that_expires_during_verification_never_starts(h: Harness) -> None:
+    """The clock is read again inside the send transaction, so a slow verifier cannot beat expiry."""
+    now = [NOW]
+
+    class Slow(Approvals):
+        """Verifier that takes until the expiry instant to answer."""
+
+        def verify(self, binding):
+            """Let the clock cross ``expires_at``, then approve."""
+            now[0] = LIVE_UNTIL
+            return super().verify(binding)
+
+    sim = Recorder()
+    d = SealedInertDriver(
+        h.store, effects_allowed=lambda: True, approval_verifier=Slow(),
+        revocations=h.revocations, issuer_id=ISSUER, simulation=sim, clock=lambda: now[0],
+    )
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        send(d)
+    assert excinfo.value.reason == "expired" and excinfo.value.terminal
+    assert sim.calls == 0
+    untouched(h)
+    assert h.store.approval_state(ATTEMPT) == "granted"
+
+
+def test_a_revocation_committed_during_verification_stops_the_send(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The send transaction re-reads the local revocation facts, so a late revocation wins."""
+    import orama.graph.dispatch_attempts as attempts
+
+    class Revoking(Approvals):
+        """Verifier during which a revocation fact commits."""
+
+        def verify(self, binding):
+            """Record a revocation after the pre-check, then approve."""
+            monkeypatch.setattr(
+                attempts.dispatch_revocations, "refusal_reason", lambda *a, **k: "grant_revoked"
+            )
+            return super().verify(binding)
+
+    sim = Recorder()
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        send(driver(h, approvals=Revoking(), simulation=sim))
+    assert excinfo.value.reason == "grant_revoked" and excinfo.value.terminal
+    assert sim.calls == 0
+    untouched(h)
+    assert h.store.approval_state(ATTEMPT) == "granted"
+    assert h.store.terminal_refusal(ATTEMPT).reason == "grant_revoked"
+
+
+def test_reconciling_an_unknown_sealed_send_writes_a_publishable_receipt(h: Harness) -> None:
+    """The ticket spend settles the outcome and writes the receipt in one transaction; replay returns it."""
+    published = []
+    with pytest.raises(SendOutcomeUnknown):
+        send(driver(h, simulation=Recorder(error=TimeoutError("slow")), publisher=published.append))
+    assert h.store.receipt(ATTEMPT) is None
+    ticket = h.store.open_reconciliation(
+        ATTEMPT, operator=Operator(), ttl=timedelta(minutes=5), now=NOW
+    )
+    h.store.reconcile_unknown(ticket, ATTEMPT, "confirmed", "ticket-4711", operator=Operator(), now=NOW)
+    stored = h.store.receipt(ATTEMPT)
+    assert stored is not None and stored.receipt.outcome == "confirmed"
+    assert stored.envelope_digest == envelope().digest
+    d = driver(h, publisher=published.append)
+    assert d.publish_pending() == 1 and published[-1] == stored.receipt
+    assert send(d) == stored.receipt

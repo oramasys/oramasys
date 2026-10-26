@@ -120,6 +120,37 @@ async def test_the_route_still_needs_the_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
+async def test_a_failed_bearer_gets_the_public_denial_and_an_audit_record(tmp_path: Path) -> None:
+    """Middleware enforces the bearer, yet the 401 carries the public body and a durable receipt."""
+    stub = StubVerifier(result=verified(), revocation=observation())
+    app, audit = serving_app(stub, tmp_path)
+    for headers in ({}, {"Authorization": "Bearer wrong-token"}):
+        error = assert_public_error(
+            await post(app, {"grant": "{}"}, headers=headers), 401, "deny.unauthorized_caller"
+        )
+        assert audit.has(error["receipt_ref"])
+    assert stub.calls == []
+
+
+async def test_an_oversized_stream_is_cut_off_at_the_limit(tmp_path: Path) -> None:
+    """A streamed upload is refused once it passes the limit, without a Content-Length to rely on."""
+    stub = StubVerifier(result=verified(), revocation=observation())
+    app, audit = serving_app(stub, tmp_path)
+    pulled = 0
+
+    async def chunks():
+        """Yield 1 KiB chunks and count how many the server pulls."""
+        nonlocal pulled
+        for _ in range(10_000):
+            pulled += 1
+            yield b"a" * 1024
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        response = await client.post("/grants/verify", content=chunks(), headers=AUTH)
+    assert_public_error(response, 400, "deny.malformed_grant")
+    assert pulled < 200 and stub.calls == [] and audit.count() == 1
+
+
 async def test_missing_principal_is_denied_as_unauthorized_caller_and_audited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

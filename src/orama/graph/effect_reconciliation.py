@@ -9,7 +9,8 @@ Two things, both observational by default:
   ticket scoped to one attempt, and spending it. A ticket expires after at most
   ``MAX_TICKET_TTL``, is single-use, and every ticket row is append-only apart from its one
   consumption stamp. Consuming it applies the same legal ``unknown`` to final transition as any other
-  settlement and records the operator reference and the evidence reference.
+  settlement and records the operator reference and the evidence reference. For a sealed send the
+  redacted receipt is written in that same transaction.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol
 
 from orama.graph.effect_outcomes import OutcomeRefused, check_transition
-from orama.graph.effect_receipts import attempt_ref_for
+from orama.graph.effect_receipts import attempt_ref_for, insert_receipt, send_envelope_digest
 
 MAX_TICKET_TTL: Final = timedelta(minutes=15)
 MANUAL_EVIDENCE_PREFIX: Final = "manual-reconciliation:"
@@ -153,3 +154,8 @@ def spend_ticket(
         " evidence_ref = ? WHERE ticket_id = ? AND consumed_at IS NULL",
         (now.astimezone(UTC).isoformat(), operator_ref, outcome, evidence_ref.strip(), ticket_id),
     )
+    envelope_digest = send_envelope_digest(db, attempt_id)
+    if envelope_digest is not None:
+        # A sealed send recorded its envelope when it started: write the receipt with the outcome
+        # and the ticket consumption in this one transaction so ``publish_pending`` can deliver it.
+        insert_receipt(db, attempt_id, outcome, envelope_digest, now)
