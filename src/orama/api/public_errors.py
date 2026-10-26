@@ -72,7 +72,9 @@ DENY_STATUS: Final[dict[str, int]] = {
 # The verifier codes in ``_INTERNAL_TO_PUBLIC`` apply unchanged. An in-doubt dispatch (the send
 # marker committed; ``outcome_unknown``, ``evidence_invalid``, ``outcome_unrecorded``) is also
 # ``deny.verifier_unavailable`` (503), and the route adds the attempt's opaque ``receipt_ref``
-# because a durable record exists; a pre-dispatch deny never carries one.
+# because a durable record exists. A pre-dispatch refusal that wrote the terminal refusal record also
+# carries that record's ``receipt_ref`` (and replays with the stored code); a deny that left no
+# durable record carries none.
 _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
     "effect.principal_mismatch": DENY_UNAUTHORIZED_CALLER,
     "principal_mismatch": DENY_UNAUTHORIZED_CALLER,
@@ -85,7 +87,7 @@ _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
             "approval_not_verified", "approval_undeclared", "approval_missing",
             "approval_consumed", "approval_mismatch", "approval_expired", "inert_scope_required",
             "send_precondition_failed", "send_authority_expired_or_missing",
-            "replay_envelope_mismatch", "effect_grant_bound_send_required",
+            "replay_envelope_mismatch", "effect_grant_bound_send_required", "effect.lease_stale",
         )
     },
     **{
@@ -101,7 +103,7 @@ _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
         for reason in (
             "approval_verifier_missing", "approval_verifier_unavailable",
             "send_clock_quarantined", "outcome_unknown", "evidence_invalid", "outcome_unrecorded",
-            "effect_grant_recheck_required", "send_authority_issuer_mismatch",
+            "effect_grant_recheck_required", "send_authority_issuer_mismatch", "send_lease_unavailable",
         )
     },
 }

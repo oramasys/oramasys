@@ -430,6 +430,8 @@ async def test_an_auth_failure_hook_can_never_turn_a_denial_into_an_allow(bound:
         ("approval_missing", "deny.malformed_grant"),
         ("send_already_started", "deny.malformed_grant"),
         ("effect_grant_bound_send_required", "deny.malformed_grant"),
+        ("effect.lease_stale", "deny.malformed_grant"),
+        ("send_lease_unavailable", "deny.verifier_unavailable"),
         ("effect_grant_recheck_required", "deny.verifier_unavailable"),
         ("send_authority_issuer_mismatch", "deny.verifier_unavailable"),
         ("envelope_target", "deny.malformed_grant"),
@@ -505,3 +507,16 @@ async def test_an_in_doubt_dispatch_is_503_with_a_nested_receipt_ref_and_never_a
     assert "receipt_ref" not in response.json()
     assert bound.h.store.terminal_refusal(ATTEMPT) is None
     assert bound.h.store.outbox_row(ATTEMPT)["outcome"] == "unknown"
+
+
+async def test_a_stale_lease_is_a_public_malformed_grant_deny_and_a_missing_view_is_unavailable(bound: Bound) -> None:
+    """The lease refusals reach the closed vocabulary: 400 for a stale lease, 503 for no lease view."""
+    app = create_app(
+        capability_config=effects_config(),
+        inert_sender=FinalBoundarySender(bound.composer, sealed(bound)),
+    )
+    bound.h.store._lease_epoch_of = lambda run_id: 2
+    public_error(await post(app, {"attempt_id": ATTEMPT}), 400, "deny.malformed_grant")
+    bound.h.store._lease_epoch_of = None
+    public_error(await post(app, {"attempt_id": ATTEMPT}), 503, "deny.verifier_unavailable")
+    untouched(bound)

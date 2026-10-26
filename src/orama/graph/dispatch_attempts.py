@@ -652,6 +652,8 @@ BOUND_SEND_REQUIRED: Final = "effect_grant_bound_send_required"
 """Refusal reason: an attempt with an effect-grant binding may only start through ``begin_bound_send``."""
 GRANT_RECHECK_REQUIRED: Final = "effect_grant_recheck_required"
 """Refusal reason: a bound attempt's send needs the signed-grant recheck (``authority_check``)."""
+LEASE_STALE: Final = "effect.lease_stale"
+"""Refusal reason: the consumer's current lease epoch differs from the one bound with the grant."""
 ISSUER_MISMATCH: Final = "send_authority_issuer_mismatch"
 """Refusal reason: the sender's issuer is not the issuer recorded in the attempt's send authority."""
 
@@ -666,6 +668,7 @@ class SqliteAttemptStore:
         governed: bool = False,
         clock_skew_tolerance: timedelta = timedelta(0),
         abandon_authenticator: IssuerOutcomeAuthenticator | None = None,
+        lease_epoch_of: Callable[[str], int | None] | None = None,
     ) -> None:
         """Open (creating privately) the WAL-mode store and its schema.
 
@@ -680,6 +683,11 @@ class SqliteAttemptStore:
 
         ``abandon_authenticator`` must bind responses to the expected issuer and verify their
         complete contents. Without it, abandonment outcomes are refused before any write.
+
+        ``lease_epoch_of(run_id)`` is the consumer's current lease view. The shared send-time
+        recheck compares it with the lease epoch the effect-grant binding stored for the attempt;
+        without a view (or when it fails) no effect-grant-bound attempt can be sent. The lease
+        epoch is never the fencing epoch and is stored apart from it.
         """
         if (
             not isinstance(clock_skew_tolerance, timedelta)
@@ -688,6 +696,7 @@ class SqliteAttemptStore:
         ):
             raise ValueError("clock_skew_tolerance must be a timedelta from zero to five minutes")
         self._clock_skew = clock_skew_tolerance
+        self._lease_epoch_of = lease_epoch_of
         self._abandon_authenticator = abandon_authenticator
         prepared = prepare_private_store(path)
         self._governed = governed
@@ -1678,7 +1687,9 @@ class SqliteAttemptStore:
         if inert_only and now is None:
             now = datetime.now(UTC)
         if now is not None:
-            clock_refusal = _recheck_send_authority(db, attempt_id, now, self._clock_skew)
+            clock_refusal = _recheck_send_authority(
+                db, attempt_id, now, self._clock_skew, self._lease_epoch_of
+            )
             if clock_refusal is not None:
                 return clock_refusal
         if inert_only:
@@ -1785,16 +1796,53 @@ def _earliest_expiry(*stamps: str) -> str:
     return min(stamps, key=parse_timestamp)
 
 
+def _check_bound_lease(
+    db: sqlite3.Connection, attempt_id: str, lease_epoch_of: Callable[[str], int | None] | None
+) -> None:
+    """Refuse a bound attempt unless the consumer's current lease epoch is the one bound at creation.
+
+    The grant's ``consumer_lease_epoch`` and ``run_id`` were stored with the effect-grant binding.
+    An attempt with no binding has no lease fact and is not checked here. A missing view, a failing
+    view or a non-integer answer refuses (``send_lease_unavailable``); a different epoch refuses
+    (``effect.lease_stale``). The fencing epoch is a separate gate and is never read here.
+    """
+    row = db.execute(
+        "SELECT context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if row is None:
+        return
+    try:
+        context = json.loads(row[0])
+        run_id, bound_epoch = context["run_id"], context["consumer_lease_epoch"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise OutcomeRefused("send_lease_unavailable") from error
+    if lease_epoch_of is None:
+        raise OutcomeRefused("send_lease_unavailable")
+    try:
+        current = lease_epoch_of(run_id)
+    except Exception as error:  # noqa: BLE001 - an unreadable lease view is a deny
+        raise OutcomeRefused("send_lease_unavailable") from error
+    if type(current) is not int or type(bound_epoch) is not int:
+        raise OutcomeRefused("send_lease_unavailable")
+    if current != bound_epoch:
+        raise OutcomeRefused(LEASE_STALE)
+
+
 def _recheck_send_authority(
-    db: sqlite3.Connection, attempt_id: str, now: datetime, clock_skew: timedelta
+    db: sqlite3.Connection,
+    attempt_id: str,
+    now: datetime,
+    clock_skew: timedelta,
+    lease_epoch_of: Callable[[str], int | None] | None = None,
 ) -> str | None:
     """Re-check the durable send authority inside the caller's send transaction.
 
     One shared helper for every send path (``begin_send`` with a time, inert sends, and
     ``begin_bound_send``). It refuses with ``OutcomeRefused`` when the clock is quarantined, the
     attempt has no recorded send authority (a legacy row never gets authority invented for it) or
-    that authority expired, an acknowledged revocation or issuer divergence applies, or the issuer's
-    anchor is quarantined.
+    that authority expired, an acknowledged revocation or issuer divergence applies, the issuer's
+    anchor is quarantined, or (for an effect-grant-bound attempt) the consumer lease epoch is not
+    the bound one (``_check_bound_lease``). It does not depend on any caller-supplied callback.
     """
     _require_aware(now)
     attempt = _load_attempt(db, attempt_id)
@@ -1816,6 +1864,7 @@ def _recheck_send_authority(
     if fact is not None or _diverged(db, authority[0]):
         raise OutcomeRefused("send_authority_revoked")
     dispatch_anchor.assert_not_quarantined(db, authority[0])
+    _check_bound_lease(db, attempt_id, lease_epoch_of)
     return None
 
 

@@ -125,10 +125,11 @@ enablement record, and `ORAMA_GRANT_SERVING` stays unset.
   failed), the answer stays `503 deny.verifier_unavailable` and also carries
   `receipt_ref`, the opaque attempt reference (`attempt_ref_for`) of the
   durable attempt record. It is the same reference the startup reconciliation
-  report lists and the eventual receipt carries. A pre-dispatch deny never
-  carries a `receipt_ref`, so a caller can tell the two apart; an in-doubt
-  attempt is reconciled by an operator and never retried. No public code is
-  added.
+  report lists and the eventual receipt carries. A pre-dispatch deny that left no
+  durable record carries no `receipt_ref`; a refusal that wrote the terminal
+  refusal record carries that record's reference and replays with its stored
+  code. An in-doubt attempt is reconciled by an operator and never retried. No
+  public code is added.
 - The authenticated principal is the single shared control-plane bearer's
   principal. Checking it against the attempt's bound principal proves that the
   caller holds that bearer, not per-caller ownership of the attempt.
@@ -161,15 +162,25 @@ behaviour stricter.
   A refusal and every replay of it answer with the stored `deny.*` code and
   the `receipt_ref` nested inside the `error` object. A caller that is not the
   attempt's principal never learns of the record.
-- The lease epoch (the grant's `consumer_lease_epoch`) and the fencing epoch
-  (the attempt store's mark and stamp) are separate gates with separate
-  storage. The composer's send-time recheck compares the grant's lease epoch
-  with the consumer's current lease (an injected view; none wired means no bound
-  send) inside the send transaction; the final boundary enforces the fencing
-  epoch. A stale lease refuses with a current fencing epoch, and a stale fencing
-  epoch refuses with a current lease.
-- The effect-interop tests get Phylax through the test-only `effect-grant-test`
-  extra, pinned to the commit in `requirements/compatibility-phylax-effect-grant.txt`.
+- The lease epoch (the grant's `consumer_lease_epoch`, stored with the grant
+  binding) and the fencing epoch (the attempt store's mark and stamp) are
+  separate gates with separate storage. The lease check lives in the store's one
+  shared send recheck (`_recheck_send_authority`), against a lease view injected
+  into the store (none wired, or a failing view, means no bound send), so no
+  `authority_check` callback can skip it; the final boundary enforces the
+  fencing epoch. A stale lease refuses with a current fencing epoch, and a stale
+  fencing epoch refuses with a current lease. `effect.lease_stale` maps to
+  `deny.malformed_grant` and an unavailable lease view to
+  `deny.verifier_unavailable`.
+- A replay of a refused attempt is answered from the record right after the
+  principal check, before any signed-grant, expiry, lease or verifier recheck.
+- `attempt_refusals` keeps the internal `kind`, `rule` and `reason` columns for
+  audit only; they are never part of a response, a receipt or a public record.
+- The effect-interop tests get Phylax through `requirements/effect-grant-test.txt`
+  (installed with `pip install '.[dev]' -r requirements/effect-grant-test.txt`),
+  pinned to the commit in `requirements/compatibility-phylax-effect-grant.txt`. It
+  is not a package extra and `generation-consumers.json` does not scan it;
+  registering the lane there needs an operator-signed registry receipt (not done).
 - Approval and reconciliation-ticket expiry compare parsed instants, never
   formatted text; an unreadable stored expiry refuses.
 - `/effects/inert` asks the `effects` capability when it is installed and

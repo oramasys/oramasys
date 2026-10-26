@@ -39,7 +39,9 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
         ),
         authenticated_principal="principal-1", operator_evidence_ref="trusted-ui://1",
     )
-    store = SqliteAttemptStore(tmp_path / "attempts.sqlite", governed=True)
+    store = SqliteAttemptStore(
+        tmp_path / "attempts.sqlite", governed=True, lease_epoch_of=lambda run_id: 3
+    )
     TrustedEffectGrantComposer(authority).create_attempt(
         store, attempt_id="attempt-1", reservation_id="reservation-1", wire=grant.to_wire(),
         principal="principal-1", run_id="run-1", operation_id="operation-1",
@@ -53,7 +55,7 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     from tests.test_dispatch_attempts import FakeGates, FakeRevocations
     from tests.test_effect_fencing import Operator
     from tests.test_final_boundary import Approvals
-    composer = TrustedEffectGrantComposer(authority, lease_epoch_of=lambda run_id: 3)
+    composer = TrustedEffectGrantComposer(authority)
     # The canonical send path: the composer only verifies and binds; the send itself goes through
     # the sealed final boundary (effects switch, revocation view and approval verifier are doubles).
     driver = SealedInertDriver(

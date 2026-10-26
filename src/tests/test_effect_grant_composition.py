@@ -190,9 +190,9 @@ def bound_harness(
 ) -> Bound:
     """Create the attempt through the composer, then reserve, authorize and approve it."""
     path = tmp_path / "bound.sqlite"
-    store = SqliteAttemptStore(path, governed=True)
+    store = SqliteAttemptStore(path, governed=True, lease_epoch_of=lambda run_id: LEASE)
     verifier = FixedVerifier(grant or projection(principal))
-    composer = TrustedEffectGrantComposer(verifier, clock=lambda: NOW, lease_epoch_of=lambda run_id: LEASE)
+    composer = TrustedEffectGrantComposer(verifier, clock=lambda: NOW)
     composer.create_attempt(
         store, attempt_id=ATTEMPT, reservation_id=RESERVATION, wire=WIRE, principal=principal,
         run_id="run-1", operation_id=PERMIT["operation_id"], request_digest=PERMIT["request_digest"],
@@ -432,9 +432,7 @@ def test_an_expired_or_non_inert_grant_refuses(tmp_path: Path) -> None:
     expired = bound_harness(tmp_path / "expired")
     real = bound_harness(tmp_path / "real", grant=projection(effect_class="external.effect"))
     try:
-        late = TrustedEffectGrantComposer(
-            expired.verifier, clock=lambda: NOW + timedelta(hours=2), lease_epoch_of=lambda run_id: LEASE
-        )
+        late = TrustedEffectGrantComposer(expired.verifier, clock=lambda: NOW + timedelta(hours=2))
         with pytest.raises(EffectGrantRefused, match="grant.expired"):
             late.send(sealed(expired), ATTEMPT, authenticated_principal=PRINCIPAL)
         with pytest.raises(EffectGrantRefused, match=BINDING_MISMATCH):
@@ -544,8 +542,12 @@ def test_final_boundary_ports_must_be_complete() -> None:
 
 
 def composer_with(b: Bound, lease_epoch_of) -> TrustedEffectGrantComposer:
-    """Build another composer over the bound attempt's verifier with its own lease view."""
-    return TrustedEffectGrantComposer(b.verifier, clock=lambda: NOW, lease_epoch_of=lease_epoch_of)
+    """Give the bound attempt's store its own lease view and return the (unchanged) composer.
+
+    The lease check lives in the store's shared send recheck, not in the composer.
+    """
+    b.h.store._lease_epoch_of = lease_epoch_of
+    return b.composer
 
 
 def test_a_stale_lease_with_a_current_fencing_epoch_refuses_and_sends_nothing(bound: Bound) -> None:
@@ -553,7 +555,7 @@ def test_a_stale_lease_with_a_current_fencing_epoch_refuses_and_sends_nothing(bo
     store = bound.h.store
     assert store.current_fencing_epoch() == store.fencing_epoch(ATTEMPT) == 5
     sim = Simulation()
-    with pytest.raises(EffectGrantRefused, match="effect.lease_stale"):
+    with pytest.raises(OutcomeRefused, match="effect.lease_stale"):
         composer_with(bound, lambda run_id: 2).send(
             sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL
         )
@@ -588,7 +590,7 @@ def test_a_current_lease_and_a_current_fencing_epoch_send_once(bound: Bound) -> 
 def test_the_fencing_epoch_never_stands_in_for_the_lease_epoch(bound: Bound) -> None:
     """A lease view answering the fencing epoch (5) is not the grant's lease epoch (1): refused."""
     assert bound.h.store.current_fencing_epoch() == 5
-    with pytest.raises(EffectGrantRefused, match="effect.lease_stale"):
+    with pytest.raises(OutcomeRefused, match="effect.lease_stale"):
         composer_with(bound, lambda run_id: 5).send(
             sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL
         )
@@ -612,23 +614,43 @@ def test_a_missing_or_failing_lease_view_refuses_closed(bound: Bound) -> None:
         raise OSError("lease store unreadable")
 
     for view in (None, broken, lambda run_id: None, lambda run_id: True):
-        with pytest.raises(EffectGrantRefused) as excinfo:
+        with pytest.raises(OutcomeRefused) as excinfo:
             composer_with(bound, view).send(sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL)
-        assert excinfo.value.code in ("verifier.unavailable", "effect.lease_stale")
+        assert excinfo.value.reason == "send_lease_unavailable"
     untouched(bound)
 
 
-def test_a_lease_lost_inside_the_send_transaction_rolls_the_send_back(bound: Bound) -> None:
-    """The lease is read again inside the send transaction; losing it there leaves nothing behind."""
-    answers = iter([LEASE, 2])
+def test_a_no_op_authority_check_cannot_bypass_the_lease(bound: Bound) -> None:
+    """The lease check lives in the store's shared recheck, not in the composer's callback."""
+    composer_with(bound, lambda run_id: 2)  # the lease moved on; the grant still says 1
+    binding, _recheck = bound.composer.bound_binding(
+        bound.h.store, ATTEMPT, authenticated_principal=PRINCIPAL
+    )
+    envelope = seal(
+        binding.attempt_id, binding.operation_digest, binding.epoch, binding.expires_at,
+        binding.target,
+    )
     sim = Simulation()
-    with pytest.raises(EffectGrantRefused, match="effect.lease_stale"):
-        composer_with(bound, lambda run_id: next(answers)).send(
-            sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL
+    with pytest.raises(OutcomeRefused, match="effect.lease_stale"):
+        sealed(bound, sim=sim).send(
+            envelope.raw, envelope.digest, principal=PRINCIPAL, authority_check=lambda: None
         )
     assert sim.calls == 0
     assert bound.h.store.approval_state(ATTEMPT) == "granted"
     untouched(bound)
+
+
+def test_the_exact_grant_expiry_instant_refuses(bound: Bound) -> None:
+    """``now == expires_at`` is expired: the boundary is inclusive on the refusing side."""
+    expires = bound.verifier.projection.expires_at
+    at_expiry = TrustedEffectGrantComposer(bound.verifier, clock=lambda: expires)
+    with pytest.raises(EffectGrantRefused, match="grant.expired"):
+        at_expiry.bound_binding(bound.h.store, ATTEMPT, authenticated_principal=PRINCIPAL)
+    just_before = TrustedEffectGrantComposer(
+        bound.verifier, clock=lambda: expires - timedelta(microseconds=1)
+    )
+    binding, _ = just_before.bound_binding(bound.h.store, ATTEMPT, authenticated_principal=PRINCIPAL)
+    assert binding.attempt_id == ATTEMPT
 
 
 # ------------------------------------------- the refusal record carries the public fields
@@ -671,6 +693,35 @@ def test_a_replay_of_a_refused_attempt_returns_the_stored_code_and_receipt_ref(b
             sending(ATTEMPT, PRINCIPAL)
         assert (again.value.code, again.value.receipt_ref) == (first.refusal_code, first.receipt_ref)
     assert approvals.seen == [] and sim.calls == 0
+    assert bound.h.store.terminal_refusal(ATTEMPT) == first
+    untouched(bound)
+
+
+def test_a_replay_is_answered_from_the_record_before_any_recheck(bound: Bound) -> None:
+    """Expiry, revocation, a lease change and a verifier outage cannot change a stored refusal."""
+    refuse_once(bound)
+    first = bound.h.store.terminal_refusal(ATTEMPT)
+    expires = bound.verifier.projection.expires_at
+
+    def outage(wire: bytes):
+        """Fail as an unreachable verifier would."""
+        raise OSError("verifier down")
+
+    scenarios = {
+        "expired": lambda: setattr(bound.composer, "_clock", lambda: expires + timedelta(hours=1)),
+        "revoked": lambda: setattr(bound.verifier, "revoked", True),
+        "lease_changed": lambda: composer_with(bound, lambda run_id: 99),
+        "verifier_outage": lambda: setattr(bound.verifier, "verify", outage),
+    }
+    for name, change in scenarios.items():
+        change()
+        sim = Simulation()
+        with pytest.raises(AttemptRefused) as again:
+            FinalBoundarySender(bound.composer, sealed(bound, sim=sim))(ATTEMPT, PRINCIPAL)
+        assert (again.value.code, again.value.receipt_ref) == (
+            first.refusal_code, first.receipt_ref
+        ), name
+        assert sim.calls == 0
     assert bound.h.store.terminal_refusal(ATTEMPT) == first
     untouched(bound)
 

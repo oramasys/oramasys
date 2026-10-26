@@ -28,7 +28,8 @@ answer is still ``503 deny.verifier_unavailable`` and additionally carries ``rec
 opaque reference of the durable attempt record (``attempt_ref_for``; the same reference the startup
 reconciliation report lists and the eventual receipt carries). That is the contract's "receipt_ref
 where a durable record exists": it lets the caller tell an in-doubt dispatch, which must be
-reconciled by an operator and never retried, from a pre-dispatch deny, which never carries one.
+reconciled by an operator and never retried, from a pre-dispatch deny that left no record, which
+carries none (a refusal that wrote the terminal refusal record carries that record's reference).
 """
 from __future__ import annotations
 

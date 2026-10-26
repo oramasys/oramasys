@@ -23,7 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install immutable candidate and noneditable consumer
         run: |
-          python -m pip install '.[dev,effect-grant-test]'
+          python -m pip install '.[dev]' -r requirements/effect-grant-test.txt
           python -m pip check
       - name: Verify installed producer provenance
         working-directory: ${{ runner.temp }}
