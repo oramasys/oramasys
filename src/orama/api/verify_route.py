@@ -24,6 +24,7 @@ from orama.api.capabilities import CapabilityView
 from orama.api.denial_audit import DenialAuditLog
 from orama.api.public_errors import (
     DENY_MALFORMED_GRANT,
+    DENY_STATUS,
     DENY_UNAUTHORIZED_CALLER,
     DENY_VERIFIER_UNAVAILABLE,
     SERVING_NOT_READY,
@@ -44,15 +45,7 @@ VERIFY_PATH: Final = "/grants/verify"
 REVOCATION_MAX_AGE: Final = timedelta(seconds=60)
 MAX_BODY_BYTES: Final = 65_536
 _BODY_LIMIT: Final = MAX_BODY_BYTES + 64
-_STATUS: Final[dict[str, int]] = {
-    "deny.malformed_grant": 400,
-    "deny.unauthorized_caller": 401,
-    "deny.unknown_key": 403,
-    "deny.revoked_grant": 403,
-    "deny.missing_capability_record": 403,
-    "deny.revocation_stale": 503,
-    "deny.verifier_unavailable": 503,
-}
+_STATUS: Final[dict[str, int]] = DENY_STATUS
 
 
 class _Denied(Exception):

@@ -2,8 +2,9 @@
 
 Every body is exactly ``{"error": {"code", "correlation_id"}}`` plus ``"receipt_ref"`` inside the
 error object when a durable audit record exists. Nothing else: no grant ids, key ids, paths or
-policy internals. Internal verifier reasons are mapped to the closed public set here; an
-unmapped reason is reported as ``deny.verifier_unavailable`` (deny, never allow).
+policy internals. Internal verifier reasons, and the reasons of the effect send path, are mapped
+to the closed public set here; an unmapped reason is reported as ``deny.verifier_unavailable``
+(deny, never allow). ``DENY_STATUS`` is the one HTTP status table for the public denial codes.
 """
 from __future__ import annotations
 
@@ -46,9 +47,77 @@ _INTERNAL_TO_PUBLIC: Final[dict[str, str]] = {
 }
 
 
+DENY_STATUS: Final[dict[str, int]] = {
+    DENY_MALFORMED_GRANT: 400,
+    DENY_UNAUTHORIZED_CALLER: 401,
+    DENY_UNKNOWN_KEY: 403,
+    DENY_REVOKED_GRANT: 403,
+    DENY_MISSING_CAPABILITY_RECORD: 403,
+    DENY_REVOCATION_STALE: 503,
+    DENY_VERIFIER_UNAVAILABLE: 503,
+}
+
+# Internal reasons of the effect send path (``POST /effects/inert``: the grant composer, the sealed
+# final boundary and the attempt store) mapped to the closed public set. Contract section 3 has no
+# finer code, so:
+# * a caller that is not the attempt's bound principal is ``deny.unauthorized_caller``;
+# * any binding, expiry, approval, replay or envelope difference (the attempt as presented cannot
+#   be authorized) is ``deny.malformed_grant``;
+# * any revocation fact is ``deny.revoked_grant``;
+# * an attempt refused because the effects capability was not effective is
+#   ``deny.missing_capability_record``;
+# * a verifier, clock or outcome that cannot be vouched for is ``deny.verifier_unavailable``,
+#   which is also the answer for every unmapped reason (deny, never allow).
+# The verifier codes in ``_INTERNAL_TO_PUBLIC`` apply unchanged.
+_EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
+    "effect.principal_mismatch": DENY_UNAUTHORIZED_CALLER,
+    "principal_mismatch": DENY_UNAUTHORIZED_CALLER,
+    **{
+        reason: DENY_MALFORMED_GRANT
+        for reason in (
+            "effect.binding_mismatch", "effect_grant_binding_missing", "attempt_not_authorized",
+            "attempt_refused", "send_already_started", "operation_digest_mismatch",
+            "target_mismatch", "epoch_mismatch", "expiry_mismatch", "epoch_stale", "expired",
+            "approval_not_verified", "approval_undeclared", "approval_missing",
+            "approval_consumed", "approval_mismatch", "approval_expired", "inert_scope_required",
+            "send_precondition_failed", "send_authority_expired_or_missing",
+            "replay_envelope_mismatch",
+        )
+    },
+    **{
+        reason: DENY_REVOKED_GRANT
+        for reason in (
+            "grant_revoked", "issuer_revoked", "approval_revoked", "cascade_listed",
+            "send_authority_revoked",
+        )
+    },
+    "effects_denied": DENY_MISSING_CAPABILITY_RECORD,
+    **{
+        reason: DENY_VERIFIER_UNAVAILABLE
+        for reason in (
+            "approval_verifier_missing", "approval_verifier_unavailable",
+            "send_clock_quarantined", "outcome_unknown", "evidence_invalid",
+        )
+    },
+}
+
+
 def public_denial_code(internal_reason: str) -> str:
     """Map a verifier-internal reason to the closed public set; unknown reasons deny as unavailable."""
     return _INTERNAL_TO_PUBLIC.get(internal_reason, DENY_VERIFIER_UNAVAILABLE)
+
+
+def public_effect_denial_code(internal_reason: str) -> str:
+    """Map an effect send-path reason to the closed public set (see ``_EFFECT_TO_PUBLIC``).
+
+    Sealed-envelope refusals (``envelope_*``) are ``deny.malformed_grant``; verifier codes map as in
+    ``public_denial_code``; anything else is ``deny.verifier_unavailable``.
+    """
+    if internal_reason in _EFFECT_TO_PUBLIC:
+        return _EFFECT_TO_PUBLIC[internal_reason]
+    if internal_reason.startswith("envelope_"):
+        return DENY_MALFORMED_GRANT
+    return public_denial_code(internal_reason)
 
 
 def new_correlation_id() -> str:
