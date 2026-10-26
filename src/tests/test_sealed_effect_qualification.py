@@ -16,6 +16,7 @@ import pytest
 from orama.graph.dispatch_attempts import SqliteAttemptStore
 from orama.graph.effect_reconciliation import startup_reconciliation_report
 from orama.graph.final_boundary import FinalBoundaryRefused
+from orama.graph.sealed_inert_driver import SealedDriverRefused
 from tests.test_dispatch_attempts import ATTEMPT, ISSUER, NOW, Harness
 from tests.test_effect_fencing import Operator
 from tests.test_final_boundary import binding
@@ -120,7 +121,7 @@ def test_crash_after_receipt_write_or_publication_reconciles_to_the_durable_rece
         assert d.publish_pending() == (0 if stored.published_at else 1)
         assert h.store.receipt(ATTEMPT).published_at is not None
         assert h.store._db.execute("SELECT count(*) FROM effect_receipts").fetchone() == (1,)
-        with pytest.raises(Exception):
+        with pytest.raises(SealedDriverRefused, match="replay_envelope_mismatch"):
             send(d, envelope(epoch=6))
         assert sim.calls == 0
     finally:

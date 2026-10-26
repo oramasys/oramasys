@@ -359,6 +359,13 @@ def test_environment_unreadable_path_is_reported_unreadable(tmp_path: Path) -> N
     assert read_capability_record(cfg.record).record_state == "capability.record_unreadable"
 
 
+def test_deeply_nested_record_is_reported_unreadable() -> None:
+    """A bounded but recursively malformed record denies instead of escaping startup."""
+    view = read_capability_record(b"[" * 2_000)
+    all_denied(view)
+    assert view.record_state == "capability.record_unreadable"
+
+
 def test_environment_record_file_is_read_without_enabling_anything(tmp_path: Path) -> None:
     """A valid all-false record file loads; the digests come from labels only."""
     path = tmp_path / "record.json"

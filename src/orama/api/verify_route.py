@@ -97,9 +97,9 @@ async def _read_bounded_body(request: Request) -> bytes:
             raise _Denied(DENY_MALFORMED_GRANT) from None
     received = bytearray()
     async for chunk in request.stream():
-        received.extend(chunk)
-        if len(received) > _BODY_LIMIT:
+        if len(received) + len(chunk) > _BODY_LIMIT:
             raise _Denied(DENY_MALFORMED_GRANT)
+        received.extend(chunk)
     return bytes(received)
 
 

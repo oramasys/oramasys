@@ -105,7 +105,7 @@ def build_app(
             clock=clock,
         )
         sender = FinalBoundarySender(TrustedEffectGrantComposer(verifier, clock=clock), driver)
-        app = create_app(capability_config=config, inert_sender=sender)
+        app = create_app(capability_config=config, inert_sender=sender, attempt_store=store)
     except BaseException:
         close()
         raise
