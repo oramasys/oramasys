@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from orama.graph.dispatch_attempts import AttemptStateError, SqliteAttemptStore
+from orama.graph.dispatch_attempts import (
+    BOUND_SEND_REQUIRED,
+    GRANT_RECHECK_REQUIRED,
+    AttemptStateError,
+    SqliteAttemptStore,
+)
 from orama.graph.effect_grant_composition import (
     BINDING_MISMATCH,
     PRINCIPAL_MISMATCH,
@@ -18,9 +23,11 @@ from orama.graph.effect_grant_composition import (
     TrustedEffectGrantComposer,
     VerifiedEffectGrant,
 )
+from orama.graph.effect_outcomes import OutcomeRefused
 from orama.graph.effect_receipts import attempt_ref_for
 from orama.graph.final_boundary import FinalBoundaryBinding, FinalBoundaryRefused
 from orama.graph.inert_effect_driver import InertEffectDriver
+from orama.graph.sealed_envelope import seal
 from orama.graph.sealed_inert_driver import INERT_EVIDENCE, SealedInertDriver
 from tests.test_dispatch_attempts import (
     ATTEMPT,
@@ -298,6 +305,51 @@ def test_the_plain_inert_driver_is_not_a_send_path(bound: Bound) -> None:
     with pytest.raises(TypeError):
         FinalBoundarySender(object(), sealed(bound))  # type: ignore[arg-type]
     untouched(bound)
+
+
+def test_a_composed_attempt_cannot_be_sent_by_the_plain_store_send(bound: Bound) -> None:
+    """The single send path is enforced by the store, not only documented.
+
+    Every plain ``begin_send`` form and the plain ``InertEffectDriver`` refuse an attempt that has
+    an effect-grant binding. The refusal writes nothing (no marker, no terminal refusal, approval
+    untouched), so the canonical final-boundary send still works afterwards.
+    """
+    store = bound.h.store
+    plain = InertEffectDriver(store, clock=lambda: NOW)
+    for start in (
+        lambda: store.begin_send(ATTEMPT),
+        lambda: store.begin_send(ATTEMPT, now=NOW),
+        lambda: store.begin_send(ATTEMPT, inert_only=True, now=NOW),
+        lambda: plain.send(ATTEMPT),
+    ):
+        with pytest.raises(OutcomeRefused, match=BOUND_SEND_REQUIRED):
+            start()
+    untouched(bound)
+    assert store.terminal_refusal(ATTEMPT) is None
+    assert store.approval_state(ATTEMPT) == "granted"
+    receipt = FinalBoundarySender(bound.composer, sealed(bound))(ATTEMPT, PRINCIPAL)
+    assert receipt.outcome == "confirmed"
+
+
+def test_a_composed_attempt_needs_the_signed_grant_recheck_in_its_send(bound: Bound) -> None:
+    """``begin_bound_send`` without the signed-grant recheck refuses a composed attempt.
+
+    The sealed driver used on its own (no composer, so no ``authority_check``) and a direct store
+    call both refuse before the approval is consumed or the marker set; nothing is recorded.
+    """
+    sim = Simulation()
+    env = seal(ATTEMPT, "sha256:" + SCOPE.operation_digest, 5, LIVE_UNTIL, INERT)
+    with pytest.raises(FinalBoundaryRefused, match=GRANT_RECHECK_REQUIRED) as excinfo:
+        sealed(bound, sim=sim).send(env.raw, env.digest, principal=PRINCIPAL)
+    assert not excinfo.value.terminal and sim.calls == 0
+    with pytest.raises(FinalBoundaryRefused, match=GRANT_RECHECK_REQUIRED):
+        bound.h.store.begin_bound_send(final_binding(), NOW, issuer_id=ISSUER)
+    untouched(bound)
+    assert bound.h.store.terminal_refusal(ATTEMPT) is None
+    assert bound.h.store.approval_state(ATTEMPT) == "granted"
+    assert bound.h.store._db.execute("SELECT count(*) FROM send_envelopes").fetchone() == (0,)
+    receipt = FinalBoundarySender(bound.composer, sealed(bound))(ATTEMPT, PRINCIPAL)
+    assert receipt.outcome == "confirmed"
 
 
 def test_a_signed_grant_revoked_during_the_boundary_stops_the_send_in_its_transaction(

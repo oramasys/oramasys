@@ -640,6 +640,20 @@ def _bind_effect_grant_in(
     db.execute("INSERT INTO effect_grant_bindings VALUES (?, ?, ?)", (attempt_id, wire, encoded))
 
 
+def _effect_grant_bound(db: sqlite3.Connection, attempt_id: str) -> bool:
+    """Return True when the attempt carries a verified effect-grant binding row."""
+    row = db.execute(
+        "SELECT 1 FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    return row is not None
+
+
+BOUND_SEND_REQUIRED: Final = "effect_grant_bound_send_required"
+"""Refusal reason: an attempt with an effect-grant binding may only start through ``begin_bound_send``."""
+GRANT_RECHECK_REQUIRED: Final = "effect_grant_recheck_required"
+"""Refusal reason: a bound attempt's send needs the signed-grant recheck (``authority_check``)."""
+
+
 class SqliteAttemptStore:
     """Durable consumer attempt store; every write is one ``BEGIN IMMEDIATE`` transaction."""
 
@@ -1462,10 +1476,17 @@ class SqliteAttemptStore:
 
         When ``now`` is given (and always for ``inert_only``, which defaults it to the wall clock)
         the durable send authority is re-checked inside the send transaction.
+
+        An attempt with an effect-grant binding (one the grant composer created) is refused with
+        ``effect_grant_bound_send_required``: its only send path is ``begin_bound_send`` through
+        the sealed final boundary. The refusal is decided inside the send transaction before any
+        write, so it records nothing, consumes nothing and leaves the canonical path available.
         """
         if inert_only and now is None:
             now = datetime.now(UTC)
         with self._immediate() as db:
+            if _effect_grant_bound(db, attempt_id):
+                raise OutcomeRefused(BOUND_SEND_REQUIRED)
             self._begin_send_in(db, attempt_id, inert_only, now)
 
     def begin_bound_send(
@@ -1494,11 +1515,15 @@ class SqliteAttemptStore:
         ``authority_check`` (the composer's signed-grant re-verification) is called last, after the
         send marker is written but before the transaction commits; if it raises, the transaction
         rolls back, so no send marker, consumed approval or envelope record survives. It must not
-        call back into this store.
+        call back into this store. For an attempt with an effect-grant binding the recheck is
+        mandatory: without ``authority_check`` the send is refused (``effect_grant_recheck_required``,
+        not terminal) before anything is consumed or written.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
         with self._immediate() as db:
+            if authority_check is None and _effect_grant_bound(db, binding.attempt_id):
+                raise FinalBoundaryRefused(GRANT_RECHECK_REQUIRED)
             at = now
             if clock is not None:
                 fresh = clock()

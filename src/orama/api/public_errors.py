@@ -81,7 +81,7 @@ _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
             "approval_not_verified", "approval_undeclared", "approval_missing",
             "approval_consumed", "approval_mismatch", "approval_expired", "inert_scope_required",
             "send_precondition_failed", "send_authority_expired_or_missing",
-            "replay_envelope_mismatch",
+            "replay_envelope_mismatch", "effect_grant_bound_send_required",
         )
     },
     **{
@@ -97,6 +97,7 @@ _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
         for reason in (
             "approval_verifier_missing", "approval_verifier_unavailable",
             "send_clock_quarantined", "outcome_unknown", "evidence_invalid",
+            "effect_grant_recheck_required",
         )
     },
 }

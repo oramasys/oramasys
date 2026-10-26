@@ -8,6 +8,8 @@ be retried automatically.
 This is a store-level primitive only. It is not a send path for composed grants and
 it is never reachable from ``POST /effects/inert``: that route accepts only the
 ``FinalBoundarySender`` (verify-and-bind composer plus the sealed final boundary).
+The store enforces it: ``begin_send`` refuses any attempt that has an effect-grant
+binding (``effect_grant_bound_send_required``), so this driver cannot send one.
 """
 from __future__ import annotations
 

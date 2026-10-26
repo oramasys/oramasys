@@ -223,6 +223,8 @@ async def test_a_failed_bearer_on_the_live_route_gets_the_public_denial(bound: B
         ("grant.schema_unsupported", "deny.malformed_grant"),
         ("approval_missing", "deny.malformed_grant"),
         ("send_already_started", "deny.malformed_grant"),
+        ("effect_grant_bound_send_required", "deny.malformed_grant"),
+        ("effect_grant_recheck_required", "deny.verifier_unavailable"),
         ("envelope_target", "deny.malformed_grant"),
         ("grant.revoked", "deny.revoked_grant"),
         ("send_authority_revoked", "deny.revoked_grant"),

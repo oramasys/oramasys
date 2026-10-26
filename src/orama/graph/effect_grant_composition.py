@@ -12,7 +12,10 @@ the send itself always goes through the sealed final boundary
 ``SealedInertDriver``). The signed grant is re-verified a second time inside the
 send transaction, so a revocation cannot slip between the check and the send
 marker. ``FinalBoundarySender`` is the only sender the HTTP route accepts; the
-plain ``InertEffectDriver`` is never reachable from it.
+plain ``InertEffectDriver`` is never reachable from it. The store enforces the
+single path in code: an attempt with an effect-grant binding is refused by the
+plain ``begin_send``, and ``begin_bound_send`` refuses it without the signed-grant
+recheck (``authority_check``).
 
 Internal refusal codes are closed. Besides the verifier's own codes there are two
 consumer-side codes, mapped to the public vocabulary in ``orama.api.public_errors``:
