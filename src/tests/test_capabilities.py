@@ -90,10 +90,11 @@ def test_missing_record_denies_every_bit_with_a_reason() -> None:
         (b"\xff\xfe", "capability.record_unreadable"),
         (b"not json", "capability.record_unreadable"),
         (b"x" * 70_000, "capability.record_unreadable"),
+        (b"[" * 10_000, "capability.record_unreadable"),
         (b"[1, 2]", "capability.record_malformed"),
         (b"null", "capability.record_malformed"),
     ],
-    ids=["bad-utf8", "not-json", "oversize", "array", "null"],
+    ids=["bad-utf8", "not-json", "oversize", "recursive", "array", "null"],
 )
 def test_unreadable_or_non_object_record_denies(raw: bytes, reason: str) -> None:
     """Undecodable, oversize or non-object input denies every bit."""
