@@ -14,6 +14,7 @@ from orama.graph.effect_outcomes import OutcomeRefused
 from orama.graph.inert_effect_driver import InertEffectDriver
 from tests.test_effect_seam import ATTEMPT, SCOPE, authorize
 from tests.test_inert_effect_integration import inert_harness
+from tests.test_dispatch_attempts import NOW
 
 CRASH_EXIT = 73
 
@@ -43,9 +44,9 @@ def _crash_worker(directory: Path, boundary: str) -> None:
     if boundary == "after_authorization":
         os._exit(CRASH_EXIT)
     if boundary == "after_begin_send":
-        h.store.begin_send(ATTEMPT, inert_only=True)
+        h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
         os._exit(CRASH_EXIT)
-    InertEffectDriver(h.store).send(ATTEMPT)
+    InertEffectDriver(h.store, clock=lambda: NOW).send(ATTEMPT)
     if boundary == "after_outcome":
         os._exit(CRASH_EXIT)
     raise AssertionError(f"crash boundary was not reached: {boundary}")
@@ -85,7 +86,7 @@ def test_inert_process_crash_preserves_atomicity_and_single_use(
         if boundary in {"after_authorization", "during_begin_send"}:
             assert row["send_started"] == 0
             assert row["outcome"] == "unknown"
-            assert InertEffectDriver(store).send(ATTEMPT) == "inert-simulation:v1"
+            assert InertEffectDriver(store, clock=lambda: NOW).send(ATTEMPT) == "inert-simulation:v1"
         else:
             assert row["send_started"] == 1
             assert row["outcome"] == (
@@ -94,7 +95,7 @@ def test_inert_process_crash_preserves_atomicity_and_single_use(
             if row["outcome"] == "unknown":
                 assert row["outcome_evidence"] is None
         with pytest.raises(OutcomeRefused):
-            InertEffectDriver(store).send(ATTEMPT)
+            InertEffectDriver(store, clock=lambda: NOW).send(ATTEMPT)
     finally:
         store.close()
 
@@ -106,10 +107,11 @@ def test_two_processes_cannot_send_the_same_inert_attempt(tmp_path: Path) -> Non
     source = (
         "import sys; from orama.graph.dispatch_attempts import SqliteAttemptStore; "
         "from orama.graph.inert_effect_driver import InertEffectDriver; "
+        "from tests.test_dispatch_attempts import NOW; "
         "from orama.graph.effect_outcomes import OutcomeRefused; "
         "store = SqliteAttemptStore(sys.argv[1], governed=True)\n"
         "try:\n"
-        "    InertEffectDriver(store).send(sys.argv[2])\n"
+        "    InertEffectDriver(store, clock=lambda: NOW).send(sys.argv[2])\n"
         "    print('sent')\n"
         "except OutcomeRefused:\n"
         "    print('refused')\n"

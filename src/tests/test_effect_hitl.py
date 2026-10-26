@@ -45,7 +45,7 @@ def approve(h: Harness, **changes) -> str:
 
 def in_doubt(h: Harness) -> None:
     """Put the attempt in the dispatched-but-unproven state."""
-    h.store.begin_send(ATTEMPT, inert_only=True)
+    h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
 
 
 # ---------------------------------------------------------------- approvals
@@ -138,8 +138,8 @@ def test_consumption_and_the_send_marker_commit_together(h: Harness, monkeypatch
     """If the send precondition fails the approval is rolled back unconsumed."""
     approve(h)
 
-    def refuse(db, attempt_id, inert_only):
-        """Refuse the send precondition."""
+    def refuse(db, attempt_id, inert_only, now=None):
+        """Refuse the send precondition (same signature as the store's ``_begin_send_in``)."""
         raise OutcomeRefused("send_precondition_failed")
 
     monkeypatch.setattr(h.store, "_begin_send_in", refuse)

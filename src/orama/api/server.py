@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 from orama.api.authz import authenticated_control_plane_principal, install_authz
 from orama.api.capabilities import CapabilityConfig, evaluate
 from orama.api.denial_audit import DenialAuditLog
@@ -72,6 +73,12 @@ def _reconciliation_public(report: ReconciliationReport | None) -> dict[str, obj
     return {"reconciliation": {"in_doubt": len(report.in_doubt), "unsent": report.unsent}}
 
 
+class InertSendRequest(BaseModel):
+    """Identify an already prepared attempt; authority and scope are server-owned."""
+
+    attempt_id: str = Field(min_length=1, max_length=1024)
+
+
 def create_app(
     *,
     runner: GraphRunner | None = None,
@@ -85,6 +92,7 @@ def create_app(
     denial_audit: DenialAuditLog | None = None,
     verify_clock: Callable[[], datetime] | None = None,
     attempt_store: object | None = None,
+    inert_sender: Callable[[str, str], str] | None = None,
 ) -> FastAPI:
     """Build the API with an explicit graph runner; absent admission refuses work.
 
@@ -138,6 +146,20 @@ def create_app(
     app.include_router(knowledge_router)
     active_runner = runner or UnconfiguredGraphRunner()
     active_graph = graph if compiled_graph is None else compiled_graph
+
+    @app.post("/effects/inert")
+    async def send_inert(req: InertSendRequest, request: Request) -> dict[str, str]:
+        """Send only a prebound inert attempt as the authenticated control-plane caller."""
+        principal = authenticated_control_plane_principal(request)
+        if principal is None:
+            raise HTTPException(status_code=401, detail={"code": "authentication_required"})
+        if inert_sender is None:
+            raise HTTPException(status_code=503, detail={"code": "effects_unavailable"})
+        try:
+            receipt = await asyncio.to_thread(inert_sender, req.attempt_id, principal)
+        except Exception as error:
+            raise HTTPException(status_code=503, detail={"code": "effects_unavailable"}) from error
+        return {"receipt": receipt}
 
     @app.post("/run", response_model=RunResponse)
     async def run(req: RunRequest, request: Request) -> RunResponse:

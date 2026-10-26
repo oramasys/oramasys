@@ -1,0 +1,36 @@
+name: effect grant composition candidate
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  effect-grant-composition:
+    env:
+      ORAMA_EFFECT_INTEROP_REQUIRED: "1"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install immutable candidate and noneditable consumer
+        run: |
+          PIN="$(tr -d '[:space:]' < requirements/compatibility-phylax-effect-grant.txt)"
+          [[ "$PIN" =~ ^[0-9a-f]{40}$ ]]
+          python -m pip install '.[dev]' "oramasys-phylax @ git+https://github.com/oramasys/phylax.git@$PIN"
+          python -m pip check
+      - name: Verify installed producer provenance
+        working-directory: ${{ runner.temp }}
+        run: python -I "$GITHUB_WORKSPACE/scripts/verify_phylax_pin.py" "$GITHUB_WORKSPACE/requirements/compatibility-phylax-effect-grant.txt"
+      - name: Require real effect verifier and run composition refusals
+        run: |
+          python -c 'from phylax.effect_grant import EffectGrantVerifier'
+          python -m pytest -q src/tests/test_effect_grant_composition.py src/tests/effect_interop src/tests/test_inert_effect_api.py src/tests/test_inert_effect_integration.py src/tests/test_inert_effect_process_crashes.py

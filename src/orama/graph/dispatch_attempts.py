@@ -231,6 +231,10 @@ class VerifiedDispatchGrant:
 
 
 _SCHEMA: Final = (
+    "CREATE TABLE IF NOT EXISTS effect_grant_bindings ("
+    " attempt_id TEXT PRIMARY KEY, grant_wire BLOB NOT NULL, context TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS send_authority ("
+    " attempt_id TEXT PRIMARY KEY, issuer_id TEXT NOT NULL, expires_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS dispatch_attempts ("
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, reservation_id TEXT NOT NULL,"
     " state TEXT NOT NULL, fenced INTEGER NOT NULL DEFAULT 0,"
@@ -738,6 +742,26 @@ class SqliteAttemptStore:
             except ValueError:
                 return None
 
+    def bind_effect_grant(self, attempt_id: str, wire: bytes, context: Mapping[str, Any]) -> None:
+        """Persist immutable verified request facts; a partially prepared attempt cannot send."""
+        encoded = json.dumps(dict(context), sort_keys=True, separators=(",", ":"))
+        with self._immediate() as db:
+            _load_attempt(db, attempt_id)
+            prior = db.execute("SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if prior is not None:
+                if tuple(prior) != (wire, encoded):
+                    raise AttemptStateError("effect grant binding conflict")
+                return
+            db.execute("INSERT INTO effect_grant_bindings VALUES (?, ?, ?)", (attempt_id, wire, encoded))
+
+    def effect_grant_binding(self, attempt_id: str) -> tuple[bytes, dict[str, Any]]:
+        """Return the immutable authority context required by the trusted sender."""
+        with self._lock:
+            row = self._db.execute("SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if row is None:
+                raise OutcomeRefused("effect_grant_binding_missing")
+            return bytes(row[0]), json.loads(row[1])
+
     def mark_transmitted(self, attempt_id: str) -> None:
         """Record that the first issuer call may have started (durable, never undone)."""
         with self._immediate() as db:
@@ -930,6 +954,15 @@ class SqliteAttemptStore:
             except WireError as error:
                 raise AuthorizationRefused("rule1", "malformed_wire") from error
             _check_rule1(db, attempt, permit, now, verifier, expected)
+            binding = db.execute("SELECT context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if binding is not None:
+                context = json.loads(binding[0])
+                if scope is None or scope.principal != context["principal"]:
+                    raise AuthorizationRefused("rule1", "effect_grant_principal")
+                if (permit["grant_payload_digest"], permit["operation_id"], permit["request_digest"], permit["ledger_store_id"]) != (
+                    context["payload_digest"], context["operation_id"], context["request_digest"], context["ledger_store_id"],
+                ):
+                    raise AuthorizationRefused("rule1", "effect_grant_binding")
             if self._governed:
                 bind_scope_to_permit(scope, permit)
             dispatch_anchor.assert_permit_at_or_above_floor(
@@ -953,6 +986,10 @@ class SqliteAttemptStore:
                 raise AuthorizationRefused("rule6", refused.reason) from refused
             _write_authorization(db, attempt, permit, fin, issuer_id, pair, now)
             effect_fencing.stamp_attempt(db, attempt_id, expected.authority_epoch)
+            db.execute(
+                "INSERT INTO send_authority VALUES (?, ?, ?)",
+                (attempt_id, issuer_id, min(permit["expires_at"], fin["expires_at"])),
+            )
 
     def fencing_epoch(self, attempt_id: str) -> int | None:
         """Return the integer fencing epoch the attempt was authorized under, or None."""
@@ -1351,10 +1388,16 @@ class SqliteAttemptStore:
         with self._immediate() as db:
             reserve(db, reservation_id, proposal_id, scope, expires_at, now)
 
-    def begin_send(self, attempt_id: str, *, inert_only: bool = False) -> None:
-        """Durably mark the one allowed send as started; a second send is always refused."""
+    def begin_send(self, attempt_id: str, *, inert_only: bool = False, now: datetime | None = None) -> None:
+        """Durably mark the one allowed send as started; a second send is always refused.
+
+        When ``now`` is given (and always for ``inert_only``, which defaults it to the wall clock)
+        the durable send authority is re-checked inside the send transaction.
+        """
+        if inert_only and now is None:
+            now = datetime.now(UTC)
         with self._immediate() as db:
-            self._begin_send_in(db, attempt_id, inert_only)
+            self._begin_send_in(db, attempt_id, inert_only, now)
 
     def begin_bound_send(
         self,
@@ -1375,7 +1418,9 @@ class SqliteAttemptStore:
         attempt. The single-use human approval for exactly this tuple is consumed in that same
         transaction: no approval, no send, and no consumed approval without a send marker. When
         ``envelope_digest`` is given it is stored with the send marker so a later reconciliation can
-        write the receipt. The inert-scope guard of ``begin_send`` applies.
+        write the receipt. The inert-scope guard of ``begin_send`` applies, and so does the shared
+        send-authority re-check (``_recheck_send_authority``: clock quarantine, missing or expired
+        send authority, acknowledged revocation, divergence and anchor quarantine), unconditionally.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
@@ -1393,7 +1438,7 @@ class SqliteAttemptStore:
             if revoked is not None:
                 raise FinalBoundaryRefused(revoked, terminal=True)
             effect_approvals.consume_approval(db, binding, at)
-            self._begin_send_in(db, binding.attempt_id, True)
+            self._begin_send_in(db, binding.attempt_id, True, at)
             if envelope_digest is not None:
                 effect_receipts.record_send_envelope(db, binding.attempt_id, envelope_digest, at)
 
@@ -1468,8 +1513,19 @@ class SqliteAttemptStore:
         with self._lock:
             return effect_reconciliation.unsent_count(self._db)
 
-    def _begin_send_in(self, db: sqlite3.Connection, attempt_id: str, inert_only: bool) -> None:
-        """Run the send preconditions and set ``send_started`` inside the caller's transaction."""
+    def _begin_send_in(
+        self,
+        db: sqlite3.Connection,
+        attempt_id: str,
+        inert_only: bool,
+        now: datetime | None = None,
+    ) -> None:
+        """Run the send preconditions and set ``send_started`` inside the caller's transaction.
+
+        A saved terminal refusal is checked first. Then, whenever ``now`` is given (and always for
+        an inert send, which reads the wall clock when no time was passed), the durable send
+        authority is re-checked by ``_recheck_send_authority`` in this same transaction.
+        """
         row = db.execute(
             "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
         ).fetchone()
@@ -1478,6 +1534,10 @@ class SqliteAttemptStore:
         attempt = _load_attempt(db, attempt_id)
         if effect_fencing.stored_refusal(db, attempt_id) is not None:
             raise OutcomeRefused("attempt_refused")
+        if inert_only and now is None:
+            now = datetime.now(UTC)
+        if now is not None:
+            _recheck_send_authority(db, attempt_id, now)
         if inert_only:
             scope = db.execute(
                 "SELECT p.destination FROM effect_proposals p JOIN reservations r"
@@ -1570,6 +1630,34 @@ class SqliteAttemptStore:
             if row is None:
                 return None
             return dict(zip((c[0] for c in cursor.description), row, strict=True))
+
+
+def _recheck_send_authority(db: sqlite3.Connection, attempt_id: str, now: datetime) -> None:
+    """Re-check the durable send authority inside the caller's send transaction.
+
+    One shared helper for every send path (``begin_send`` with a time, inert sends, and
+    ``begin_bound_send``). It refuses with ``OutcomeRefused`` when the clock is quarantined, the
+    attempt has no recorded send authority (a legacy row never gets authority invented for it) or
+    that authority expired, an acknowledged revocation or issuer divergence applies, or the issuer's
+    anchor is quarantined.
+    """
+    _require_aware(now)
+    attempt = _load_attempt(db, attempt_id)
+    clock = db.execute("SELECT quarantined FROM clock_high_water WHERE id = 1").fetchone()
+    if clock is not None and clock[0]:
+        raise OutcomeRefused("send_clock_quarantined")
+    authority = db.execute(
+        "SELECT issuer_id, expires_at FROM send_authority WHERE attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if authority is None or now >= parse_timestamp(authority[1]):
+        raise OutcomeRefused("send_authority_expired_or_missing")
+    fact = dispatch_revocations.refusal_reason(
+        db, authority[0], attempt.grant_id, attempt.second_approval_ref
+    )
+    if fact is not None or _diverged(db, authority[0]):
+        raise OutcomeRefused("send_authority_revoked")
+    dispatch_anchor.assert_not_quarantined(db, authority[0])
 
 
 def _binding_in(db: sqlite3.Connection, attempt_id: str) -> StoredBinding | None:

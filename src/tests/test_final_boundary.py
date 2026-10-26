@@ -293,7 +293,7 @@ def test_just_before_expiry_still_passes(h: Harness) -> None:
 
 def test_revocation_after_dispatch_never_rewrites_an_unknown_outcome(h: Harness) -> None:
     """Work already in doubt stays unknown; revocation refuses future dispatch only."""
-    h.store.begin_send(ATTEMPT, inert_only=True)
+    h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
     h.revocations.revoked_grants.add(GRANT)
     with pytest.raises(FinalBoundaryRefused) as excinfo:
         run(h)
@@ -316,7 +316,7 @@ def test_a_terminal_refusal_cannot_be_recorded_over_by_a_different_reason(h: Har
 
 def test_no_approval_check_precedes_the_durable_facts(h: Harness) -> None:
     """A binding for a sent attempt never reaches the verifier."""
-    h.store.begin_send(ATTEMPT, inert_only=True)
+    h.store.begin_send(ATTEMPT, inert_only=True, now=NOW)
     approvals = Approvals()
     with pytest.raises(FinalBoundaryRefused):
         run(h, approvals=approvals)
