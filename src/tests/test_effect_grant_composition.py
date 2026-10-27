@@ -456,7 +456,10 @@ def test_a_verified_grant_that_no_longer_matches_the_binding_refuses(bound: Boun
 
 
 def test_an_attempt_without_a_grant_binding_cannot_be_sent(tmp_path: Path) -> None:
-    """Legacy attempts with no verified binding refuse; nothing is invented for them."""
+    """Legacy attempts with no verified binding refuse; nothing is invented for them.
+
+    The refusal is the principal refusal, identical to an unknown attempt id (no existence oracle).
+    """
     from tests.test_inert_effect_integration import inert_harness
 
     h = inert_harness(tmp_path)
@@ -466,7 +469,7 @@ def test_an_attempt_without_a_grant_binding_cannot_be_sent(tmp_path: Path) -> No
             h.store, effects_allowed=lambda: True, approval_verifier=Approvals(),
             revocations=h.revocations, issuer_id=ISSUER, clock=lambda: NOW,
         )
-        with pytest.raises(Exception, match="effect_grant_binding_missing"):
+        with pytest.raises(EffectGrantRefused, match=PRINCIPAL_MISMATCH):
             composer.send(driver, ATTEMPT, authenticated_principal=SCOPE.principal)
         assert h.store.outbox_row(ATTEMPT)["send_started"] == 0
     finally:
