@@ -400,3 +400,129 @@ def test_the_capability_reason_set_is_the_one_closed_set() -> None:
         assert not any(view.is_effective(bit) for bit in CAPABILITY_BITS)
     assert seen <= closed and len(seen) >= 6
     assert "capability.record_malformed" not in seen
+
+
+# ------------------------------------------------------------ replacement writes cannot bypass the guards
+
+
+def _raw(bound: Bound, statement: str, *args: object) -> None:
+    """Run one raw statement on the store connection."""
+    bound.h.store._db.execute(statement, args)
+
+
+@pytest.mark.parametrize("verb", ["INSERT OR REPLACE", "REPLACE", "INSERT OR IGNORE"])
+def test_a_binding_row_cannot_be_replaced(bound: Bound, verb: str) -> None:
+    """Replace and ignore forms cannot overwrite a recorded binding."""
+    into = "INTO effect_grant_bindings VALUES (?, x'00', '{}')"
+    sql = f"REPLACE {into}" if verb == "REPLACE" else f"{verb} {into}"
+    with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+        _raw(bound, sql, ATTEMPT)
+    assert bound.h.store.effect_grant_binding(ATTEMPT)[0] == b"trusted-effect-grant"
+
+
+def test_a_binding_row_cannot_be_upserted(bound: Bound) -> None:
+    """``ON CONFLICT DO UPDATE`` cannot change a recorded binding."""
+    with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+        _raw(
+            bound,
+            "INSERT INTO effect_grant_bindings VALUES (?, x'00', '{}')"
+            " ON CONFLICT(attempt_id) DO UPDATE SET grant_wire = excluded.grant_wire",
+            ATTEMPT,
+        )
+    assert bound.h.store.effect_grant_binding(ATTEMPT)[0] == b"trusted-effect-grant"
+
+
+_RESERVATION_ROW = "VALUES (?, 'bound-proposal', 'd', '2030-01-01T00:00:00.000000Z', {consumed}, 'now')"
+
+
+@pytest.mark.parametrize("verb", ["INSERT OR REPLACE", "REPLACE"])
+@pytest.mark.parametrize("consumed", ["NULL", "'other'"])
+def test_a_consumed_reservation_cannot_be_replaced(bound: Bound, verb: str, consumed: str) -> None:
+    """Replacing a consumed reservation by key, with NULL or another attempt, aborts."""
+    row = _RESERVATION_ROW.format(consumed=consumed)
+    with pytest.raises(sqlite3.DatabaseError, match="cannot be replaced"):
+        _raw(bound, f"{verb} INTO reservations {row}", RESERVATION)
+    assert bound.h.store._db.execute(
+        "SELECT consumed_attempt_id FROM reservations WHERE reservation_id = ?", (RESERVATION,)
+    ).fetchone() == (ATTEMPT,)
+
+
+def test_a_consumed_reservation_cannot_be_displaced_by_a_unique_conflict_or_upsert(bound: Bound) -> None:
+    """A new row claiming the same attempt (REPLACE via the UNIQUE key) or an upsert aborts."""
+    row = _RESERVATION_ROW.format(consumed="'" + ATTEMPT + "'")
+    with pytest.raises(sqlite3.DatabaseError, match="cannot be replaced"):
+        _raw(bound, f"INSERT OR REPLACE INTO reservations {row}", "another-reservation")
+    with pytest.raises(sqlite3.DatabaseError, match="cannot be replaced"):
+        _raw(
+            bound,
+            f"INSERT INTO reservations {_RESERVATION_ROW.format(consumed='NULL')}"
+            " ON CONFLICT(reservation_id) DO UPDATE SET consumed_attempt_id = NULL",
+            RESERVATION,
+        )
+    assert bound.h.store._db.execute(
+        "SELECT consumed_attempt_id FROM reservations WHERE reservation_id = ?", (RESERVATION,)
+    ).fetchone() == (ATTEMPT,)
+
+
+_OUTBOX_COLUMNS = (
+    "(attempt_id, grant_id, permit_id, permit_digest, finalization_digest, r_p, r_f,"
+    " authority_pair, acked_through, send_started)"
+)
+
+
+@pytest.mark.parametrize("verb", ["INSERT OR REPLACE", "REPLACE"])
+@pytest.mark.parametrize("started", [0, 1])
+def test_the_outbox_row_of_a_refused_attempt_cannot_be_replaced(bound: Bound, verb: str, started: int) -> None:
+    """Replacing the outbox row of a refused attempt aborts, whether or not it sets send_started."""
+    refuse_once(bound)
+    values = f"VALUES (?, 'g', 'p', 'd', 'f', 1, 1, 'a', 0, {started})"
+    with pytest.raises(sqlite3.DatabaseError, match="refused attempt cannot"):
+        _raw(bound, f"{verb} INTO outbox {_OUTBOX_COLUMNS} {values}", ATTEMPT)
+    untouched(bound)
+
+
+def test_the_outbox_row_of_a_refused_attempt_cannot_be_upserted(bound: Bound) -> None:
+    """``ON CONFLICT DO UPDATE`` cannot start the send of a refused attempt."""
+    refuse_once(bound)
+    with pytest.raises(sqlite3.DatabaseError, match="refused attempt cannot"):
+        _raw(
+            bound,
+            f"INSERT INTO outbox {_OUTBOX_COLUMNS} VALUES (?, 'g', 'p', 'd', 'f', 1, 1, 'a', 0, 1)"
+            " ON CONFLICT(attempt_id) DO UPDATE SET send_started = 1",
+            ATTEMPT,
+        )
+    untouched(bound)
+
+
+# ------------------------------------------------------------ unhandled errors are logged server-side
+
+
+async def test_an_unhandled_error_is_logged_with_its_correlation_id_and_type(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The body stays the public 503; the log carries the correlation id, exception type and traceback."""
+    import logging
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from orama.api.public_errors import install_public_error_handlers
+
+    app = FastAPI()
+    install_public_error_handlers(app)
+
+    @app.get("/boom")
+    async def boom() -> None:
+        """Raise an unexpected error."""
+        raise KeyError("secret-internal-detail")
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    with caplog.at_level(logging.ERROR, logger="orama.api.public_errors"):
+        async with AsyncClient(transport=transport, base_url="http://x") as client:
+            response = await client.get("/boom")
+    body = response.json()
+    assert response.status_code == 503 and body["error"]["code"] == "deny.verifier_unavailable"
+    assert "secret-internal-detail" not in response.text and "KeyError" not in response.text
+    record = next(r for r in caplog.records if r.name == "orama.api.public_errors")
+    assert record.correlation_id == body["error"]["correlation_id"]
+    assert record.exception_type == "KeyError" and record.exc_info and record.exc_info[0] is KeyError

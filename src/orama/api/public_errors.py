@@ -114,9 +114,16 @@ def install_public_error_handlers(app: FastAPI) -> None:
         return error_response(DENY_STATUS[DENY_VERIFIER_UNAVAILABLE], DENY_VERIFIER_UNAVAILABLE, correlation_id)
 
     async def unhandled_error(request: Request, error: Exception) -> JSONResponse:
-        """Answer an unexpected error with the public deny that never allows."""
+        """Answer an unexpected error with the public deny that never allows.
+
+        The exception is logged server-side under the same correlation id; the body carries none of it.
+        """
         correlation_id = new_correlation_id()
-        _log.error("request failed", extra={"correlation_id": correlation_id})
+        _log.error(
+            "request failed",
+            extra={"correlation_id": correlation_id, "exception_type": type(error).__name__},
+            exc_info=(type(error), error, error.__traceback__),
+        )
         return error_response(DENY_STATUS[DENY_VERIFIER_UNAVAILABLE], DENY_VERIFIER_UNAVAILABLE, correlation_id)
 
     app.add_exception_handler(RequestValidationError, validation_error)
