@@ -191,6 +191,23 @@ def test_any_changed_scope_field_is_refused_and_leaves_the_reservation_unused(
 # -------------------------------------------------------------- expiry, revocation
 
 
+@pytest.mark.parametrize(
+    "stored",
+    ["garbage", "9999-01-01T00:00:00Z", "9999-01-01 00:00:00.000000", "", "2999-01-01T00:00:00.1Z"],
+)
+def test_an_unreadable_stored_reservation_expiry_refuses_instead_of_comparing_text(
+    h: Harness, stored: str
+) -> None:
+    """A stored expiry that is not the six-digit UTC form is never treated as live."""
+    h.store._db.execute("UPDATE reservations SET expires_at = ?", (stored,))
+    ready(h, vector_flow())
+    with pytest.raises(ReservationRefused) as excinfo:
+        authorize(h, SCOPE)
+    assert excinfo.value.reason == "reservation_expiry_unreadable"
+    row = h.store._db.execute("SELECT consumed_attempt_id FROM reservations").fetchone()
+    assert row == (None,)
+
+
 def test_an_expired_reservation_is_refused_at_the_boundary(h: Harness) -> None:
     """Authorization at the exact expiry boundary refuses the reservation."""
     ready(h, vector_flow())

@@ -31,6 +31,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from orama.api.authz import resolve_bind_host
+from orama.api.capabilities import capability_config_from_environ
 from orama.api.server import create_app
 from orama.graph.execution_guard import StepLedger
 from orama.graph.grant_verifier import AdjustmentGrantConsumer, AdjustmentGrantVerifier
@@ -96,8 +97,9 @@ def build_app(
     environ: Mapping[str, str], *, open_verifier: VerifierOpener = open_phylax_verifier
 ) -> FastAPI:
     """Build a disabled, ready or unavailable grant capability without fallback."""
+    capabilities = capability_config_from_environ(environ)
     if environ.get(ENABLE_VARIABLE) != ENABLED:
-        return create_app(grant_capability="disabled")
+        return create_app(grant_capability="disabled", capability_config=capabilities)
     missing = [name for name in _REQUIRED_WHEN_ENABLED if not environ.get(name, "").strip()]
     if missing:
         raise SystemExit(f"missing configuration: {', '.join(missing)}")
@@ -106,18 +108,28 @@ def build_app(
     except Exception as error:  # noqa: BLE001 - public state is only unavailable
         # Only a cause label is logged: no state paths or low-level text.
         _warning_with_cause("grant verifier unavailable", error)
-        return create_app(grant_capability="unavailable")
+        return create_app(grant_capability="unavailable", capability_config=capabilities)
     try:
         ledger = StepLedger(Path(environ["ORAMA_LEDGER_PATH"]))
     except Exception as error:  # noqa: BLE001 - a ledger that cannot open is "unavailable"
         _warning_with_cause("grant ledger unavailable", error)
         _release_verifier(close)
-        return create_app(grant_capability="unavailable")
-    return create_app(
-        adjustment_consumer=AdjustmentGrantConsumer(ledger, verifier),
-        grant_capability="ready",
-        grant_cleanup=lambda: close_resources(close, ledger),
-    )
+        return create_app(grant_capability="unavailable", capability_config=capabilities)
+    try:
+        return create_app(
+            adjustment_consumer=AdjustmentGrantConsumer(ledger, verifier),
+            grant_capability="ready",
+            grant_cleanup=lambda: close_resources(close, ledger),
+            capability_config=capabilities,
+            grant_verifier=verifier,
+        )
+    except BaseException:
+        # A refused startup must not leave the verifier or ledger open.
+        try:
+            close_resources(close, ledger)
+        except Exception as error:  # noqa: BLE001 - preserve the startup refusal
+            _warning_with_cause("grant cleanup failed", error)
+        raise
 
 
 def main() -> None:

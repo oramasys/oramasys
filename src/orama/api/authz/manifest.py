@@ -35,8 +35,15 @@ ROUTE_MANIFEST: tuple[RouteSpec, ...] = (
     RouteSpec("GET", "/api/workspace/capabilities", RouteCapability.READ),
     RouteSpec("POST", "/api/workspace/run", RouteCapability.MUTATE),
     RouteSpec("GET", "/health", RouteCapability.PUBLIC),
+    RouteSpec("GET", "/healthz", RouteCapability.PUBLIC),
+    RouteSpec("GET", "/readyz", RouteCapability.PUBLIC),
     RouteSpec("POST", "/run", RouteCapability.MUTATE),
     RouteSpec("POST", "/adjustments", RouteCapability.LIFECYCLE),
+    # Verification only (never spends); 404 serving.route_not_exposed unless serving is effective.
+    RouteSpec("POST", "/grants/verify", RouteCapability.READ),
+    # Dark (404 serving.route_not_exposed) unless an inert sender is wired AND the R0-2
+    # "effects" capability is effective; the send always passes the final boundary.
+    RouteSpec("POST", "/effects/inert", RouteCapability.LIFECYCLE),
     RouteSpec("GET", "/api/knowledge/search", RouteCapability.READ),
     RouteSpec("POST", "/api/mcp", RouteCapability.READ),
     RouteSpec("POST", "/api/a2a", RouteCapability.READ),

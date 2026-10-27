@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+import uuid
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -38,14 +39,28 @@ from orama.graph.dispatch_consumer_wire import (
     validate_finalization_wire,
     validate_permit_wire,
 )
+from orama.graph import effect_fencing
+from orama.graph.effect_denial_codes import public_effect_denial_code
+from orama.graph.effect_fencing import FENCING_SCHEMA, FencingRefused, StoredRefusal
 from orama.graph.effect_outcomes import OutcomeRefused, check_transition
 from orama.graph.effect_proposals import (
     PROPOSAL_SCHEMA,
     EffectScope,
+    ReservationRefused,
     bind_scope_to_permit,
     consume_reservation,
     record_proposal,
     reserve,
+)
+from orama.graph import effect_approvals, effect_reconciliation, effect_receipts
+from orama.graph.effect_approvals import APPROVAL_SCHEMA
+from orama.graph.effect_reconciliation import RECONCILIATION_SCHEMA
+from orama.graph.effect_receipts import RECEIPT_SCHEMA, RedactedReceipt, StoredReceipt
+from orama.graph.final_boundary import (
+    FinalBoundaryBinding,
+    FinalBoundaryRefused,
+    StoredBinding,
+    check_store_facts,
 )
 from orama.graph.private_store import prepare_private_store
 
@@ -217,6 +232,10 @@ class VerifiedDispatchGrant:
 
 
 _SCHEMA: Final = (
+    "CREATE TABLE IF NOT EXISTS effect_grant_bindings ("
+    " attempt_id TEXT PRIMARY KEY, grant_wire BLOB NOT NULL, context TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS send_authority ("
+    " attempt_id TEXT PRIMARY KEY, issuer_id TEXT NOT NULL, expires_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS dispatch_attempts ("
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, reservation_id TEXT NOT NULL,"
     " state TEXT NOT NULL, fenced INTEGER NOT NULL DEFAULT 0,"
@@ -246,6 +265,10 @@ _SCHEMA: Final = (
     " outcome_evidence TEXT,"
     " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
     *PROPOSAL_SCHEMA,
+    *FENCING_SCHEMA,
+    *RECEIPT_SCHEMA,
+    *APPROVAL_SCHEMA,
+    *RECONCILIATION_SCHEMA,
     *ANCHOR_SCHEMA,
     *dispatch_revocations.REVOCATION_SCHEMA,
     "CREATE TABLE IF NOT EXISTS clock_high_water ("
@@ -552,6 +575,90 @@ def _write_authorization(
     )
 
 
+def _validate_attempt(
+    attempt_id: str, grant_id: str, reservation_id: str, second_approval_ref: str | None
+) -> None:
+    """Fail closed on blank identifiers or a non-canonical approval binding before any write."""
+    for name, value in (
+        ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
+    ):
+        _require_text(name, value)
+    if second_approval_ref not in (None, "") and not is_canonical_identifier(second_approval_ref):
+        raise ValueError("second_approval_ref must be empty or a canonical identifier")
+
+
+def _insert_attempt(
+    db: sqlite3.Connection,
+    attempt_id: str,
+    grant_id: str,
+    reservation_id: str,
+    second_approval_ref: str | None,
+) -> None:
+    """Insert the attempt row in the caller's transaction (idempotent when identical)."""
+    row = db.execute(
+        "SELECT grant_id, reservation_id, second_approval_ref FROM dispatch_attempts"
+        " WHERE attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if row is not None:
+        if tuple(row) != (grant_id, reservation_id, second_approval_ref):
+            raise AttemptStateError("attempt_id already exists with a different binding")
+        return
+    db.execute(
+        "INSERT INTO dispatch_attempts (attempt_id, grant_id, reservation_id, state,"
+        " created_at, second_approval_ref) VALUES (?, ?, ?, 'created', ?, ?)",
+        (attempt_id, grant_id, reservation_id, _now_text(datetime.now(UTC)), second_approval_ref),
+    )
+
+
+def _encode_context(context: Mapping[str, Any]) -> str:
+    """Return the canonical JSON text of a verified effect-grant request context."""
+    return json.dumps(dict(context), sort_keys=True, separators=(",", ":"))
+
+
+def _bind_effect_grant_in(
+    db: sqlite3.Connection, attempt_id: str, wire: bytes, encoded: str
+) -> None:
+    """Record the attempt's immutable effect-grant binding in the caller's transaction.
+
+    An identical repeat is a no-op and a different binding conflicts. An attempt that already
+    authorized (state or intent) without a binding is refused: its authorization skipped the
+    effect-grant cross-check and must not be bound after the fact.
+    """
+    attempt = _load_attempt(db, attempt_id)
+    prior = db.execute(
+        "SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if prior is not None:
+        if tuple(prior) != (wire, encoded):
+            raise AttemptStateError("effect grant binding conflict")
+        return
+    intent = db.execute(
+        "SELECT 1 FROM dispatch_intents WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if attempt.state == "authorized" or intent is not None:
+        raise AttemptStateError("attempt already authorized without an effect-grant binding")
+    db.execute("INSERT INTO effect_grant_bindings VALUES (?, ?, ?)", (attempt_id, wire, encoded))
+
+
+def _effect_grant_bound(db: sqlite3.Connection, attempt_id: str) -> bool:
+    """Return True when the attempt carries a verified effect-grant binding row."""
+    row = db.execute(
+        "SELECT 1 FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    return row is not None
+
+
+BOUND_SEND_REQUIRED: Final = "effect_grant_bound_send_required"
+"""Refusal reason: an attempt with an effect-grant binding may only start through ``begin_bound_send``."""
+GRANT_RECHECK_REQUIRED: Final = "effect_grant_recheck_required"
+"""Refusal reason: a bound attempt's send needs the signed-grant recheck (``authority_check``)."""
+LEASE_STALE: Final = "effect.lease_stale"
+"""Refusal reason: the consumer's current lease epoch differs from the one bound with the grant."""
+ISSUER_MISMATCH: Final = "send_authority_issuer_mismatch"
+"""Refusal reason: the sender's issuer is not the issuer recorded in the attempt's send authority."""
+
+
 class SqliteAttemptStore:
     """Durable consumer attempt store; every write is one ``BEGIN IMMEDIATE`` transaction."""
 
@@ -562,6 +669,7 @@ class SqliteAttemptStore:
         governed: bool = False,
         clock_skew_tolerance: timedelta = timedelta(0),
         abandon_authenticator: IssuerOutcomeAuthenticator | None = None,
+        lease_epoch_of: Callable[[str], int | None] | None = None,
     ) -> None:
         """Open (creating privately) the WAL-mode store and its schema.
 
@@ -576,6 +684,13 @@ class SqliteAttemptStore:
 
         ``abandon_authenticator`` must bind responses to the expected issuer and verify their
         complete contents. Without it, abandonment outcomes are refused before any write.
+
+        ``lease_epoch_of(run_id)`` is the consumer's current lease view. The shared send-time
+        recheck compares it with the lease epoch the effect-grant binding stored for the attempt;
+        without a view (or when it fails) no effect-grant-bound attempt can be sent. The lease
+        epoch is never the fencing epoch and is stored apart from it. The view runs inside the
+        send's ``BEGIN IMMEDIATE`` transaction, so it must be a quick read of the consumer's own
+        state and must not touch this store (the same rule as ``authority_check``).
         """
         if (
             not isinstance(clock_skew_tolerance, timedelta)
@@ -584,6 +699,7 @@ class SqliteAttemptStore:
         ):
             raise ValueError("clock_skew_tolerance must be a timedelta from zero to five minutes")
         self._clock_skew = clock_skew_tolerance
+        self._lease_epoch_of = lease_epoch_of
         self._abandon_authenticator = abandon_authenticator
         prepared = prepare_private_store(path)
         self._governed = governed
@@ -600,6 +716,7 @@ class SqliteAttemptStore:
             self._db.execute(statement)
         self._migrate_outbox()
         self._migrate_attempts()
+        self._migrate_fencing()
 
     def _migrate_outbox(self) -> None:
         """Add the T3 outcome columns to an outbox created before they existed."""
@@ -617,6 +734,20 @@ class SqliteAttemptStore:
         present = {row[1] for row in self._db.execute("PRAGMA table_info(dispatch_attempts)")}
         if "second_approval_ref" not in present:
             self._db.execute("ALTER TABLE dispatch_attempts ADD COLUMN second_approval_ref TEXT")
+
+    def _migrate_fencing(self) -> None:
+        """Add the explicit integer fencing epoch to an attempts table created before it existed.
+
+        Existing rows get NULL: an attempt that was never stamped has no epoch and so can never
+        pass a final-boundary epoch check.
+        """
+        present = {row[1] for row in self._db.execute("PRAGMA table_info(dispatch_attempts)")}
+        if "fencing_epoch" not in present:
+            self._db.execute("ALTER TABLE dispatch_attempts ADD COLUMN fencing_epoch INTEGER")
+        refused = {row[1] for row in self._db.execute("PRAGMA table_info(attempt_refusals)")}
+        for column in ("refusal_code", "receipt_ref"):
+            if column not in refused:
+                self._db.execute(f"ALTER TABLE attempt_refusals ADD COLUMN {column} TEXT")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -656,6 +787,33 @@ class SqliteAttemptStore:
             second_approval_ref=verified_grant.second_approval_ref,
         )
 
+    def create_bound_attempt(
+        self,
+        attempt_id: str,
+        verified_grant: VerifiedDispatchGrant,
+        reservation_id: str,
+        *,
+        wire: bytes,
+        context: Mapping[str, Any],
+    ) -> None:
+        """Persist a verified attempt and its effect-grant binding in ONE ``BEGIN IMMEDIATE`` commit.
+
+        This is the composer's path. No committed state ever holds the attempt without its
+        binding, so ``authorize_dispatch`` can never run in between and skip the effect-grant
+        cross-check. Idempotent when the attempt and the binding are identical; any difference
+        refuses and writes nothing.
+        """
+        if not isinstance(verified_grant, VerifiedDispatchGrant):
+            raise TypeError("verified_grant must be a VerifiedDispatchGrant")
+        values = (
+            attempt_id, verified_grant.grant_id, reservation_id, verified_grant.second_approval_ref,
+        )
+        _validate_attempt(*values)
+        encoded = _encode_context(context)
+        with self._immediate() as db:
+            _insert_attempt(db, *values)
+            _bind_effect_grant_in(db, attempt_id, wire, encoded)
+
     def _create_attempt(
         self,
         attempt_id: str,
@@ -674,32 +832,9 @@ class SqliteAttemptStore:
         issuer has revoked any approval. The leading underscore is a convention, not
         enforcement.
         """
-        for name, value in (
-            ("attempt_id", attempt_id), ("grant_id", grant_id), ("reservation_id", reservation_id),
-        ):
-            _require_text(name, value)
-        if second_approval_ref not in (None, "") and not is_canonical_identifier(
-            second_approval_ref
-        ):
-            raise ValueError("second_approval_ref must be empty or a canonical identifier")
+        _validate_attempt(attempt_id, grant_id, reservation_id, second_approval_ref)
         with self._immediate() as db:
-            row = db.execute(
-                "SELECT grant_id, reservation_id, second_approval_ref FROM dispatch_attempts"
-                " WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-            if row is not None:
-                if tuple(row) != (grant_id, reservation_id, second_approval_ref):
-                    raise AttemptStateError("attempt_id already exists with a different binding")
-                return
-            db.execute(
-                "INSERT INTO dispatch_attempts (attempt_id, grant_id, reservation_id, state,"
-                " created_at, second_approval_ref) VALUES (?, ?, ?, 'created', ?, ?)",
-                (
-                    attempt_id, grant_id, reservation_id, _now_text(datetime.now(UTC)),
-                    second_approval_ref,
-                ),
-            )
+            _insert_attempt(db, attempt_id, grant_id, reservation_id, second_approval_ref)
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord | None:
         """Return the attempt row, or None if it does not exist."""
@@ -708,6 +843,25 @@ class SqliteAttemptStore:
                 return _load_attempt(self._db, attempt_id)
             except ValueError:
                 return None
+
+    def bind_effect_grant(self, attempt_id: str, wire: bytes, context: Mapping[str, Any]) -> None:
+        """Persist immutable verified request facts; a partially prepared attempt cannot send.
+
+        Refused for an attempt that already authorized without a binding: that authorization never
+        ran the effect-grant cross-check, so binding it afterwards would launder it. The composer
+        uses ``create_bound_attempt``, which commits the attempt and its binding together.
+        """
+        encoded = _encode_context(context)
+        with self._immediate() as db:
+            _bind_effect_grant_in(db, attempt_id, wire, encoded)
+
+    def effect_grant_binding(self, attempt_id: str) -> tuple[bytes, dict[str, Any]]:
+        """Return the immutable authority context required by the trusted sender."""
+        with self._lock:
+            row = self._db.execute("SELECT grant_wire, context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if row is None:
+                raise OutcomeRefused("effect_grant_binding_missing")
+            return bytes(row[0]), json.loads(row[1])
 
     def mark_transmitted(self, attempt_id: str) -> None:
         """Record that the first issuer call may have started (durable, never undone)."""
@@ -878,6 +1032,10 @@ class SqliteAttemptStore:
         """Check clock and authorization atomically; commit a clock latch before refusing."""
         with self._immediate() as db:
             attempt = _load_attempt(db, attempt_id)
+            kept = effect_fencing.stored_refusal(db, attempt_id)
+            if kept is not None:
+                # A saved terminal refusal wins; it is decided under the same lock as the authorization.
+                raise _raise_stored(kept)
             dispatch_anchor.assert_not_quarantined(db, issuer_id)
             if self._governed:
                 clock = db.execute(
@@ -897,6 +1055,15 @@ class SqliteAttemptStore:
             except WireError as error:
                 raise AuthorizationRefused("rule1", "malformed_wire") from error
             _check_rule1(db, attempt, permit, now, verifier, expected)
+            binding = db.execute("SELECT context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)).fetchone()
+            if binding is not None:
+                context = json.loads(binding[0])
+                if scope is None or scope.principal != context["principal"]:
+                    raise AuthorizationRefused("rule1", "effect_grant_principal")
+                if (permit["grant_payload_digest"], permit["operation_id"], permit["request_digest"], permit["ledger_store_id"]) != (
+                    context["payload_digest"], context["operation_id"], context["request_digest"], context["ledger_store_id"],
+                ):
+                    raise AuthorizationRefused("rule1", "effect_grant_binding")
             if self._governed:
                 bind_scope_to_permit(scope, permit)
             dispatch_anchor.assert_permit_at_or_above_floor(
@@ -914,7 +1081,142 @@ class SqliteAttemptStore:
             _check_event(db, fin, issuer_id, now)
             pair = expected.authority_pair()
             _check_rule6(db, attempt, gates, pair, now)
+            try:
+                effect_fencing.admit_epoch(db, expected.authority_epoch)
+            except FencingRefused as refused:
+                raise AuthorizationRefused("rule6", refused.reason) from refused
             _write_authorization(db, attempt, permit, fin, issuer_id, pair, now)
+            effect_fencing.stamp_attempt(db, attempt_id, expected.authority_epoch)
+            db.execute(
+                "INSERT INTO send_authority VALUES (?, ?, ?)",
+                (attempt_id, issuer_id, _earliest_expiry(permit["expires_at"], fin["expires_at"])),
+            )
+
+    def fencing_epoch(self, attempt_id: str) -> int | None:
+        """Return the integer fencing epoch the attempt was authorized under, or None."""
+        with self._lock:
+            return effect_fencing.attempt_epoch(self._db, attempt_id)
+
+    def current_fencing_epoch(self) -> int | None:
+        """Return the store's current fencing epoch, or None before any authorization."""
+        with self._lock:
+            return effect_fencing.current_epoch(self._db)
+
+    def advance_fencing_epoch(
+        self, epoch: int, *, operator: OperatorAuthority, now: datetime
+    ) -> None:
+        """Raise the current fencing epoch strictly, as an authenticated and logged operator action.
+
+        Every attempt authorized under a lower epoch is thereafter stale at the final boundary.
+        """
+        reference = operator.authorize("advance_fencing_epoch", subject="fencing")
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to advance the fencing epoch")
+        _require_aware(now)
+        with self._immediate() as db:
+            try:
+                effect_fencing.advance_epoch(db, epoch, reference, now)
+            except FencingRefused as refused:
+                raise AttemptStateError(refused.reason) from refused
+
+    def attempt_binding(self, attempt_id: str) -> StoredBinding | None:
+        """Return what the store durably recorded for the attempt's final-boundary tuple, or None.
+
+        Principal, operation digest and target come from the scope the reservation consumed for this
+        attempt; the expiry is that reservation's expiry; the epoch is the one stamped in the
+        authorization transaction. Read-only.
+        """
+        with self._lock:
+            return _binding_in(self._db, attempt_id)
+
+    def revocation_refusal(self, attempt_id: str, issuer_id: str) -> str | None:
+        """Return the locally recorded Rule 4 revocation reason for the attempt, or None."""
+        _require_text("issuer_id", issuer_id)
+        with self._lock:
+            attempt = _load_attempt(self._db, attempt_id)
+            return dispatch_revocations.refusal_reason(
+                self._db, issuer_id, attempt.grant_id, attempt.second_approval_ref
+            )
+
+    def terminal_refusal(self, attempt_id: str) -> StoredRefusal | None:
+        """Return the terminal pre-dispatch refusal recorded for the attempt identity, or None."""
+        with self._lock:
+            return effect_fencing.stored_refusal(self._db, attempt_id)
+
+    def record_terminal_refusal(
+        self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
+    ) -> StoredRefusal:
+        """Record a pre-dispatch refusal as terminal for the attempt; the first one wins.
+
+        An attempt that already holds a durable authorization intent can only be refused by the
+        final boundary (``kind == "final_boundary"``): an earlier-stage refusal is never written
+        over an authorization that committed.
+
+        A refusal is never written over a send that started. When ``send_started`` is already set
+        (a concurrent request won the race to the send marker after this request's pre-check),
+        nothing is recorded and ``AttemptStateError("send_already_started")`` is raised, so an
+        attempt never carries both a send (and its receipt) and a terminal refusal. That check runs
+        in the same transaction as the write; the final boundary turns it into the non-terminal
+        ``send_already_started`` refusal (``record_boundary_refusal``).
+        """
+        _require_aware(now)
+        if kind not in effect_fencing.REFUSAL_KINDS:
+            raise ValueError(f"unknown refusal kind {kind!r}")
+        with self._immediate() as db:
+            _load_attempt(db, attempt_id)
+            committed = db.execute(
+                "SELECT 1 FROM dispatch_intents WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            kept = effect_fencing.stored_refusal(db, attempt_id)
+            if kept is not None:
+                return kept
+            if committed is not None and kind != "final_boundary":
+                raise AttemptStateError("attempt already authorized; it cannot be refused at that stage")
+            started = db.execute(
+                "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if started is not None and started[0]:
+                raise AttemptStateError("send_already_started")
+            # The public deny.* code is decided once, here, and replayed from the record forever.
+            return effect_fencing.record_refusal(
+                db, attempt_id, kind, rule, reason, now, public_effect_denial_code(reason)
+            )
+
+    def authorize_dispatch_terminal(
+        self,
+        attempt_id: str,
+        permit_wire: Mapping[str, Any],
+        finalization_wire: Mapping[str, Any],
+        now: datetime,
+        **ports: Any,
+    ) -> None:
+        """Step 4.3 where a refusal is terminal for the attempt identity (CONTRACT section 4).
+
+        A replay with the same identity returns the stored refusal without re-evaluating anything,
+        and a refusal is never recorded over an attempt that already authorized. Clock quarantine is
+        operational, not a decision about the attempt, so it is not recorded. Accepts the same
+        keyword ports as ``authorize_dispatch``.
+        """
+        stored = self.terminal_refusal(attempt_id)
+        if stored is not None:
+            raise _raise_stored(stored)
+        try:
+            self.authorize_dispatch(attempt_id, permit_wire, finalization_wire, now, **ports)
+        except AuthorizationRefused as refusal:
+            self._record_if_unauthorized(attempt_id, "authorization", refusal.rule, refusal.reason, now)
+            raise
+        except ReservationRefused as refusal:
+            self._record_if_unauthorized(attempt_id, "reservation", None, refusal.reason, now)
+            raise
+
+    def _record_if_unauthorized(
+        self, attempt_id: str, kind: str, rule: str | None, reason: str, now: datetime
+    ) -> None:
+        """Record the refusal unless the attempt already authorized (a replayed authorize)."""
+        try:
+            self.record_terminal_refusal(attempt_id, kind, rule, reason, now)
+        except AttemptStateError:
+            pass
 
     def bootstrap_anchor(
         self,
@@ -1202,25 +1504,215 @@ class SqliteAttemptStore:
         with self._immediate() as db:
             reserve(db, reservation_id, proposal_id, scope, expires_at, now)
 
-    def begin_send(self, attempt_id: str) -> None:
-        """Durably mark the one allowed send as started; a second send is always refused."""
+    def begin_send(self, attempt_id: str, *, inert_only: bool = False, now: datetime | None = None) -> None:
+        """Durably mark the one allowed send as started; a second send is always refused.
+
+        When ``now`` is given (and always for ``inert_only``, which defaults it to the wall clock)
+        the durable send authority is re-checked inside the send transaction.
+
+        An attempt with an effect-grant binding (one the grant composer created) is refused with
+        ``effect_grant_bound_send_required``: its only send path is ``begin_bound_send`` through
+        the sealed final boundary. The refusal is decided inside the send transaction before any
+        write, so it records nothing, consumes nothing and leaves the canonical path available.
+        """
+        if inert_only and now is None:
+            now = datetime.now(UTC)
+        clock_refusal: str | None = None
         with self._immediate() as db:
-            row = db.execute(
-                "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            if _effect_grant_bound(db, attempt_id):
+                raise OutcomeRefused(BOUND_SEND_REQUIRED)
+            clock_refusal = self._begin_send_in(db, attempt_id, inert_only, now)
+        if clock_refusal is not None:
+            raise OutcomeRefused(clock_refusal)
+
+    def begin_bound_send(
+        self,
+        binding: FinalBoundaryBinding,
+        now: datetime,
+        *,
+        issuer_id: str,
+        clock: Callable[[], datetime] | None = None,
+        envelope_digest: str | None = None,
+        authority_check: Callable[[], None] | None = None,
+    ) -> None:
+        """Start the one inert send only if the durable tuple still equals ``binding``.
+
+        The final-boundary store facts are checked again inside the same ``BEGIN IMMEDIATE``
+        transaction that sets ``send_started``, so an epoch that advanced, an expiry that passed, a
+        revocation recorded locally or a terminal refusal recorded after the pre-check still stops
+        the send. When ``clock`` is given it is read again inside the transaction and that fresh time
+        (never earlier than ``now``) decides expiry, so a slow verifier cannot start an expired
+        attempt. The single-use human approval for exactly this tuple is consumed in that same
+        transaction: no approval, no send, and no consumed approval without a send marker. When
+        ``envelope_digest`` is given it is stored with the send marker so a later reconciliation can
+        write the receipt. The inert-scope guard of ``begin_send`` applies, and so does the shared
+        send-authority re-check (``_recheck_send_authority``: clock quarantine, missing or expired
+        send authority, acknowledged revocation, divergence and anchor quarantine), unconditionally.
+        ``authority_check`` (the composer's signed-grant re-verification) is called last, after the
+        send marker is written but before the transaction commits; if it raises, the transaction
+        rolls back, so no send marker, consumed approval or envelope record survives. It must not
+        call back into this store. For an attempt with an effect-grant binding the recheck is
+        mandatory: without ``authority_check`` the send is refused (``effect_grant_recheck_required``,
+        not terminal) before anything is consumed or written.
+
+        ``issuer_id`` must equal the issuer recorded in the attempt's send authority at
+        authorization; a different issuer is refused outright (``send_authority_issuer_mismatch``,
+        not terminal) before anything else in this transaction, so the send can never start on
+        revocation facts looked up under the wrong issuer.
+        """
+        _require_aware(now)
+        _require_text("issuer_id", issuer_id)
+        clock_refusal: str | None = None
+        with self._immediate() as db:
+            recorded = db.execute(
+                "SELECT issuer_id FROM send_authority WHERE attempt_id = ?", (binding.attempt_id,)
             ).fetchone()
-            if row is None:
-                raise AttemptStateError("no authorized outbox row for the attempt")
-            attempt = _load_attempt(db, attempt_id)
-            complete = db.execute(
-                "SELECT " + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
-                + " FROM outbox WHERE attempt_id = ?",
-                (attempt_id,),
+            if recorded is not None and recorded[0] != issuer_id:
+                raise FinalBoundaryRefused(ISSUER_MISMATCH)
+            if authority_check is None and _effect_grant_bound(db, binding.attempt_id):
+                raise FinalBoundaryRefused(GRANT_RECHECK_REQUIRED)
+            at = now
+            if clock is not None:
+                fresh = clock()
+                _require_aware(fresh)
+                at = max(now, fresh)
+            check_store_facts(_binding_in(db, binding.attempt_id), binding, at)
+            attempt = _load_attempt(db, binding.attempt_id)
+            revoked = dispatch_revocations.refusal_reason(
+                db, issuer_id, attempt.grant_id, attempt.second_approval_ref
+            )
+            if revoked is not None:
+                raise FinalBoundaryRefused(revoked, terminal=True)
+            clock_refusal = self._begin_send_in(db, binding.attempt_id, True, at)
+            if clock_refusal is None:
+                effect_approvals.consume_approval(db, binding, at)
+                if envelope_digest is not None:
+                    effect_receipts.record_send_envelope(db, binding.attempt_id, envelope_digest, at)
+                if authority_check is not None:
+                    authority_check()
+        if clock_refusal is not None:
+            raise OutcomeRefused(clock_refusal)
+
+    def grant_effect_approval(
+        self, binding: FinalBoundaryBinding, *, approver: OperatorAuthority, now: datetime
+    ) -> str:
+        """Record a single-use human approval for exactly ``binding``; return its opaque id.
+
+        The approver is authenticated through the injected ``OperatorAuthority``. The binding must
+        equal the attempt's durable authorized tuple right now, so an approval cannot be created for
+        a refused, unauthorized, stale or altered attempt. A repeat for the same unconsumed tuple
+        returns the same id; a different tuple or a consumed approval is refused.
+        """
+        reference = approver.authorize("approve_effect", subject=binding.attempt_id)
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to approve this effect")
+        _require_aware(now)
+        with self._immediate() as db:
+            check_store_facts(_binding_in(db, binding.attempt_id), binding, now)
+            return effect_approvals.create_approval(
+                db, "approval-" + uuid.uuid4().hex, binding, reference, now
+            )
+
+    def approval_state(self, attempt_id: str) -> str | None:
+        """Return ``granted``, ``consumed`` or None for the attempt's approval."""
+        with self._lock:
+            return effect_approvals.approval_state(self._db, attempt_id)
+
+    def open_reconciliation(
+        self, attempt_id: str, *, operator: OperatorAuthority, ttl: timedelta, now: datetime
+    ) -> str:
+        """Open an expiring single-use reconciliation ticket scoped to one in-doubt attempt.
+
+        Needs an authenticated operator. Only an attempt whose send started with an unproven outcome
+        qualifies, and the ticket lives at most fifteen minutes.
+        """
+        reference = operator.authorize("open_reconciliation", subject=attempt_id)
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to open a reconciliation")
+        _require_aware(now)
+        with self._immediate() as db:
+            return effect_reconciliation.open_ticket(
+                db, "ticket-" + uuid.uuid4().hex, attempt_id, reference, ttl, now
+            )
+
+    def reconcile_unknown(
+        self, ticket_id: str, attempt_id: str, outcome: str, evidence_ref: str, *,
+        operator: OperatorAuthority, now: datetime,
+    ) -> None:
+        """Spend the ticket once to settle an ``unknown`` outcome by hand, with evidence.
+
+        The operator is authenticated again at spend time, the ticket must be for this attempt,
+        unexpired and unspent, and the transition is the ordinary ``unknown`` to final one. Nothing
+        else can rewrite an unknown outcome.
+        """
+        reference = operator.authorize("reconcile_unknown", subject=attempt_id)
+        if not isinstance(reference, str) or not reference.strip():
+            raise OperatorRefused("operator is not authorized to reconcile this attempt")
+        _require_aware(now)
+        with self._immediate() as db:
+            effect_reconciliation.spend_ticket(
+                db, ticket_id, attempt_id, outcome, evidence_ref, reference, now
+            )
+
+    def unknown_outbox_attempts(self) -> list[str]:
+        """Return attempt ids whose send started and whose outcome is still unproven (read-only)."""
+        with self._lock:
+            return effect_reconciliation.unknown_attempts(self._db)
+
+    def unsent_outbox_count(self) -> int:
+        """Return how many authorized outbox rows have not started their send (read-only)."""
+        with self._lock:
+            return effect_reconciliation.unsent_count(self._db)
+
+    def _begin_send_in(
+        self,
+        db: sqlite3.Connection,
+        attempt_id: str,
+        inert_only: bool,
+        now: datetime | None = None,
+    ) -> str | None:
+        """Run the send preconditions and set ``send_started`` inside the caller's transaction.
+
+        A saved terminal refusal is checked first. Then, whenever ``now`` is given (and always for
+        an inert send, which reads the wall clock when no time was passed), the durable send
+        authority is re-checked by ``_recheck_send_authority`` in this same transaction.
+        """
+        row = db.execute(
+            "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+        ).fetchone()
+        if row is None:
+            raise AttemptStateError("no authorized outbox row for the attempt")
+        attempt = _load_attempt(db, attempt_id)
+        if effect_fencing.stored_refusal(db, attempt_id) is not None:
+            raise OutcomeRefused("attempt_refused")
+        if inert_only and now is None:
+            now = datetime.now(UTC)
+        if now is not None:
+            clock_refusal = _recheck_send_authority(
+                db, attempt_id, now, self._clock_skew, self._lease_epoch_of
+            )
+            if clock_refusal is not None:
+                return clock_refusal
+        if inert_only:
+            scope = db.execute(
+                "SELECT p.destination FROM effect_proposals p JOIN reservations r"
+                " ON r.proposal_id = p.proposal_id WHERE r.reservation_id = ?"
+                " AND r.consumed_attempt_id = ?",
+                (attempt.reservation_id, attempt_id),
             ).fetchone()
-            if attempt.fenced or attempt.state != "authorized" or not complete[0]:
-                raise OutcomeRefused("send_precondition_failed")
-            if row[0]:
-                raise OutcomeRefused("send_already_started")
-            db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+            if not self._governed or scope != ("inert://simulation",):
+                raise OutcomeRefused("inert_scope_required")
+        complete = db.execute(
+            "SELECT " + " AND ".join(f"{c} IS NOT NULL AND {c} != ''" for c in _OUTBOX_REQUIRED)
+            + " FROM outbox WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        if attempt.fenced or attempt.state != "authorized" or not complete[0]:
+            raise OutcomeRefused("send_precondition_failed")
+        if row[0]:
+            raise OutcomeRefused("send_already_started")
+        db.execute("UPDATE outbox SET send_started = 1 WHERE attempt_id = ?", (attempt_id,))
+        return None
 
     def record_outcome(
         self, attempt_id: str, outcome: str, evidence_ref: str | None = None
@@ -1241,6 +1733,51 @@ class SqliteAttemptStore:
                 (outcome, evidence_ref, attempt_id),
             )
 
+    def settle_with_receipt(
+        self, attempt_id: str, outcome: str, evidence_ref: str | None, envelope_digest: str,
+        now: datetime,
+    ) -> RedactedReceipt:
+        """Settle ``unknown`` to a final outcome and write its redacted receipt in one transaction.
+
+        The receipt exists exactly when the settlement does. The transition rules of
+        ``record_outcome`` apply, so an unproven outcome stays ``unknown`` and a settled one is final.
+        """
+        _require_aware(now)
+        _require_text("envelope_digest", envelope_digest)
+        with self._immediate() as db:
+            row = db.execute(
+                "SELECT outcome, send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise AttemptStateError("no authorized outbox row for the attempt")
+            current, started = row
+            if not started:
+                raise OutcomeRefused("send_not_started")
+            check_transition(current, outcome, evidence_ref)
+            db.execute(
+                "UPDATE outbox SET outcome = ?, outcome_evidence = ? WHERE attempt_id = ?",
+                (outcome, evidence_ref, attempt_id),
+            )
+            return effect_receipts.insert_receipt(db, attempt_id, outcome, envelope_digest, now)
+
+    def receipt(self, attempt_id: str) -> StoredReceipt | None:
+        """Return the stored receipt for the attempt identity, or None."""
+        with self._lock:
+            return effect_receipts.get_receipt(self._db, attempt_id)
+
+    def mark_receipt_published(self, attempt_id: str, now: datetime) -> bool:
+        """Stamp the receipt as delivered to its observer; True only for the first stamp."""
+        _require_aware(now)
+        with self._immediate() as db:
+            return effect_receipts.mark_published(db, attempt_id, now)
+
+    def unpublished_receipts(self, limit: int = 100) -> list[StoredReceipt]:
+        """Return up to ``limit`` receipts whose publication never completed, oldest first."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be an integer from 1 to 1000")
+        with self._lock:
+            return effect_receipts.unpublished(self._db, limit)
+
     def outbox_row(self, attempt_id: str) -> dict[str, Any] | None:
         """Return the outbox row for the attempt as a dict, or None."""
         with self._lock:
@@ -1249,6 +1786,124 @@ class SqliteAttemptStore:
             if row is None:
                 return None
             return dict(zip((c[0] for c in cursor.description), row, strict=True))
+
+
+def _earliest_expiry(*stamps: str) -> str:
+    """Return the wire text of the earliest expiry, comparing parsed instants, never raw text.
+
+    The stored text is the original six-digit UTC wire stamp, so ``parse_timestamp`` reads it back
+    unchanged at send time.
+    """
+    return min(stamps, key=parse_timestamp)
+
+
+def _check_bound_lease(
+    db: sqlite3.Connection, attempt_id: str, lease_epoch_of: Callable[[str], int | None] | None
+) -> None:
+    """Refuse a bound attempt unless the consumer's current lease epoch is the one bound at creation.
+
+    The grant's ``consumer_lease_epoch`` and ``run_id`` were stored with the effect-grant binding.
+    An attempt with no binding has no lease fact and is not checked here. A missing view, a failing
+    view or a non-integer answer refuses (``send_lease_unavailable``); a different epoch refuses
+    (``effect.lease_stale``). The fencing epoch is a separate gate and is never read here.
+    """
+    row = db.execute(
+        "SELECT context FROM effect_grant_bindings WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if row is None:
+        return
+    try:
+        context = json.loads(row[0])
+        run_id, bound_epoch = context["run_id"], context["consumer_lease_epoch"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise OutcomeRefused("send_lease_unavailable") from error
+    if lease_epoch_of is None:
+        raise OutcomeRefused("send_lease_unavailable")
+    try:
+        current = lease_epoch_of(run_id)
+    except Exception as error:  # noqa: BLE001 - an unreadable lease view is a deny
+        raise OutcomeRefused("send_lease_unavailable") from error
+    if type(current) is not int or type(bound_epoch) is not int:
+        raise OutcomeRefused("send_lease_unavailable")
+    if current != bound_epoch:
+        raise OutcomeRefused(LEASE_STALE)
+
+
+def _recheck_send_authority(
+    db: sqlite3.Connection,
+    attempt_id: str,
+    now: datetime,
+    clock_skew: timedelta,
+    lease_epoch_of: Callable[[str], int | None] | None = None,
+) -> str | None:
+    """Re-check the durable send authority inside the caller's send transaction.
+
+    One shared helper for every send path (``begin_send`` with a time, inert sends, and
+    ``begin_bound_send``). It refuses with ``OutcomeRefused`` when the clock is quarantined, the
+    attempt has no recorded send authority (a legacy row never gets authority invented for it) or
+    that authority expired, an acknowledged revocation or issuer divergence applies, the issuer's
+    anchor is quarantined, or (for an effect-grant-bound attempt) the consumer lease epoch is not
+    the bound one (``_check_bound_lease``). It does not depend on any caller-supplied callback.
+    """
+    _require_aware(now)
+    attempt = _load_attempt(db, attempt_id)
+    clock = db.execute("SELECT utc, quarantined FROM clock_high_water WHERE id = 1").fetchone()
+    if clock is not None and clock[1]:
+        raise OutcomeRefused("send_clock_quarantined")
+    if clock is not None and now < datetime.fromisoformat(clock[0]) - clock_skew:
+        db.execute("UPDATE clock_high_water SET quarantined = 1 WHERE id = 1")
+        return "send_clock_regressed"
+    authority = db.execute(
+        "SELECT issuer_id, expires_at FROM send_authority WHERE attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if authority is None or now >= parse_timestamp(authority[1]):
+        raise OutcomeRefused("send_authority_expired_or_missing")
+    fact = dispatch_revocations.refusal_reason(
+        db, authority[0], attempt.grant_id, attempt.second_approval_ref
+    )
+    if fact is not None or _diverged(db, authority[0]):
+        raise OutcomeRefused("send_authority_revoked")
+    dispatch_anchor.assert_not_quarantined(db, authority[0])
+    _check_bound_lease(db, attempt_id, lease_epoch_of)
+    return None
+
+
+def _binding_in(db: sqlite3.Connection, attempt_id: str) -> StoredBinding | None:
+    """Read the durable final-boundary tuple for an attempt on an open connection."""
+    row = db.execute(
+        "SELECT a.state, a.grant_id, p.principal, p.operation_digest, p.destination,"
+        " r.expires_at, a.fencing_epoch, o.send_started, o.outcome"
+        " FROM dispatch_attempts a"
+        " LEFT JOIN reservations r ON r.reservation_id = a.reservation_id"
+        "  AND r.consumed_attempt_id = a.attempt_id"
+        " LEFT JOIN effect_proposals p ON p.proposal_id = r.proposal_id"
+        " LEFT JOIN outbox o ON o.attempt_id = a.attempt_id"
+        " WHERE a.attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    state, grant_id, principal, digest, target, expires, epoch, started, outcome = row
+    return StoredBinding(
+        attempt_id=attempt_id, state=state, grant_id=grant_id, principal=principal,
+        operation_digest=digest, target=target,
+        expires_at=None if expires is None else datetime.strptime(
+            expires, "%Y-%m-%dT%H:%M:%S.%fZ"
+        ).replace(tzinfo=UTC),
+        epoch=epoch, current_epoch=effect_fencing.current_epoch(db),
+        send_started=bool(started), outcome=outcome,
+        refusal=effect_fencing.stored_refusal(db, attempt_id),
+    )
+
+
+def _raise_stored(stored: StoredRefusal) -> Exception:
+    """Rebuild the exact refusal that was recorded as terminal for an attempt identity."""
+    if stored.kind == "reservation":
+        return ReservationRefused(stored.reason)
+    if stored.kind == "authorization" and stored.rule in AUTHORIZATION_RULES:
+        return AuthorizationRefused(stored.rule, stored.reason)  # type: ignore[arg-type]
+    return OutcomeRefused(stored.reason)
 
 
 def sender_precondition(store: SqliteAttemptStore, attempt_id: str) -> bool:
