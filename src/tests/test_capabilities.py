@@ -90,11 +90,15 @@ def test_missing_record_denies_every_bit_with_a_reason() -> None:
         (b"\xff\xfe", "capability.record_unreadable"),
         (b"not json", "capability.record_unreadable"),
         (b"x" * 70_000, "capability.record_unreadable"),
+        (b'{"a":' + b" " * 8_200 + b"1}", "capability.record_unreadable"),
         (b"[" * 10_000, "capability.record_unreadable"),
-        (b"[1, 2]", "capability.record_malformed"),
-        (b"null", "capability.record_malformed"),
+        (b"NaN", "capability.record_unreadable"),
+        (b"Infinity", "capability.record_unreadable"),
+        (b"-Infinity", "capability.record_unreadable"),
+        (b"[1, 2]", "capability.record_invalid"),
+        (b"null", "capability.record_invalid"),
     ],
-    ids=["bad-utf8", "not-json", "oversize", "recursive", "array", "null"],
+    ids=["bad-utf8", "not-json", "oversize", "oversize-8k", "recursive", "nan", "inf", "-inf", "array", "null"],
 )
 def test_unreadable_or_non_object_record_denies(raw: bytes, reason: str) -> None:
     """Undecodable, oversize or non-object input denies every bit."""
@@ -124,17 +128,17 @@ def _mutations() -> list[tuple[str, Any, str]]:
     return [
         ("schema", lambda r: r.update(schema="orama-capability-record/v2"), "capability.schema_unsupported"),
         ("no-schema", lambda r: r.pop("schema"), "capability.schema_unsupported"),
-        ("missing-bit", drop_bit, "capability.bit_missing"),
-        ("string-bit", string_bit, "capability.bit_not_boolean"),
-        ("int-bit", int_bit, "capability.bit_not_boolean"),
-        ("null-bit", null_bit, "capability.bit_not_boolean"),
-        ("extra-bit", lambda r: r["capabilities"].update(shell=False), "capability.record_malformed"),
-        ("extra-key", lambda r: r.update(extra=1), "capability.record_malformed"),
-        ("blank-id", lambda r: r.update(record_id=" "), "capability.record_malformed"),
-        ("bad-time", lambda r: r.update(issued_at="yesterday"), "capability.record_malformed"),
-        ("bad-digest", lambda r: r["binds"].update(binary_digest="sha256:xyz"), "capability.record_malformed"),
-        ("binds-extra", lambda r: r["binds"].update(more=BIN), "capability.record_malformed"),
-        ("blank-signature", lambda r: r.update(signature=" "), "capability.record_malformed"),
+        ("missing-bit", drop_bit, "capability.bit_invalid"),
+        ("string-bit", string_bit, "capability.bit_invalid"),
+        ("int-bit", int_bit, "capability.bit_invalid"),
+        ("null-bit", null_bit, "capability.bit_invalid"),
+        ("extra-bit", lambda r: r["capabilities"].update(shell=False), "capability.record_invalid"),
+        ("extra-key", lambda r: r.update(extra=1), "capability.record_invalid"),
+        ("blank-id", lambda r: r.update(record_id=" "), "capability.record_invalid"),
+        ("bad-time", lambda r: r.update(issued_at="yesterday"), "capability.record_invalid"),
+        ("bad-digest", lambda r: r["binds"].update(binary_digest="sha256:xyz"), "capability.record_invalid"),
+        ("binds-extra", lambda r: r["binds"].update(more=BIN), "capability.record_invalid"),
+        ("blank-signature", lambda r: r.update(signature=" "), "capability.record_invalid"),
         ("bin-mismatch", lambda r: r["binds"].update(binary_digest="sha256:" + "c" * 64), "capability.digest_mismatch"),
         ("cfg-mismatch", lambda r: r["binds"].update(config_digest="sha256:" + "c" * 64), "capability.digest_mismatch"),
     ]
@@ -170,6 +174,18 @@ def test_true_bit_without_expected_digests_is_unverified_and_denied() -> None:
     view = read_capability_record(signed(serving=True), signature_verifier=Signer())
     all_denied(view)
     assert view.record_state == "capability.digest_unverified"
+
+
+def test_digest_mismatch_takes_precedence_over_missing_expected_digest() -> None:
+    """A supplied mismatch is checked before unverified digests, even when a bit is true."""
+    view = read_capability_record(
+        signed(serving=True),
+        expected_binary_digest=None,
+        expected_config_digest="sha256:" + "f" * 64,
+        signature_verifier=Signer(),
+    )
+    all_denied(view)
+    assert view.record_state == "capability.digest_mismatch"
 
 
 def test_reader_is_pure_and_returns_immutable_views() -> None:

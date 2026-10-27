@@ -24,6 +24,7 @@ _MCP_HEADERS = {
 
 @pytest.fixture
 def docs_root(tmp_path, monkeypatch):
+    """Point the docs root at a small temporary corpus of markdown files."""
     root = tmp_path / "docs"
     root.mkdir()
     (root / "guide.md").write_text(
@@ -40,20 +41,24 @@ def docs_root(tmp_path, monkeypatch):
 
 @pytest.fixture
 def bearer_env(monkeypatch):
+    """Configure the control-plane bearer token and return it."""
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", _TOKEN)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     return _TOKEN
 
 
 def _auth() -> dict[str, str]:
+    """Return the Authorization header carrying the valid bearer token."""
     return {"Authorization": f"Bearer {_TOKEN}"}
 
 
 async def _client():
+    """Return an async HTTP client bound to the ASGI app."""
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 async def test_knowledge_routes_require_bearer(docs_root, bearer_env):
+    """Show that every knowledge route refuses missing or wrong bearer tokens."""
     async with await _client() as client:
         search = await client.get("/api/knowledge/search?q=human")
         mcp = await client.post("/api/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
@@ -69,6 +74,7 @@ async def test_knowledge_routes_require_bearer(docs_root, bearer_env):
 
 
 async def test_knowledge_routes_503_when_token_unconfigured(docs_root, monkeypatch):
+    """Show that knowledge routes answer 503 when no token is configured."""
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     async with await _client() as client:
@@ -77,6 +83,7 @@ async def test_knowledge_routes_503_when_token_unconfigured(docs_root, monkeypat
 
 
 async def test_agent_card_public_metadata_only(docs_root, monkeypatch):
+    """Show that the agent card is public and exposes metadata only."""
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
     async with await _client() as client:
@@ -91,6 +98,7 @@ async def test_agent_card_public_metadata_only(docs_root, monkeypatch):
 
 
 async def test_knowledge_page_public_and_data_free(docs_root, monkeypatch, bearer_env):
+    """Show that the knowledge page is public and embeds no corpus data."""
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     async with await _client() as client:
         resp = await client.get("/knowledge")
@@ -117,6 +125,7 @@ async def test_knowledge_page_public_and_data_free(docs_root, monkeypatch, beare
 
 
 async def test_authenticated_search_returns_hits(docs_root, bearer_env):
+    """Show that an authenticated search returns matching hits."""
     async with await _client() as client:
         resp = await client.get("/api/knowledge/search?q=human", headers=_auth())
     assert resp.status_code == 200
@@ -126,6 +135,7 @@ async def test_authenticated_search_returns_hits(docs_root, bearer_env):
 
 
 async def test_accented_query_matches_folded_docs(docs_root, bearer_env):
+    """Show that an unaccented query matches accented documents."""
     async with await _client() as client:
         resp = await client.get("/api/knowledge/search?q=deploiement", headers=_auth())
     assert resp.status_code == 200
@@ -133,6 +143,7 @@ async def test_accented_query_matches_folded_docs(docs_root, bearer_env):
 
 
 async def test_mcp_initialize_tools_list_and_search_docs(docs_root, bearer_env):
+    """Show that MCP initialize, tools/list and the search_docs tool work."""
     headers = {**_auth(), "Mcp-Protocol-Version": "2026-07-28", "Mcp-Method": "initialize"}
     async with await _client() as client:
         init = await client.post(
@@ -170,6 +181,7 @@ async def test_mcp_initialize_tools_list_and_search_docs(docs_root, bearer_env):
 
 
 async def test_mcp_initialized_notification_202(docs_root, bearer_env):
+    """Show that the MCP initialized notification is acknowledged with 202."""
     async with await _client() as client:
         resp = await client.post(
             "/api/mcp",
@@ -238,6 +250,7 @@ async def test_mcp_id_less_requests_rejected_before_handlers(docs_root, bearer_e
 
 
 async def test_mcp_protocol_errors(docs_root, bearer_env):
+    """Show that malformed MCP requests map to the right protocol errors."""
     async with await _client() as client:
         missing = await client.post(
             "/api/mcp",
@@ -292,6 +305,7 @@ async def test_mcp_protocol_errors(docs_root, bearer_env):
 
 
 async def test_a2a_message_send_and_task_methods(docs_root, bearer_env):
+    """Show that A2A message/send and the task methods behave as specified."""
     payload = {
         "jsonrpc": "2.0",
         "id": "a2a-1",
@@ -401,6 +415,7 @@ async def test_a2a_with_id_behavior_unchanged(docs_root, bearer_env):
 
 
 def test_symlink_escape_is_not_indexed(tmp_path, monkeypatch):
+    """Show that a symlink pointing outside the docs root is never indexed."""
     secret_dir = tmp_path / "outside"
     docs = tmp_path / "docs"
     secret_dir.mkdir()
@@ -418,6 +433,7 @@ def test_symlink_escape_is_not_indexed(tmp_path, monkeypatch):
 
 
 def test_search_respects_max_files_scan(tmp_path, monkeypatch):
+    """Show that the search stops after the configured maximum files scanned."""
     docs = tmp_path / "docs"
     docs.mkdir()
     for index in range(5):
@@ -429,7 +445,9 @@ def test_search_respects_max_files_scan(tmp_path, monkeypatch):
 
 
 async def test_search_timeout_maps_to_503_and_minus_32000(docs_root, bearer_env, monkeypatch):
+    """Show that a search timeout maps to HTTP 503 and JSON-RPC -32000."""
     def _slow(query: str, limit: int = 8, deadline: float | None = None):
+        """Sleep past the timeout to simulate a slow search."""
         time.sleep(1.5)
         return []
 
@@ -465,6 +483,7 @@ async def test_search_timeout_maps_to_503_and_minus_32000(docs_root, bearer_env,
 
 
 async def test_search_busy_maps_to_503(docs_root, bearer_env):
+    """Show that a saturated search pool maps to HTTP 503."""
     original = search_mod._slots
     slots = threading.BoundedSemaphore(1)
     assert slots.acquire(blocking=False)
@@ -473,13 +492,15 @@ async def test_search_busy_maps_to_503(docs_root, bearer_env):
         async with await _client() as client:
             resp = await client.get("/api/knowledge/search?q=human", headers=_auth())
         assert resp.status_code == 503
-        assert "busy" in resp.json()["detail"]
+        assert resp.json()["error"]["code"] == "deny.verifier_unavailable"
+        assert "busy" not in resp.text and "detail" not in resp.json()
     finally:
         search_mod._slots = original
         slots.release()
 
 
 async def test_insecure_dev_loopback_reads_without_token(docs_root, monkeypatch):
+    """Show that insecure dev mode on loopback reads without a token."""
     monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     monkeypatch.delenv("ORAMA_BIND_LAN", raising=False)
@@ -494,6 +515,7 @@ async def test_insecure_dev_loopback_reads_without_token(docs_root, monkeypatch)
 
 
 def test_every_app_route_is_declared():
+    """Show that every route of the app has a declared capability."""
     expected = {
         ("GET", "/api/knowledge/search"): RouteCapability.READ,
         ("POST", "/api/mcp"): RouteCapability.READ,
@@ -514,6 +536,7 @@ def test_every_app_route_is_declared():
 
 
 def test_env_helpers_fall_back_on_garbage(monkeypatch):
+    """Show that malformed environment values fall back to the defaults."""
     monkeypatch.setenv("ORAMA_KNOWLEDGE_MAX_FILES_SCAN", "nope")
     monkeypatch.setenv("ORAMA_KNOWLEDGE_SEARCH_TIMEOUT_S", "nope")
     monkeypatch.setenv("ORAMA_KNOWLEDGE_MAX_CONCURRENT_SEARCHES", "")
@@ -523,6 +546,7 @@ def test_env_helpers_fall_back_on_garbage(monkeypatch):
 
 
 def test_excerpt_centers_on_late_match(tmp_path, monkeypatch):
+    """Show that the excerpt is centred on a match late in the document."""
     docs = tmp_path / "docs"
     docs.mkdir()
     prefix = "Opening prose. " * 40
@@ -539,6 +563,7 @@ def test_excerpt_centers_on_late_match(tmp_path, monkeypatch):
 
 
 def test_search_empty_terms_missing_root_and_deadline(tmp_path, monkeypatch):
+    """Show that empty terms, a missing root and an expired deadline return nothing."""
     monkeypatch.setenv("ORAMA_DOCS_ROOT", str(tmp_path / "missing"))
     assert search_mod.search_docs("human") == []
     docs = tmp_path / "docs"
@@ -550,6 +575,7 @@ def test_search_empty_terms_missing_root_and_deadline(tmp_path, monkeypatch):
 
 
 def test_search_skips_oversized_file(tmp_path, monkeypatch):
+    """Show that files over the size limit are skipped by the search."""
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "tiny.md").write_text("# Tiny\nkeep-me-token\n", encoding="utf-8")
@@ -561,11 +587,15 @@ def test_search_skips_oversized_file(tmp_path, monkeypatch):
 
 
 def test_search_walk_oserror_does_not_raise(monkeypatch):
+    """Show that an OSError while walking the docs root does not propagate."""
     class _Boom:
+        """Docs root stub whose directory walk always fails."""
         def is_dir(self) -> bool:
+            """Report that the root exists."""
             return True
 
         def rglob(self, pattern: str):
+            """Fail the directory walk."""
             raise OSError("walk failed")
 
     monkeypatch.setattr(search_mod, "docs_root", lambda: _Boom())
@@ -573,6 +603,7 @@ def test_search_walk_oserror_does_not_raise(monkeypatch):
 
 
 async def test_mcp_method_not_found_and_bad_params(docs_root, bearer_env):
+    """Show that an unknown MCP method and bad params yield protocol errors."""
     async with await _client() as client:
         missing_method = await client.post(
             "/api/mcp",

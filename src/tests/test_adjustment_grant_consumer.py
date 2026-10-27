@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -194,6 +194,7 @@ def test_ledger_refuses_facts_that_did_not_come_through_the_port(ledger: StepLed
     """A look-alike object is not accepted by the consumption primitive."""
     @dataclass
     class Fake:
+        """Fake verified-grant facts."""
         grant_id: str = "g"
 
     assert refusal(lambda: ledger.consume_adjustment_grant(
@@ -417,17 +418,20 @@ class StubVerifier:
         revocation: Any = None,
         revocation_error: BaseException | None = None,
     ) -> None:
+        """Script the verifier's results."""
         self.result, self.error, self.obs = result, error, revocation
         self.revocation_error = revocation_error
         self.calls: list[str] = []
 
     def verify(self, wire: bytes) -> Any:
+        """Record the call and return the scripted grant or raise."""
         self.calls.append("verify")
         if self.error is not None:
             raise self.error
         return self.result
 
     def revocation(self, grant_id: str) -> Any:
+        """Record the call and return the scripted observation or raise."""
         self.calls.append("revocation")
         if self.revocation_error is not None:
             raise self.revocation_error
@@ -456,6 +460,7 @@ def test_consumer_rebuilds_a_foreign_result_into_its_own_type(ledger: StepLedger
 
     @dataclass(frozen=True)
     class ForeignVerified:
+        """Foreign verified-grant type unknown to the consumer."""
         grant_id: str
         principal: str
         run_id: str
@@ -481,12 +486,14 @@ def test_consumer_rebuilds_a_foreign_result_into_its_own_type(ledger: StepLedger
 def test_consumer_normalizes_foreign_failures_into_the_closed_set(ledger: StepLedger) -> None:
     """The issuer's own exception type, or an arbitrary error, never leaks inward."""
     class IssuerRefusal(Exception):
+        """Issuer refusal carrying a closed reason."""
         reason = "grant.signature_invalid"
 
     assert refusal(lambda: AdjustmentGrantConsumer(ledger, StubVerifier(error=IssuerRefusal())).consume(
         b"{}", caller_principal=PRINCIPAL)) == "grant.signature_invalid"
 
     class Unknown(Exception):
+        """Issuer refusal carrying an unknown free-form reason."""
         reason = "something free-form"
 
     assert refusal(lambda: AdjustmentGrantConsumer(ledger, StubVerifier(error=Unknown())).consume(
@@ -502,6 +509,7 @@ def test_consumer_answers_a_retry_after_the_verifier_reports_expiry(ledger: Step
     first = AdjustmentGrantConsumer(ledger, StubVerifier(result=g)).consume(wire_for(g), caller_principal=PRINCIPAL)
 
     class Expired(Exception):
+        """Issuer refusal for an expired grant."""
         reason = "grant.expired"
 
     retried = AdjustmentGrantConsumer(ledger, StubVerifier(error=Expired())).consume(
@@ -624,6 +632,7 @@ def test_the_consumption_clock_is_sampled_under_the_write_lock(ledger: StepLedge
     observed: list[bool] = []
 
     def clock() -> datetime:
+        """Record whether the clock is sampled inside the transaction."""
         observed.append(ledger._db.in_transaction)
         return g.expires_at + timedelta(seconds=1)
 
@@ -664,6 +673,7 @@ def test_consumer_treats_a_non_boolean_foreign_observation_as_malformed(ledger: 
 
     @dataclass(frozen=True)
     class Foreign:
+        """Foreign observation type with a non-boolean revoked flag."""
         grant_id: str
         revoked: Any
         observed_at: datetime
@@ -691,6 +701,7 @@ def test_retry_never_returns_a_receipt_from_an_uncommitted_consumption(ledger: S
     started = threading.Event()
 
     def reader() -> None:
+        """Reader thread signalling when it has started."""
         started.set()
         seen.append(ledger.retry_adjustment_grant(
             grant_id=g.grant_id, caller_principal=PRINCIPAL, payload_digest=g.payload_digest))
@@ -712,3 +723,28 @@ def test_retry_never_returns_a_receipt_from_an_uncommitted_consumption(ledger: S
             raise RuntimeError("writer failed after inserting")
     thread.join(2)
     assert seen == [None]
+
+
+def test_naive_consumption_clock_is_never_fresh(ledger: StepLedger) -> None:
+    """A naive clock through the consumer is refused as stale, never read as local time."""
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+    naive = now_utc().replace(tzinfo=None)
+    consumer = AdjustmentGrantConsumer(ledger, StubVerifier(result=g), clock=lambda: naive)
+    assert refusal(lambda: consumer.consume(wire_for(g), caller_principal=PRINCIPAL)) == "revocation.stale"
+    assert ledger.hold_state(RUN, "node::a::0") == "unknown"
+
+
+def test_aware_non_utc_clock_keeps_its_instant_at_the_freshness_edge(ledger: StepLedger) -> None:
+    """A +08:00 clock 61 s after the observation is stale and 59 s after is fresh (no shift)."""
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+    tz = timezone(timedelta(hours=8))
+    observed = now_utc()
+    obs = RevocationObservation(g.grant_id, False, observed)
+    stale_at = (observed + timedelta(seconds=61)).astimezone(tz)
+    assert refusal(lambda: ledger.consume_adjustment_grant(
+        g, obs, caller_principal=PRINCIPAL, clock=lambda: stale_at)) == "revocation.stale"
+    fresh_at = (observed + timedelta(seconds=59)).astimezone(tz)
+    receipt = ledger.consume_adjustment_grant(g, obs, caller_principal=PRINCIPAL, clock=lambda: fresh_at)
+    assert receipt.grant_id == g.grant_id

@@ -63,6 +63,7 @@ async def test_default_and_whitespace_activation_leave_grants_disabled(
     called = False
 
     def opener(_environ: dict[str, str]) -> tuple[StubVerifier, object]:
+        """Fail the test if the verifier opener is called."""
         nonlocal called
         called = True
         raise AssertionError("disabled composition called the verifier opener")
@@ -95,11 +96,13 @@ async def test_failed_verifier_open_is_unavailable_and_never_constructs_a_ledger
     constructed = False
 
     def no_ledger(_path: Path) -> None:
+        """Fail the test if a ledger is constructed for an unavailable verifier."""
         nonlocal constructed
         constructed = True
         raise AssertionError("unavailable verifier constructed a ledger")
 
     def opener(_environ: dict[str, str]) -> tuple[StubVerifier, object]:
+        """Fail to open the verifier with the configured error."""
         raise failure
 
     monkeypatch.setattr(serving_module, "StepLedger", no_ledger)
@@ -116,7 +119,7 @@ async def test_failed_verifier_open_is_unavailable_and_never_constructs_a_ledger
     assert (await health(app))["grants"] == "unavailable"
     response = await adjustment(app, "{}")
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
     assert constructed is False
     assert not ledger.exists()
 
@@ -137,10 +140,12 @@ async def test_ready_composition_spends_a_verified_grant_and_closes_on_shutdown(
     closed = 0
 
     def close() -> None:
+        """Count how many times the verifier is closed."""
         nonlocal closed
         closed += 1
 
     def opener(_environ: dict[str, str]) -> tuple[StubVerifier, object]:
+        """Open a stub verifier that returns the verified result."""
         return StubVerifier(result=verified), close
 
     app = serving_module.build_app(
@@ -165,6 +170,7 @@ async def test_ready_capability_stays_ready_when_one_grant_is_refused(
 ) -> None:
     """A per-request verifier result is not a global readiness transition."""
     def opener(_environ: dict[str, str]) -> tuple[StubVerifier, object]:
+        """Open a stub verifier whose grant check is refused as expired."""
         return StubVerifier(error=AdjustmentGrantRefused("grant.expired")), lambda: None
 
     app = serving_module.build_app(
@@ -177,8 +183,8 @@ async def test_ready_capability_stays_ready_when_one_grant_is_refused(
     )
 
     response = await adjustment(app, "{}")
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "grant.expired"
+    assert response.status_code == 400  # a verification refusal: its public deny code, never a conflict
+    assert response.json()["error"]["code"] == "deny.malformed_grant"
     assert (await health(app))["grants"] == "ready"
 
 
@@ -189,6 +195,7 @@ def test_resource_cleanup_releases_the_ledger_when_verifier_close_fails(
     ledger = StepLedger(tmp_path / "ledger.sqlite3")
 
     def fail() -> None:
+        """Fail as a verifier shutdown error."""
         raise RuntimeError("verifier shutdown failed")
 
     with pytest.raises(RuntimeError, match="verifier shutdown failed"):
@@ -202,6 +209,7 @@ def test_verifier_cleanup_warning_includes_only_a_sanitized_cause(
 ) -> None:
     """Cleanup diagnostics identify the failure class without retaining exception text."""
     def fail() -> None:
+        """Fail with an error carrying private state detail."""
         raise OSError("private state detail")
 
     with caplog.at_level("WARNING", logger="orama.serve"):
@@ -265,10 +273,12 @@ async def test_a_ledger_open_failure_closes_the_verifier_and_is_unavailable(
     closed = 0
 
     def close() -> None:
+        """Count how many times the verifier is closed."""
         nonlocal closed
         closed += 1
 
     def broken_ledger(_path: Path) -> None:
+        """Fail as if the ledger path were unusable."""
         raise OSError("ledger path is unusable")
 
     monkeypatch.setattr(serving_module, "StepLedger", broken_ledger)
@@ -286,7 +296,7 @@ async def test_a_ledger_open_failure_closes_the_verifier_and_is_unavailable(
     )
     response = await adjustment(app, "{}")
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
 
 
 async def test_a_failing_verifier_cleanup_still_closes_the_ledger_through_the_app(
@@ -296,10 +306,12 @@ async def test_a_failing_verifier_cleanup_still_closes_the_ledger_through_the_ap
     created: list[StepLedger] = []
 
     def tracking_ledger(path: Path) -> StepLedger:
+        """Construct a real ledger and keep it so the test can inspect it."""
         created.append(StepLedger(path))
         return created[-1]
 
     def fail() -> None:
+        """Fail as a verifier shutdown error."""
         raise RuntimeError("verifier shutdown failed")
 
     monkeypatch.setattr(serving_module, "StepLedger", tracking_ledger)
@@ -322,17 +334,23 @@ def test_the_default_opener_builds_only_a_verifier_config_and_needs_lifecycle_cl
     seen: dict[str, Any] = {}
 
     class FakeConfig:
+        """Config stub that records the keyword arguments it receives."""
         def __init__(self, **kwargs: Any) -> None:
+            """Record the config keyword arguments."""
             seen["config"] = kwargs
 
     class WithClose:
+        """Verifier stub that exposes a close method and counts calls."""
         def __init__(self) -> None:
+            """Start with no closes recorded."""
             self.closed = 0
 
         def close(self) -> None:
+            """Count one close call."""
             self.closed += 1
 
     class WithoutClose:
+        """Verifier stub without a close method."""
         pass
 
     module = ModuleType("phylax")

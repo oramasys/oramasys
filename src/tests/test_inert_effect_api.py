@@ -384,24 +384,23 @@ async def test_a_missing_bearer_on_the_live_route_gets_the_public_denial(bound: 
     untouched(bound)
 
 
-async def test_the_dark_route_keeps_the_plain_401_and_the_404(bound: Bound) -> None:
+async def test_the_dark_route_keeps_the_public_401_and_the_404(bound: Bound) -> None:
     """Dark at startup, or dark for this request: the auth-failure hook stays silent.
 
-    An unauthenticated caller gets the middleware's plain 401 (unchanged) and an authenticated
+    An unauthenticated caller gets the middleware's public 401 (``deny.unauthorized_caller``, no receipt_ref) and an authenticated
     caller the contract's 404 ``serving.route_not_exposed``; neither reaches the sender.
     """
     sender = FinalBoundarySender(bound.composer, sealed(bound))
     for app in (create_app(inert_sender=sender), bare_app(StartupOnlyEffects(), sender)):
         for headers in ({}, {"Authorization": "Bearer wrong-token-0000000000000"}):
             response = await post(app, {"attempt_id": ATTEMPT}, headers=headers)
-            assert response.status_code == 401
-            assert response.json() == {"detail": "Unauthorized"}
+            public_error(response, 401, "deny.unauthorized_caller")
         public_error(await post(app, {"attempt_id": ATTEMPT}), 404, "serving.route_not_exposed")
     untouched(bound)
 
 
 async def test_an_auth_failure_hook_can_never_turn_a_denial_into_an_allow(bound: Bound) -> None:
-    """The middleware takes only a 401 from a route's hook; anything else is its plain 401."""
+    """The middleware takes only a 401 from a route's hook; anything else is its public 401."""
 
     def allow(request):
         """A misbehaving hook that tries to answer a failed bearer with a success."""
@@ -415,8 +414,7 @@ async def test_an_auth_failure_hook_can_never_turn_a_denial_into_an_allow(bound:
         app = live_app(bound)
         app.state.auth_failure_handlers["/effects/inert"] = hook
         response = await post(app, {"attempt_id": ATTEMPT}, headers={})
-        assert response.status_code == 401
-        assert response.json() == {"detail": "Unauthorized"}
+        public_error(response, 401, "deny.unauthorized_caller")
     untouched(bound)
 
 
@@ -520,3 +518,30 @@ async def test_a_stale_lease_is_a_public_malformed_grant_deny_and_a_missing_view
     bound.h.store._lease_epoch_of = None
     public_error(await post(app, {"attempt_id": ATTEMPT}), 503, "deny.verifier_unavailable")
     untouched(bound)
+
+
+async def test_an_unknown_attempt_id_and_a_wrong_principal_get_the_identical_401(tmp_path: Path) -> None:
+    """No existence oracle: both answers have one status and one body shape, and no receipt_ref."""
+    b = bound_harness(tmp_path, principal="principal-1")
+    try:
+        app = create_app(
+            capability_config=effects_config(),
+            inert_sender=FinalBoundarySender(b.composer, sealed(b)),
+        )
+        wrong_principal = await post(app, {"attempt_id": ATTEMPT})
+        unknown = await post(app, {"attempt_id": "no-such-attempt"})
+        assert wrong_principal.status_code == unknown.status_code == 401
+
+        def normalized(response) -> bytes:
+            """Return the body bytes with the per-request correlation id blanked."""
+            body = response.json()
+            body["error"]["correlation_id"] = "-"
+            return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+
+        assert normalized(wrong_principal) == normalized(unknown)
+        for response in (wrong_principal, unknown):
+            error = public_error(response, 401, "deny.unauthorized_caller")
+            assert "receipt_ref" not in error
+        untouched(b)
+    finally:
+        b.h.store.close()

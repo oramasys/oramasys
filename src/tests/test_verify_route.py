@@ -262,7 +262,7 @@ async def test_a_revoked_observation_is_denied(tmp_path: Path) -> None:
     assert_public_error(await post(app, {"grant": "{}"}), 403, "deny.revoked_grant")
 
 
-@pytest.mark.parametrize("age", [61, 3600, -61])
+@pytest.mark.parametrize("age", [61, 3600, -61, -6])
 async def test_revocation_older_than_sixty_seconds_is_actually_raised_as_stale(
     tmp_path: Path, age: int
 ) -> None:
@@ -277,6 +277,38 @@ async def test_revocation_exactly_sixty_seconds_old_is_still_fresh(tmp_path: Pat
     stub = StubVerifier(result=verified(), revocation=observation(observed_at=NOW - timedelta(seconds=60)))
     app, _ = serving_app(stub, tmp_path)
     assert (await post(app, {"grant": "{}"})).status_code == 200
+
+
+@pytest.mark.parametrize("age", [-4, 0, 60])
+async def test_observations_inside_the_window_are_fresh(tmp_path: Path, age: int) -> None:
+    """Up to 5 s in the future (skew) and exactly 60 s old are fresh; the rule is Phylax's."""
+    stub = StubVerifier(result=verified(), revocation=observation(observed_at=NOW - timedelta(seconds=age)))
+    app, _ = serving_app(stub, tmp_path)
+    assert (await post(app, {"grant": "{}"})).status_code == 200
+
+
+async def test_the_clock_is_read_after_verification(tmp_path: Path) -> None:
+    """``now`` is sampled after the observation fetch: a slow fetch cannot freshen an old reading."""
+    box = {"now": NOW}
+
+    class SlowVerifier(StubVerifier):
+        """Verifier whose observation fetch takes two minutes of wall time."""
+
+        def revocation(self, grant_id: str):
+            """Advance the clock during the observation fetch, then answer."""
+            box["now"] = NOW + timedelta(seconds=120)
+            return super().revocation(grant_id)
+
+    stub = SlowVerifier(result=verified(), revocation=observation(observed_at=NOW))
+    app = create_app(
+        capability_config=CapabilityConfig(
+            record=signed(serving=True), expected_binary_digest=BIN, expected_config_digest=CFG,
+            signature_verifier=Signer(),
+        ),
+        grant_verifier=stub, denial_audit=DenialAuditLog(tmp_path / "audit" / "d.sqlite"),
+        verify_clock=lambda: box["now"],
+    )
+    assert_public_error(await post(app, {"grant": "{}"}), 503, "deny.revocation_stale")
 
 
 async def test_an_observation_for_a_different_grant_is_denied(tmp_path: Path) -> None:

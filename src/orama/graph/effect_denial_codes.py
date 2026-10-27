@@ -16,6 +16,7 @@ DENY_REVOKED_GRANT: Final = "deny.revoked_grant"
 DENY_MISSING_CAPABILITY_RECORD: Final = "deny.missing_capability_record"
 DENY_UNAUTHORIZED_CALLER: Final = "deny.unauthorized_caller"
 DENY_VERIFIER_UNAVAILABLE: Final = "deny.verifier_unavailable"
+DENY_GRANT_CONFLICT: Final = "deny.grant_conflict"
 
 _INTERNAL_TO_PUBLIC: Final[dict[str, str]] = {
     "revocation.stale": DENY_REVOCATION_STALE,
@@ -81,6 +82,25 @@ _EFFECT_TO_PUBLIC: Final[dict[str, str]] = {
 }
 
 
+# Adjustment-route refusals (``POST /adjustments``): a grant that verified but could not be consumed.
+# The ledger's answer is definitive ("do not retry"), so it keeps HTTP 409, but the public code hides
+# the internal reason: hold_ineligible, units_exceed_remaining, digest_conflict, epoch_fenced,
+# basis_mismatch and store_mismatch are all ``deny.grant_conflict``. A caller that is not the grant's
+# principal is ``deny.unauthorized_caller``, and a clock that cannot be vouched for is
+# ``deny.verifier_unavailable``. Verification codes use ``public_denial_code`` unchanged.
+_ADJUSTMENT_TO_PUBLIC: Final[dict[str, str]] = {
+    "grant.principal_mismatch": DENY_UNAUTHORIZED_CALLER,
+    "grant.clock_regressed": DENY_VERIFIER_UNAVAILABLE,
+    **{
+        reason: DENY_GRANT_CONFLICT
+        for reason in (
+            "grant.store_mismatch", "grant.epoch_fenced", "grant.hold_ineligible",
+            "grant.basis_mismatch", "grant.units_exceed_remaining", "grant.digest_conflict",
+        )
+    },
+}
+
+
 def public_denial_code(internal_reason: str) -> str:
     """Map a verifier-internal reason to the closed public set; unknown reasons deny as unavailable."""
     return _INTERNAL_TO_PUBLIC.get(internal_reason, DENY_VERIFIER_UNAVAILABLE)
@@ -96,4 +116,15 @@ def public_effect_denial_code(internal_reason: str) -> str:
         return _EFFECT_TO_PUBLIC[internal_reason]
     if internal_reason.startswith("envelope_"):
         return DENY_MALFORMED_GRANT
+    return public_denial_code(internal_reason)
+
+
+def public_adjustment_denial_code(internal_reason: str) -> str:
+    """Map an adjustment refusal code to the closed public set; unknown codes deny as unavailable.
+
+    Ledger consumption refusals become ``deny.grant_conflict`` (409), the principal refusal
+    ``deny.unauthorized_caller`` and any verification code maps as in ``public_denial_code``.
+    """
+    if internal_reason in _ADJUSTMENT_TO_PUBLIC:
+        return _ADJUSTMENT_TO_PUBLIC[internal_reason]
     return public_denial_code(internal_reason)

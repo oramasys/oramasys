@@ -28,7 +28,9 @@ def client(monkeypatch):
 
 
 def test_offline_run_delivers_bound_csv_and_canonical_receipt(client, monkeypatch):
+    """Show that an offline run delivers a bound CSV and a canonical receipt."""
     def forbidden(*args, **kwargs):
+        """Fail the test on any attempted network connection."""
         pytest.fail("Offline task attempted a network connection")
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     response = client.post("/api/workspace/run", json=FIXTURE)
@@ -50,6 +52,7 @@ def test_offline_run_delivers_bound_csv_and_canonical_receipt(client, monkeypatc
 
 @pytest.mark.parametrize("privacy", ["local", "sources", "redacted", "open"])
 def test_sharing_opt_in_does_not_create_egress(client, privacy):
+    """Show that opting in to sharing creates no egress."""
     result = client.post("/api/workspace/run", json={**FIXTURE, "privacy": privacy}).json()
     assert result["privacy"] == privacy
     assert result["receipt"]["actual_disclosure"] == "none"
@@ -70,20 +73,23 @@ def test_sharing_opt_in_does_not_create_egress(client, privacy):
     {"privacy": None},
 ])
 def test_invalid_or_unsupported_inputs_do_not_publish(client, change):
+    """Show that invalid or unsupported inputs publish nothing."""
     response = client.post("/api/workspace/run", json={**FIXTURE, **change})
-    assert response.status_code == 422
+    assert response.status_code == 400
     assert "csv" not in response.json()
 
 
 @pytest.mark.parametrize("value", ["=SUM(A1)", " +cmd", "\t@formula", "-2+3"])
 def test_spreadsheet_formula_cells_are_refused(client, value):
+    """Show that spreadsheet formula cells are refused."""
     payload = {**FIXTURE, "sources": [{"id": "s1", "title": value,
                "passage": value, "kind": "unverified"}],
                "records": [{"claim": value, "source_id": "s1", "quote": value}]}
-    assert client.post("/api/workspace/run", json=payload).status_code == 422
+    assert client.post("/api/workspace/run", json=payload).status_code == 400
 
 
 def test_capability_inventory_is_explicit_about_current_limits(client):
+    """Show that the capability inventory states the current limits."""
     result = client.get("/api/workspace/capabilities")
     assert result.status_code == 200
     assert result.json()["default_privacy"] == "local"
@@ -92,6 +98,7 @@ def test_capability_inventory_is_explicit_about_current_limits(client):
 
 
 def test_control_plane_auth_remains_required(client, monkeypatch):
+    """Show that control-plane authentication is still required."""
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "0")
     monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", "fixture-operator-capability-12345")
     response = client.post("/api/workspace/run", json=FIXTURE)
@@ -102,6 +109,7 @@ def test_control_plane_auth_remains_required(client, monkeypatch):
 
 
 def test_verifier_rejects_tampering_independently(client):
+    """Show that the verifier rejects tampered artifacts on its own."""
     result = client.post("/api/workspace/run", json=FIXTURE).json()
     verifier = importlib.import_module("orama.workspace.verify")
     assert verifier.verify_artifact(result["csv"], result["receipt"])["passed"]
@@ -113,6 +121,7 @@ def test_verifier_rejects_tampering_independently(client):
 
 
 def test_observation_excludes_task_source_and_private_text(client):
+    """Show that the observation leaks neither the task, source nor private text."""
     result = client.post("/api/workspace/run", json=FIXTURE).json()
     observation = json.dumps(result["observation"])
     for private in [FIXTURE["task"], FIXTURE["sources"][0]["passage"],
@@ -122,12 +131,14 @@ def test_observation_excludes_task_source_and_private_text(client):
 
 
 def test_oversized_request_is_refused_before_validation(client):
+    """Show that an oversized request is refused before validation."""
     response = client.post("/api/workspace/run", content=b" " * 270000,
                            headers={"Content-Type": "application/json"})
-    assert response.status_code == 413
+    assert response.status_code == 400
 
 
 def test_bare_carriage_return_round_trips_through_the_csv_verifier(client):
+    """Show that a bare carriage return survives the CSV verifier round trip."""
     text = "first\rsecond"
     payload = {**FIXTURE, "sources": [{"id": "s1", "title": "CR fixture",
                "passage": text, "kind": "primary"}],
@@ -138,6 +149,7 @@ def test_bare_carriage_return_round_trips_through_the_csv_verifier(client):
 
 
 def test_verifier_binds_the_receipt_to_the_hashed_input(client):
+    """Show that the verifier binds the receipt to the hashed input."""
     two_sources = {**FIXTURE, "sources": [
         {"id": "s1", "title": "One", "passage": "The fixture contains three records.",
          "kind": "unverified"},
@@ -159,6 +171,7 @@ def test_verifier_binds_the_receipt_to_the_hashed_input(client):
 
 
 def test_capabilities_expose_the_numeric_limits(client):
+    """Show that the capabilities endpoint exposes the numeric limits."""
     limits = client.get("/api/workspace/capabilities").json()["limits"]
     assert limits == {"max_body_bytes": 262144, "max_sources": 32, "max_records": 100,
                       "max_text_chars": 12000, "max_short_text_chars": 500}
@@ -180,6 +193,7 @@ def test_a_legacy_v1_receipt_still_verifies_with_an_explicit_note(client):
 
 
 def test_an_unknown_receipt_version_fails_closed(client):
+    """Show that an unknown receipt version fails closed."""
     result = client.post("/api/workspace/run", json=FIXTURE).json()
     verifier = importlib.import_module("orama.workspace.verify")
     receipt = json.loads(result["receipt_json"])

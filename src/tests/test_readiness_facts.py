@@ -209,7 +209,7 @@ def test_public_vocabulary_is_closed_and_maps_internal_reasons() -> None:
     }
     assert {k: public_denial_code(k) for k in expected} == expected
     assert {
-        "serving.not_ready", "serving.disabled", "serving.route_not_exposed",
+        "serving.not_ready", "serving.route_not_exposed", "deny.grant_conflict",
         "deny.revocation_stale", "deny.unknown_key", "deny.malformed_grant",
         "deny.revoked_grant", "deny.missing_capability_record",
         "deny.unauthorized_caller", "deny.verifier_unavailable",
