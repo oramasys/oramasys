@@ -43,6 +43,10 @@ FENCING_SCHEMA: Final = (
     "CREATE TRIGGER IF NOT EXISTS outbox_no_send_after_refusal BEFORE UPDATE OF send_started ON outbox"
     " WHEN EXISTS (SELECT 1 FROM attempt_refusals WHERE attempt_id = NEW.attempt_id)"
     " BEGIN SELECT RAISE(ABORT, 'a refused attempt cannot start a send'); END",
+    "CREATE TRIGGER IF NOT EXISTS outbox_no_replace_after_refusal BEFORE INSERT ON outbox"
+    " WHEN EXISTS (SELECT 1 FROM attempt_refusals WHERE attempt_id = NEW.attempt_id)"
+    " AND (NEW.send_started = 1 OR EXISTS (SELECT 1 FROM outbox WHERE attempt_id = NEW.attempt_id))"
+    " BEGIN SELECT RAISE(ABORT, 'a refused attempt cannot start or replace a send'); END",
     "CREATE TRIGGER IF NOT EXISTS fencing_epoch_log_no_update BEFORE UPDATE ON fencing_epoch_log"
     " BEGIN SELECT RAISE(ABORT, 'fencing_epoch_log is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS fencing_epoch_log_no_delete BEFORE DELETE ON fencing_epoch_log"

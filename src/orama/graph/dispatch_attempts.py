@@ -277,6 +277,17 @@ _SCHEMA: Final = (
     " BEFORE UPDATE OF consumed_attempt_id ON reservations"
     " WHEN OLD.consumed_attempt_id IS NOT NULL AND NEW.consumed_attempt_id IS NOT OLD.consumed_attempt_id"
     " BEGIN SELECT RAISE(ABORT, 'a consumed reservation cannot change its attempt'); END",
+    # BEFORE INSERT guards: ``INSERT OR REPLACE`` / ``REPLACE INTO`` / ``ON CONFLICT DO UPDATE`` remove or
+    # change the conflicting row without firing the DELETE/UPDATE triggers above (``recursive_triggers``
+    # is off), but they still fire BEFORE INSERT triggers, so these hold whatever the pragma says. No
+    # code path replaces these rows: every write is a plain INSERT or a NULL-to-value UPDATE.
+    "CREATE TRIGGER IF NOT EXISTS effect_grant_bindings_no_replace BEFORE INSERT ON effect_grant_bindings"
+    " WHEN EXISTS (SELECT 1 FROM effect_grant_bindings WHERE attempt_id = NEW.attempt_id)"
+    " BEGIN SELECT RAISE(ABORT, 'effect_grant_bindings is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS reservations_no_replace_consumed BEFORE INSERT ON reservations"
+    " WHEN EXISTS (SELECT 1 FROM reservations WHERE consumed_attempt_id IS NOT NULL AND"
+    " (reservation_id = NEW.reservation_id OR consumed_attempt_id = NEW.consumed_attempt_id))"
+    " BEGIN SELECT RAISE(ABORT, 'a consumed reservation cannot be replaced'); END",
     *FENCING_SCHEMA,
     *RECEIPT_SCHEMA,
     *APPROVAL_SCHEMA,
