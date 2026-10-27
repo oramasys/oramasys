@@ -277,3 +277,47 @@ def test_the_public_vocabulary_drops_two_codes_and_adds_the_grant_conflict() -> 
         "deny.malformed_grant", "deny.revoked_grant", "deny.missing_capability_record",
         "deny.unauthorized_caller", "deny.verifier_unavailable",
     }
+
+
+# ------------------------------------------------------------ F8: one revocation freshness rule
+
+
+def _guard_spend(ledger, age: float):
+    """Consume a fresh grant at a fixed clock with an observation taken ``age`` seconds ago."""
+    from datetime import timedelta
+
+    from orama.graph.grant_verifier import RevocationObservation
+    from tests.test_adjustment_grant_consumer import grant, now_utc, unknown_hold
+
+    epoch, hold = unknown_hold(ledger)
+    g = grant(ledger, hold, epoch)
+    now = now_utc()
+    observation = RevocationObservation(g.grant_id, False, now - timedelta(seconds=age))
+    return ledger.consume_adjustment_grant(g, observation, caller_principal=g.principal, now=now)
+
+
+@pytest.mark.parametrize(("age", "stale"), [(60, False), (60.5, True), (-4, False), (-6, True)])
+def test_the_ledger_uses_the_shared_freshness_rule(tmp_path: Path, age: float, stale: bool) -> None:
+    """Exactly 60 s old and 4 s ahead are fresh; 60.5 s old and 6 s ahead are stale."""
+    from orama.graph.execution_guard import StepLedger
+    from orama.graph.grant_verifier import AdjustmentGrantRefused
+
+    ledger = StepLedger(tmp_path / "ledger.sqlite3")
+    if stale:
+        with pytest.raises(AdjustmentGrantRefused) as refused:
+            _guard_spend(ledger, age)
+        assert refused.value.code == "revocation.stale"
+    else:
+        assert _guard_spend(ledger, age).grant_id
+
+
+def test_a_naive_observation_is_never_fresh() -> None:
+    """A timestamp without a timezone cannot be placed in time, so it is stale."""
+    from datetime import UTC, datetime
+
+    from orama.graph.grant_verifier import revocation_observation_fresh
+
+    now = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+    assert revocation_observation_fresh(now, now) is True
+    assert revocation_observation_fresh(now, now.replace(tzinfo=None)) is False
+    assert revocation_observation_fresh(now.replace(tzinfo=None), now) is False

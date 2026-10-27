@@ -51,6 +51,7 @@ from orama.graph.grant_verifier import (
     AdjustmentReceipt,
     RevocationObservation,
     VerifiedGrant,
+    revocation_observation_fresh,
 )
 
 try:  # The seam exists only in Core revisions that include R4 T1.
@@ -174,7 +175,7 @@ class StepLedger:
     SCHEMA_VERSION = 2
     SQLITE_MAX_INT = 2**63 - 1
     LEGACY_COST_BASIS = "legacy_step_only"
-    REVOCATION_MAX_AGE_SECONDS = 60.0  # ratified staleness bound (design 8.1)
+    # Revocation freshness (design 8.1): ``grant_verifier.revocation_observation_fresh`` is the one rule.
 
     def __init__(self, path: Path | str) -> None:
         """Open the durable ledger (WAL, synchronous FULL) at the given path."""
@@ -1600,8 +1601,7 @@ class StepLedger:
                     raise AdjustmentGrantRefused("grant.digest_conflict")
                 return AdjustmentReceipt.from_json(str(row[3]))
 
-            staleness = (current_time - revocation_obs.observed_at.astimezone(UTC)).total_seconds()
-            if abs(staleness) > self.REVOCATION_MAX_AGE_SECONDS:
+            if not revocation_observation_fresh(current_time, revocation_obs.observed_at):
                 raise AdjustmentGrantRefused("revocation.stale")
             if current_time >= verified.expires_at.astimezone(UTC):
                 raise AdjustmentGrantRefused("grant.expired")
