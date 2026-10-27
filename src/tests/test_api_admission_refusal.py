@@ -16,10 +16,13 @@ _RUN_PAYLOAD = {
 
 
 class _RefusingRunner:
+    """Runner stub whose invocation is always refused at admission."""
     def __init__(self, reason: str) -> None:
+        """Remember the refusal reason to raise on invoke."""
         self.reason = reason
 
     async def invoke(self, graph: object, state: object) -> object:
+        """Refuse admission with the configured reason."""
         raise AdmissionRefused(self.reason)
 
 
