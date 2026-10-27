@@ -139,6 +139,11 @@ def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _reject_constant(value: str) -> None:
+    """Refuse non-JSON numeric constants like NaN or Infinity."""
+    raise ValueError(f"non-JSON numeric constant: {value}")
+
+
 def _parse(raw: bytes | str | Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
     """Decode the raw record into a plain dict, or return the reason it cannot be used.
 
@@ -154,7 +159,11 @@ def _parse(raw: bytes | str | Mapping[str, Any] | None) -> tuple[dict[str, Any] 
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > _MAX_RECORD_BYTES:
         return None, REASON_UNREADABLE
     try:
-        decoded = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=_reject_duplicates)
+        decoded = json.loads(
+            bytes(raw).decode("utf-8"),
+            object_pairs_hook=_reject_duplicates,
+            parse_constant=_reject_constant,
+        )
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None, REASON_UNREADABLE
     if not isinstance(decoded, dict):
@@ -235,8 +244,8 @@ def read_capability_record(
     ):
         if expected is not None and expected != actual:
             return _deny(REASON_DIGEST_MISMATCH)
-        if expected is None and any_true:
-            return _deny(REASON_DIGEST_UNVERIFIED)
+    if any_true and (expected_binary_digest is None or expected_config_digest is None):
+        return _deny(REASON_DIGEST_UNVERIFIED)
     if any_true and not _signature_verified(record, signature_verifier):
         denied = _deny(UNSIGNED_ENABLEMENT)
         reasons = {n: (UNSIGNED_ENABLEMENT if recorded[n] else None) for n in CAPABILITY_BITS}

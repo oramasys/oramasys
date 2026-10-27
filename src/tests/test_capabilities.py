@@ -92,10 +92,13 @@ def test_missing_record_denies_every_bit_with_a_reason() -> None:
         (b"x" * 70_000, "capability.record_unreadable"),
         (b'{"a":' + b" " * 8_200 + b"1}", "capability.record_unreadable"),
         (b"[" * 10_000, "capability.record_unreadable"),
+        (b"NaN", "capability.record_unreadable"),
+        (b"Infinity", "capability.record_unreadable"),
+        (b"-Infinity", "capability.record_unreadable"),
         (b"[1, 2]", "capability.record_invalid"),
         (b"null", "capability.record_invalid"),
     ],
-    ids=["bad-utf8", "not-json", "oversize", "oversize-8k", "recursive", "array", "null"],
+    ids=["bad-utf8", "not-json", "oversize", "oversize-8k", "recursive", "nan", "inf", "-inf", "array", "null"],
 )
 def test_unreadable_or_non_object_record_denies(raw: bytes, reason: str) -> None:
     """Undecodable, oversize or non-object input denies every bit."""
@@ -171,6 +174,18 @@ def test_true_bit_without_expected_digests_is_unverified_and_denied() -> None:
     view = read_capability_record(signed(serving=True), signature_verifier=Signer())
     all_denied(view)
     assert view.record_state == "capability.digest_unverified"
+
+
+def test_digest_mismatch_takes_precedence_over_missing_expected_digest() -> None:
+    """A supplied mismatch is checked before unverified digests, even when a bit is true."""
+    view = read_capability_record(
+        signed(serving=True),
+        expected_binary_digest=None,
+        expected_config_digest="sha256:" + "f" * 64,
+        signature_verifier=Signer(),
+    )
+    all_denied(view)
+    assert view.record_state == "capability.digest_mismatch"
 
 
 def test_reader_is_pure_and_returns_immutable_views() -> None:

@@ -99,7 +99,15 @@ def install_public_error_handlers(app: FastAPI) -> None:
     async def validation_error(request: Request, error: Exception) -> JSONResponse:
         """Answer a request that failed validation with the public malformed denial."""
         correlation_id = new_correlation_id()
-        _log.warning("request invalid", extra={"correlation_id": correlation_id})
+        fields = (
+            [(".".join(map(str, item.get("loc", ()))), item.get("type")) for item in error.errors()]
+            if isinstance(error, RequestValidationError)
+            else []
+        )
+        _log.warning(
+            "request invalid",
+            extra={"correlation_id": correlation_id, "fields": fields},
+        )
         return error_response(400, DENY_MALFORMED_GRANT, correlation_id)
 
     async def http_error(request: Request, error: Exception) -> JSONResponse:

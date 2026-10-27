@@ -168,7 +168,7 @@ def revocation_observation_fresh(now: datetime, observed_at: datetime) -> bool:
         or now.utcoffset() is None or observed_at.utcoffset() is None
     ):
         return False
-    age = now - observed_at
+    age = now.astimezone(UTC) - observed_at.astimezone(UTC)
     return -REVOCATION_MAX_FUTURE_SKEW <= age <= REVOCATION_MAX_AGE
 
 
