@@ -3,9 +3,16 @@
 # so no core.autocrlf setting can change a digest.
 requirements/**/*.json -text
 requirements/**/*.txt -text
-requirements/generation-consumers.json -text
 requirements/generations/** -text
 # The one non-requirements file a declared consumer pins by raw-byte digest (file-sha256 check).
 src/tests/fixtures/graph-ownership-registry.json -text
 # Retained historical sources that test_generations_g1 compares byte for byte with the generation copies.
 src/tests/fixtures/graph-ownership-registry-*.json -text
+# Reviewed raw bytes of the producer candidate's hardware profiles (validate_coverage_packet.py).
+src/tests/fixtures/agate-hardware-profiles-172bfc3.json -text
+# Vendored phylax dispatch vectors, pinned by sha256 over the file bytes.
+src/tests/vectors/dispatch-permit-v1.json -text
+src/tests/vectors/dispatch-events-v1.json -text
+# Interop probes pinned byte for byte: the slice-2 probe by sha256, the part-3 probe by cmp in CI.
+src/tests/interop/c2_slice2_probe.py -text
+src/tests/interop/c2_part3_events_probe.py -text
