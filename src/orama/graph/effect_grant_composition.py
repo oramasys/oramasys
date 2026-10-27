@@ -52,7 +52,7 @@ from orama.graph.final_boundary import (
     RevocationLookup,
 )
 from orama.graph.sealed_envelope import seal
-from orama.graph.sealed_inert_driver import SealedInertDriver
+from orama.graph.sealed_inert_driver import SealedDriverRefused, SealedInertDriver
 
 PRINCIPAL_MISMATCH = "effect.principal_mismatch"
 BINDING_MISMATCH = "effect.binding_mismatch"
@@ -263,6 +263,23 @@ class TrustedEffectGrantComposer:
             raise EffectGrantRefused(PRINCIPAL_MISMATCH)
         return wire, context
 
+    @staticmethod
+    def _durable_envelope_digest(store: SqliteAttemptStore, attempt_id: str) -> str | None:
+        """Return the digest of the envelope sealed from the durable authorized tuple, or None.
+
+        None means the store no longer holds a complete tuple, so no receipt can be matched to it.
+        """
+        stored = store.attempt_binding(attempt_id)
+        if (
+            stored is None or stored.operation_digest is None or stored.target is None
+            or stored.epoch is None or stored.expires_at is None
+        ):
+            return None
+        return seal(
+            attempt_id, _sha256_form(stored.operation_digest), stored.epoch, stored.expires_at,
+            stored.target,
+        ).digest
+
     def bound_binding(
         self, store: SqliteAttemptStore, attempt_id: str, *, authenticated_principal: str
     ) -> tuple[FinalBoundaryBinding, Callable[[], None]]:
@@ -313,16 +330,22 @@ class TrustedEffectGrantComposer:
         There is no other send path: the envelope is sealed from the durable tuple and handed to
         ``SealedInertDriver``, which re-verifies at the final boundary, consumes the single-use
         approval and starts the send in one transaction that also re-runs the signed-grant check.
-        An attempt whose send already settled returns its stored receipt before any recheck (contract section 5).
+        An attempt whose send already settled with outcome ``confirmed`` returns its stored receipt before
+        any recheck (contract section 5), provided the receipt answers the envelope the durable tuple
+        seals to; otherwise ``replay_envelope_mismatch``.
         """
         if not isinstance(driver, SealedInertDriver):
             raise TypeError("the send must go through the sealed final boundary")
         self._require_principal(driver.store, attempt_id, authenticated_principal)
         settled = driver.store.receipt(attempt_id)
-        if settled is not None:
-            # Exact replay of a settled send (contract section 5): the stored receipt is returned
-            # right after the principal check, before any grant, expiry, lease or verifier recheck,
-            # so no later change can alter it and nothing is sent or consumed again.
+        if settled is not None and settled.receipt.outcome == "confirmed":
+            # Exact replay of a settled successful send (contract section 5): the stored receipt is
+            # returned right after the principal check, before any grant, expiry, lease or verifier
+            # recheck, so no later change can alter it and nothing is sent or consumed again. The
+            # receipt answers only the envelope the durable authorized tuple seals to (the same
+            # check as the driver's replay); any other outcome falls through to the normal path.
+            if settled.envelope_digest != self._durable_envelope_digest(driver.store, attempt_id):
+                raise SealedDriverRefused("replay_envelope_mismatch")
             return settled.receipt
         binding, recheck = self.bound_binding(
             driver.store, attempt_id, authenticated_principal=authenticated_principal

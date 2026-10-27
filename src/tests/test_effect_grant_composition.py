@@ -29,7 +29,7 @@ from orama.graph.effect_receipts import attempt_ref_for
 from orama.graph.final_boundary import FinalBoundaryBinding, FinalBoundaryRefused
 from orama.graph.inert_effect_driver import InertEffectDriver
 from orama.graph.sealed_envelope import seal
-from orama.graph.sealed_inert_driver import INERT_EVIDENCE, SealedInertDriver
+from orama.graph.sealed_inert_driver import INERT_EVIDENCE, SealedDriverRefused, SealedInertDriver
 from tests.test_dispatch_attempts import (
     ATTEMPT,
     GRANT,
@@ -833,3 +833,63 @@ def test_a_settled_receipt_is_never_shown_to_another_principal(bound: Bound) -> 
     sender(ATTEMPT, PRINCIPAL)
     with pytest.raises(EffectGrantRefused, match=PRINCIPAL_MISMATCH):
         sender(ATTEMPT, "someone-else")
+
+
+# ---------------------- the settled-receipt shortcut: envelope match and successful outcome only
+
+
+def _replace_stored_receipt(bound: Bound, monkeypatch: pytest.MonkeyPatch, **changes) -> None:
+    """Make the store hand the composer a stored receipt altered as given (the table is append-only)."""
+    store = bound.h.store
+    original = store.receipt
+    monkeypatch.setattr(store, "receipt", lambda attempt_id: _altered(original(attempt_id), changes))
+
+
+def _altered(stored, changes):
+    """Return the stored receipt with the given top-level or ``receipt.*`` fields replaced."""
+    receipt_changes = {k[8:]: v for k, v in changes.items() if k.startswith("receipt_")}
+    top = {k: v for k, v in changes.items() if not k.startswith("receipt_")}
+    if receipt_changes:
+        top["receipt"] = replace(stored.receipt, **receipt_changes)
+    return replace(stored, **top)
+
+
+def test_the_settled_shortcut_refuses_a_receipt_for_a_different_envelope(
+    bound: Bound, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored envelope digest that is not the durable tuple's seal is refused, never returned."""
+    sender = FinalBoundarySender(bound.composer, sealed(bound))
+    sender(ATTEMPT, PRINCIPAL)
+    _replace_stored_receipt(bound, monkeypatch, envelope_digest="0" * 64)
+    sim = Simulation()
+    with pytest.raises(SealedDriverRefused, match="replay_envelope_mismatch"):
+        bound.composer.send(sealed(bound, sim=sim), ATTEMPT, authenticated_principal=PRINCIPAL)
+    assert sim.calls == 0
+
+
+def test_the_settled_shortcut_refuses_when_the_durable_tuple_no_longer_seals_to_the_receipt(
+    bound: Bound, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A durable tuple that changed after settlement (or is incomplete) cannot answer the receipt."""
+    FinalBoundarySender(bound.composer, sealed(bound))(ATTEMPT, PRINCIPAL)
+    store = bound.h.store
+    original = store.attempt_binding
+    for change in (dict(epoch=original(ATTEMPT).epoch + 1), dict(target=None)):
+        monkeypatch.setattr(store, "attempt_binding", lambda a, c=change: replace(original(a), **c))
+        with pytest.raises(SealedDriverRefused, match="replay_envelope_mismatch"):
+            bound.composer.send(sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL)
+
+
+def test_the_settled_shortcut_answers_only_a_confirmed_outcome(
+    bound: Bound, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored receipt that is not ``confirmed`` falls through to the rechecking normal path."""
+    receipt = FinalBoundarySender(bound.composer, sealed(bound))(ATTEMPT, PRINCIPAL)
+    bound.verifier.revoked = True  # the normal path rechecks the signed grant; the shortcut would not
+    _replace_stored_receipt(bound, monkeypatch, receipt_outcome="failed")
+    with pytest.raises(EffectGrantRefused):
+        bound.composer.send(sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL)
+    monkeypatch.undo()
+    assert bound.composer.send(  # confirmed: the shortcut still answers despite the revocation
+        sealed(bound), ATTEMPT, authenticated_principal=PRINCIPAL
+    ) == receipt
