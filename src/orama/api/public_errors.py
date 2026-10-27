@@ -91,7 +91,7 @@ def install_public_error_handlers(app: FastAPI) -> None:
 
     ``RequestValidationError`` is ``400 deny.malformed_grant``; an unknown route or a wrong method
     (404/405) is ``404 serving.route_not_exposed`` so route existence is not revealed; a router's own
-    request rejection (400/413/422) keeps its status with ``deny.malformed_grant``; every other
+    request rejection (400/413/422) is ``400 deny.malformed_grant``; every other
     ``HTTPException`` and any unhandled error is ``503 deny.verifier_unavailable``. The framework
     messages and validation details are logged under the correlation id and never returned.
     """
@@ -109,8 +109,8 @@ def install_public_error_handlers(app: FastAPI) -> None:
         _log.warning("request refused", extra={"correlation_id": correlation_id, "status": status})
         if status in (404, 405):
             return error_response(404, SERVING_ROUTE_NOT_EXPOSED, correlation_id)
-        if status in (400, 413, 422):  # a rejected request, not an outage: keep its status
-            return error_response(status, DENY_MALFORMED_GRANT, correlation_id)
+        if status in (400, 413, 422):  # a rejected request, not an outage: always the fixed 400
+            return error_response(DENY_STATUS[DENY_MALFORMED_GRANT], DENY_MALFORMED_GRANT, correlation_id)
         return error_response(DENY_STATUS[DENY_VERIFIER_UNAVAILABLE], DENY_VERIFIER_UNAVAILABLE, correlation_id)
 
     async def unhandled_error(request: Request, error: Exception) -> JSONResponse:

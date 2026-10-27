@@ -71,7 +71,7 @@ def test_sharing_opt_in_does_not_create_egress(client, privacy):
 ])
 def test_invalid_or_unsupported_inputs_do_not_publish(client, change):
     response = client.post("/api/workspace/run", json={**FIXTURE, **change})
-    assert response.status_code == 422
+    assert response.status_code == 400
     assert "csv" not in response.json()
 
 
@@ -80,7 +80,7 @@ def test_spreadsheet_formula_cells_are_refused(client, value):
     payload = {**FIXTURE, "sources": [{"id": "s1", "title": value,
                "passage": value, "kind": "unverified"}],
                "records": [{"claim": value, "source_id": "s1", "quote": value}]}
-    assert client.post("/api/workspace/run", json=payload).status_code == 422
+    assert client.post("/api/workspace/run", json=payload).status_code == 400
 
 
 def test_capability_inventory_is_explicit_about_current_limits(client):
@@ -124,7 +124,7 @@ def test_observation_excludes_task_source_and_private_text(client):
 def test_oversized_request_is_refused_before_validation(client):
     response = client.post("/api/workspace/run", content=b" " * 270000,
                            headers={"Content-Type": "application/json"})
-    assert response.status_code == 413
+    assert response.status_code == 400
 
 
 def test_bare_carriage_return_round_trips_through_the_csv_verifier(client):

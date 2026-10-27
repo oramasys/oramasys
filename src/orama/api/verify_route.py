@@ -68,17 +68,18 @@ def _verify_only(
 
     This function only reads: it calls ``verify`` and ``revocation`` and discards the facts. The
     order is verify, then fetch the observation by grant id, then freshness; ``now`` is read only
-    after verification, so time spent in the verifier cannot make an old reading look fresh. The
+    after the observation is fetched, so time spent in the verifier or the fetch cannot make an old
+    reading look fresh. The
     freshness rule is ``revocation_observation_fresh`` (stale if older than 60 s, more than 5 s in
     the future, or naive).
     """
     try:
         verified = verifier.verify(wire)
         grant_id = verified.grant_id
+        observation = verifier.revocation(grant_id)
         now = now_of()
         if verified.expires_at <= now:
             raise AdjustmentGrantRefused("grant.expired")
-        observation = verifier.revocation(grant_id)
         if not isinstance(observation, RevocationObservation) or observation.grant_id != grant_id:
             raise _Denied(DENY_VERIFIER_UNAVAILABLE)
         if observation.revoked:

@@ -288,16 +288,16 @@ async def test_observations_inside_the_window_are_fresh(tmp_path: Path, age: int
 
 
 async def test_the_clock_is_read_after_verification(tmp_path: Path) -> None:
-    """``now`` is sampled after the verifier returns: slow verification cannot freshen an old reading."""
+    """``now`` is sampled after the observation fetch: a slow fetch cannot freshen an old reading."""
     box = {"now": NOW}
 
     class SlowVerifier(StubVerifier):
-        """Verifier whose verification takes two minutes of wall time."""
+        """Verifier whose observation fetch takes two minutes of wall time."""
 
-        def verify(self, wire: bytes):
-            """Advance the clock, then verify."""
+        def revocation(self, grant_id: str):
+            """Advance the clock during the observation fetch, then answer."""
             box["now"] = NOW + timedelta(seconds=120)
-            return super().verify(wire)
+            return super().revocation(grant_id)
 
     stub = SlowVerifier(result=verified(), revocation=observation(observed_at=NOW))
     app = create_app(

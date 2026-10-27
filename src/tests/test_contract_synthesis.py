@@ -193,7 +193,7 @@ async def test_no_route_response_carries_a_detail_key(monkeypatch: pytest.Monkey
     """
     from httpx import ASGITransport, AsyncClient
 
-    from orama.api.public_errors import PUBLIC_CODES
+    from orama.api.public_errors import DENY_STATUS, PUBLIC_CODES
     from orama.api.server import create_app
 
     if auth == "token-unconfigured":
@@ -206,9 +206,12 @@ async def test_no_route_response_carries_a_detail_key(monkeypatch: pytest.Monkey
         "good": {"Authorization": f"Bearer {TOKEN}"}, "token-unconfigured": {"Authorization": "Bearer x"},
     }[auth]
     app = create_app()
-    paths = {getattr(route, "path", "") for route in app.routes} | {"/no/such/route", "/effects"}
+    paths = {getattr(route, "path", "") for route in app.routes} | {
+        "/no/such/route", "/effects", "/api/workspace/run", "/api/workspace/capabilities",
+        "/api/mcp", "/api/a2a", "/api/knowledge/search", "/.well-known/agent-card.json", "/knowledge",
+    }
     paths = {p.replace("{", "x").replace("}", "") for p in paths if p}
-    bodies = [b"{}", b"not json", b'{"grant": 5}', b""]
+    bodies = [b"{}", b"not json", b'{"grant": 5}', b"", b"x" * 2_000_000]
     checked = 0
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         for path in sorted(paths):
@@ -221,7 +224,13 @@ async def test_no_route_response_carries_a_detail_key(monkeypatch: pytest.Monkey
                     if response.status_code >= 400:
                         decoded = response.json()
                         assert not _has_detail(decoded), (method, path, response.text)
-                        assert decoded["error"]["code"] in PUBLIC_CODES, (method, path, response.text)
+                        code = decoded.get("error", {}).get("code") if isinstance(decoded, dict) else None
+                        if path in ("/api/mcp", "/api/a2a") and isinstance(code, int):
+                            # Protocol-defined JSON-RPC error object (code is an int): kept as is.
+                            continue
+                        assert code in PUBLIC_CODES, (method, path, response.text)
+                        expected = DENY_STATUS.get(code, 503 if code == "serving.not_ready" else 404)
+                        assert response.status_code == expected, (method, path, response.text)
     assert checked > 100
 
 
