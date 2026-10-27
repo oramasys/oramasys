@@ -1583,7 +1583,14 @@ class StepLedger:
             # The consumption clock is sampled only now that the write lock is
             # held: time spent waiting for it must not let an expiring grant or
             # an ageing revocation observation pass on a stale reading.
-            current_time = (now or (clock or (lambda: datetime.now(UTC)))()).astimezone(UTC)
+            sampled = now or (clock or (lambda: datetime.now(UTC)))()
+            # The raw sample goes to the shared freshness predicate unconverted:
+            # converting a naive clock would silently make it aware (local time)
+            # and defeat the "naive is never fresh" rule. Only after it passes
+            # is the instant normalised to UTC for the remaining comparisons
+            # and for storage; an aware non-UTC clock keeps its exact instant.
+            observation_fresh = revocation_observation_fresh(sampled, revocation_obs.observed_at)
+            current_time = sampled.astimezone(UTC) if observation_fresh else sampled
 
             # A concurrent identical consumer may have won between the read above
             # and this write lock; an exact match gets the recorded receipt.
@@ -1601,7 +1608,7 @@ class StepLedger:
                     raise AdjustmentGrantRefused("grant.digest_conflict")
                 return AdjustmentReceipt.from_json(str(row[3]))
 
-            if not revocation_observation_fresh(current_time, revocation_obs.observed_at):
+            if not observation_fresh:
                 raise AdjustmentGrantRefused("revocation.stale")
             if current_time >= verified.expires_at.astimezone(UTC):
                 raise AdjustmentGrantRefused("grant.expired")
