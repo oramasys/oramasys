@@ -1,0 +1,359 @@
+"""Deployment profile: loading, fail-closed validation, master switch and CLI."""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from orama.deploy import profile as prof
+from orama.deploy.profile import ProfileError, StartupRefused
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "serving-profile.example.yml"
+OS_BY_PLATFORM = {"linux": "linux", "darwin": "macos", "win32": "windows"}
+
+BASE = """
+version: 1
+nodes:
+  - id: srv
+    os: linux
+    role: primary-server
+    endpoint: srv.example:8443
+  - id: cli
+    os: linux
+    role: client
+"""
+
+
+def _env(monkeypatch, tmp_path, text, node="srv", platform="linux", **extra):
+    """Write a profile, point the loader at it, and fake platform/node."""
+    path = tmp_path / "p.yml"
+    if path.exists():
+        path.unlink()
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+    for key in list(prof.os.environ):
+        if key.startswith("ORAMA_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("ORAMA_SERVING_PROFILE", str(path))
+    if node is not None:
+        monkeypatch.setenv("ORAMA_NODE_ID", node)
+    monkeypatch.setattr(prof.sys, "platform", platform)
+    for k, v in extra.items():
+        monkeypatch.setenv(k, v)
+    return path
+
+
+def _node(extra: str, role="primary-server") -> str:
+    """Build a one-node profile with extra node-level YAML lines."""
+    return (
+        "version: 1\nnodes:\n  - id: srv\n    os: linux\n"
+        f"    role: {role}\n    endpoint: srv.example:8443\n" + extra
+    )
+
+
+def test_no_profile_is_client(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, None)
+    eff = prof.load_effective()
+    assert (eff.role, eff.serving, eff.source) == ("client", "not-applicable", "no-profile")
+
+
+def test_unreadable_profile_is_client(monkeypatch, tmp_path):
+    path = _env(monkeypatch, tmp_path, BASE)
+    real = Path.read_bytes
+
+    def boom(self):
+        if self == path:
+            raise PermissionError("denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    eff = prof.load_effective()
+    assert (eff.role, eff.source) == ("client", "unreadable-profile")
+
+
+@pytest.mark.parametrize("text", ["", "- a\n- b\n", "version: [", "version: 2\nnodes: []\n"])
+def test_malformed_profile_is_error(monkeypatch, tmp_path, text):
+    _env(monkeypatch, tmp_path, text)
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+def test_no_matching_node_is_client(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE, node="other")
+    eff = prof.load_effective()
+    assert (eff.role, eff.source) == ("client", "no-matching-node")
+
+
+def test_hostname_fallback(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE, node=None)
+    monkeypatch.setattr(prof, "_hostname", lambda: "SRV.local")
+    assert prof.load_effective().role == "primary-server"
+
+
+def test_server_selected_and_hashed(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE)
+    eff = prof.load_effective()
+    assert (eff.role, eff.serving) == ("primary-server", "applicable")
+    assert len(eff.profile_sha256) == 64
+
+
+def test_override_can_only_downgrade(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE, ORAMA_NODE_ROLE="client")
+    eff = prof.load_effective()
+    assert (eff.role, eff.serving) == ("client", "not-applicable")
+    _env(monkeypatch, tmp_path, BASE, ORAMA_NODE_ROLE="off")
+    assert prof.load_effective().role == "off"
+    _env(monkeypatch, tmp_path, BASE, node="cli", ORAMA_NODE_ROLE="primary-server")
+    eff = prof.load_effective()
+    assert eff.role == "client"
+    assert "would promote" in eff.override_ignored
+    _env(monkeypatch, tmp_path, BASE, node="cli", ORAMA_NODE_ROLE="bogus")
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+def test_os_mismatch_refused_for_selected_node_only(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE, platform="darwin")
+    with pytest.raises(ProfileError, match="os"):
+        prof.load_effective()
+    mixed = BASE.replace("id: cli\n    os: linux", "id: cli\n    os: windows")
+    _env(monkeypatch, tmp_path, mixed)  # the other node's OS is irrelevant
+    assert prof.load_effective().role == "primary-server"
+
+
+@pytest.mark.parametrize(
+    "platform,name", [("darwin", "macos"), ("linux", "linux"), ("win32", "windows")]
+)
+def test_running_os_mapping(monkeypatch, platform, name):
+    monkeypatch.setattr(prof.sys, "platform", platform)
+    assert prof.running_os() == name
+
+
+def test_two_primaries(monkeypatch, tmp_path):
+    text = BASE.replace(
+        "id: cli\n    os: linux\n    role: client",
+        "id: cli\n    os: linux\n    role: primary-server\n    endpoint: b.example:1",
+    )
+    _env(monkeypatch, tmp_path, text)
+    with pytest.raises(ProfileError, match="more than one"):
+        prof.load_effective()
+
+
+def test_duplicate_ids(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE.replace("id: cli", "id: srv"))
+    with pytest.raises(ProfileError, match="duplicate"):
+        prof.load_effective()
+
+
+SECONDARY = """
+version: 1
+nodes:
+  - id: srv
+    os: linux
+    role: secondary-server
+    endpoint: srv.example:8443
+    public_state: signed-publication
+"""
+
+
+def test_secondary_without_primary(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, SECONDARY)
+    with pytest.raises(ProfileError, match="without a primary"):
+        prof.load_effective()
+
+
+def test_secondary_local_state_rejected(monkeypatch, tmp_path):
+    text = (
+        BASE + "  - id: sec\n    os: linux\n    role: secondary-server\n"
+        "    endpoint: sec.example:8443\n"
+    )
+    _env(monkeypatch, tmp_path, text, node="sec")
+    with pytest.raises(ProfileError, match="signed-publication"):
+        prof.load_effective()
+    ok = text + "    public_state: signed-publication\n"
+    _env(monkeypatch, tmp_path, ok, node="sec")
+    assert prof.load_effective().role == "secondary-server"
+
+
+@pytest.mark.parametrize(
+    "principal",
+    ["0", "root", "SYSTEM", "NT AUTHORITY\\SYSTEM", "S-1-5-18", "S-1-5-19",
+     "S-1-5-20", "S-1-5-32-544", "Administrators", "BUILTIN\\Administrators",
+     "LocalService", "NetworkService"],
+)
+def test_privileged_principal_refused(monkeypatch, tmp_path, principal):
+    extra = f"    identity:\n      expected_principal: '{principal}'\n"
+    _env(monkeypatch, tmp_path, _node(extra))
+    with pytest.raises(ProfileError, match="expected_principal"):
+        prof.load_effective()
+
+
+def test_uid_zero_integer_refused(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, _node("    identity:\n      expected_principal: 0\n"))
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+def test_unprivileged_principal_accepted(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, _node("    identity:\n      expected_principal: 501\n"))
+    assert prof.load_effective().role == "primary-server"
+
+
+def test_same_server_and_signer_refused(monkeypatch, tmp_path):
+    extra = "    identity:\n      server_account: Svc\n      signer_account: svc\n"
+    _env(monkeypatch, tmp_path, _node(extra))
+    with pytest.raises(ProfileError, match="differ"):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize(
+    "root",
+    ["\\\\\\\\server\\\\share", "//server/share", "/mnt/c/data", "/mnt/D", "relative/path"],
+)
+def test_bad_state_root_refused(monkeypatch, tmp_path, root):
+    _env(monkeypatch, tmp_path, _node(f'    state_root: "{root}"\n'))
+    with pytest.raises(ProfileError, match="state_root"):
+        prof.load_effective()
+
+
+def test_good_state_roots(monkeypatch, tmp_path):
+    for root in ["/var/lib/orama", "C:\\\\ProgramData\\\\Oramasys", "/mnt/data"]:
+        _env(monkeypatch, tmp_path, _node(f'    state_root: "{root}"\n'))
+        assert prof.load_effective().state_root
+
+
+def test_server_needs_endpoint(monkeypatch, tmp_path):
+    text = "version: 1\nnodes:\n  - id: srv\n    os: linux\n    role: primary-server\n"
+    _env(monkeypatch, tmp_path, text)
+    with pytest.raises(ProfileError, match="endpoint"):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize("extra", ["    bogus: 1\n", "    identity:\n      bogus: 1\n"])
+def test_unknown_node_keys_refused(monkeypatch, tmp_path, extra):
+    _env(monkeypatch, tmp_path, _node(extra))
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+def test_unknown_top_level_key_refused(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE + "extra: 1\n")
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+def test_serves_other_than_verify_refused(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, _node("    serves: [verify, sign]\n"))
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+def test_check_startup_refuses_grant_on_client(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE, node="cli")
+    eff = prof.load_effective()
+    with pytest.raises(StartupRefused):
+        prof.check_startup(eff, {"ORAMA_GRANT_SERVING": "1"})
+    prof.check_startup(eff, {})
+    server = prof.EffectiveNode("s", "linux", "primary-server", "applicable", "profile")
+    prof.check_startup(server, {"ORAMA_GRANT_SERVING": "1"})
+
+
+def test_serving_permitted_needs_all_three(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path, BASE)
+    eff = prof.load_effective()
+
+    def approved(effective):
+        """Stand-in D6 matcher that always approves."""
+        return True
+
+    on = {"ORAMA_GRANT_SERVING": "1"}
+    assert prof.serving_permitted(eff, {}) is False  # profile alone
+    assert prof.serving_permitted(eff, {}, approved) is False  # no env var
+    assert prof.serving_permitted(eff, on) is False  # no approval (default)
+    assert prof.serving_permitted(eff, on, approved) is True
+    client = prof.EffectiveNode("c", "linux", "client", "not-applicable", "profile")
+    assert prof.serving_permitted(client, on, approved) is False
+
+
+def _alternatives() -> dict[str, str]:
+    """Extract the commented alternative profiles from the example file."""
+    out, cur, name = {}, None, None
+    for line in EXAMPLE.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#@alt-start"):
+            name, cur = line.split()[1], []
+        elif line.startswith("#@alt-end"):
+            out[name] = "\n".join(cur) + "\n"
+            cur = None
+        elif cur is not None:
+            cur.append(re.sub(r"^# ?", "", line))
+    return out
+
+
+def _example_cases():
+    """Return (profile text, node id, platform, expected role) per example."""
+    text = EXAMPLE.read_text(encoding="utf-8")
+    alts = _alternatives()
+    return [
+        (text, "mac-studio", "darwin", "primary-server"),
+        (text, "win-node", "win32", "client"),
+        (text, "win-5080", "win32", "client"),
+        (alts["windows-only"], "win-node", "win32", "primary-server"),
+        (alts["linux-only"], "lnx-1", "linux", "primary-server"),
+        (alts["windows-primary-mac-client"], "win-node", "win32", "primary-server"),
+        (alts["windows-primary-mac-client"], "mac-studio", "darwin", "client"),
+    ]
+
+
+def test_example_profiles_validate(monkeypatch, tmp_path):
+    assert len(_alternatives()) == 3
+    for text, node, platform, role in _example_cases():
+        _env(monkeypatch, tmp_path, text, node=node, platform=platform)
+        assert prof.load_effective().role == role, (node, platform)
+
+
+def test_example_is_ip_free():
+    assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", EXAMPLE.read_text(encoding="utf-8"))
+
+
+def _cli(monkeypatch, tmp_path, text, args, **kw):
+    """Run the CLI with a faked environment; return the exit code."""
+    _env(monkeypatch, tmp_path, text, **kw)
+    return prof.main(args)
+
+
+def test_cli_exit_codes(monkeypatch, tmp_path, capsys):
+    assert _cli(monkeypatch, tmp_path, BASE, ["validate"]) == 0
+    assert _cli(monkeypatch, tmp_path, None, ["validate"]) == 0
+    assert "not-applicable" in capsys.readouterr().out
+    assert _cli(monkeypatch, tmp_path, "version: [", ["validate"]) == 2
+    assert _cli(monkeypatch, tmp_path, BASE, ["validate"], platform="darwin") == 2
+    assert _cli(monkeypatch, tmp_path, BASE, ["validate"], node="cli",
+                ORAMA_GRANT_SERVING="1") == 2
+    capsys.readouterr()
+    assert _cli(monkeypatch, tmp_path, BASE, ["show"]) == 0
+    assert json.loads(capsys.readouterr().out)["role"] == "primary-server"
+
+
+def test_plan_server_text_and_env(monkeypatch, tmp_path, capsys):
+    for platform, marker in [("linux", "orama-serve"), ("darwin", "_orama-serve"),
+                             ("win32", "pywin32")]:
+        text = BASE.replace("os: linux", f"os: {OS_BY_PLATFORM[platform]}")
+        assert _cli(monkeypatch, tmp_path, text, ["plan"], platform=platform) == 0
+        out = capsys.readouterr().out
+        assert marker in out and "Operator-only" in out
+        assert not re.search(r"password|token|secret|private key", out, re.I)
+    assert _cli(monkeypatch, tmp_path, BASE, ["plan", "--format", "env"]) == 0
+    env_out = capsys.readouterr().out
+    assert "ORAMA_NODE_ROLE=primary-server" in env_out
+    assert "GRANT_SERVING" not in env_out
+
+
+def test_plan_client_has_endpoint_only(monkeypatch, tmp_path, capsys):
+    assert _cli(monkeypatch, tmp_path, BASE, ["plan"], node="cli") == 0
+    out = capsys.readouterr().out
+    assert "srv.example:8443" in out
+    assert not re.search(r"useradd|dscl|New-LocalUser|sc\.exe|pywin32|account|Operator", out)
+    assert _cli(monkeypatch, tmp_path, BASE, ["plan", "--format", "env"], node="cli") == 0
+    assert "ORAMA_SERVING_ENDPOINT=srv.example:8443" in capsys.readouterr().out
