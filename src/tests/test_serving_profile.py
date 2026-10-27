@@ -91,13 +91,6 @@ def test_no_matching_node_is_client(monkeypatch, tmp_path):
     assert (eff.role, eff.source) == ("client", "no-matching-node")
 
 
-def test_hostname_fallback(monkeypatch, tmp_path):
-    """Check: hostname fallback."""
-    _env(monkeypatch, tmp_path, BASE, node=None)
-    monkeypatch.setattr(prof, "_hostname", lambda: "SRV.local")
-    assert prof.load_effective().role == "primary-server"
-
-
 def test_server_selected_and_hashed(monkeypatch, tmp_path):
     """Check: server selected and hashed."""
     _env(monkeypatch, tmp_path, BASE)
@@ -388,3 +381,151 @@ def test_plan_client_has_endpoint_only(monkeypatch, tmp_path, capsys):
     assert not re.search(r"useradd|dscl|New-LocalUser|sc\.exe|pywin32|account|Operator", out)
     assert _cli(monkeypatch, tmp_path, BASE, ["plan", "--format", "env"], node="cli") == 0
     assert "ORAMA_SERVING_ENDPOINT=srv.example:8443" in capsys.readouterr().out
+
+
+
+def _hosts(monkeypatch, tmp_path, ids, wanted, **kw):
+    """Load a profile of client nodes `ids` with ORAMA_NODE_ID=wanted."""
+    nodes = "".join(f"  - id: {i}\n    os: linux\n" for i in ids)
+    _env(monkeypatch, tmp_path, "version: 1\nnodes:\n" + nodes, node=wanted, **kw)
+    return prof.load_effective()
+
+
+def test_selection_is_exact_not_prefix(monkeypatch, tmp_path):
+    """Check: srv and srv.lab are distinct nodes."""
+    eff = _hosts(monkeypatch, tmp_path, ["srv", "srv.lab"], "SRV.lab")
+    assert eff.node_id == "srv.lab"
+
+
+@pytest.mark.parametrize("host", ["srv.home", "SRV.local", "srv.", "mac.evil", "\u017frv"])
+def test_hostname_must_equal_an_id(monkeypatch, tmp_path, host):
+    """Check: near-miss hostnames select nothing."""
+    _env(monkeypatch, tmp_path, BASE, node=None)
+    monkeypatch.setattr(prof, "_hostname", lambda: host)
+    eff = prof.load_effective()
+    assert (eff.role, eff.source) == ("client", "no-matching-node")
+
+
+def test_hostname_exact_match_and_env_wins(monkeypatch, tmp_path):
+    """Check: an exact hostname selects; ORAMA_NODE_ID takes priority."""
+    _env(monkeypatch, tmp_path, BASE, node=None)
+    monkeypatch.setattr(prof, "_hostname", lambda: "SRV")
+    assert prof.load_effective().node_id == "srv"
+    monkeypatch.setenv("ORAMA_NODE_ID", "cli")
+    assert prof.load_effective().node_id == "cli"
+
+
+def test_non_ascii_blank_and_colliding_ids_refused(monkeypatch, tmp_path):
+    """Check: non-ASCII, blank and colliding ids are errors."""
+    for ids in (["\u017frv"], ["' '"], ["A", "a"], ["a", "'a '"]):
+        with pytest.raises(ProfileError):
+            _hosts(monkeypatch, tmp_path, ids, "a")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "version: 1\nnodes:\n  - id: s\n    os: linux\n    role: client\n    role: off\n",
+        "version: 1\nnodes:\n  - id: s\n    os: linux\n    role: off\n    role: client\n",
+        "version: 1\nversion: 1\nnodes: []\n",
+    ],
+)
+def test_duplicate_yaml_keys_refused(monkeypatch, tmp_path, text):
+    """Check: duplicate mapping keys are errors at any level."""
+    _env(monkeypatch, tmp_path, text, node="s")
+    with pytest.raises(ProfileError, match="duplicate"):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize("value", ["0", "false", " ", "yes", "true", "2"])
+def test_grant_flag_must_be_exactly_one(monkeypatch, tmp_path, value):
+    """Check: any non-empty value other than 1 refuses."""
+    _env(monkeypatch, tmp_path, BASE)
+    eff = prof.load_effective()
+    with pytest.raises(ProfileError):
+        prof.serving_permitted(eff, {"ORAMA_GRANT_SERVING": value})
+    with pytest.raises(ProfileError):
+        prof.check_startup(eff, {"ORAMA_GRANT_SERVING": value})
+
+
+def test_grant_flag_empty_is_unset(monkeypatch, tmp_path):
+    """Check: empty ORAMA_GRANT_SERVING counts as unset."""
+    _env(monkeypatch, tmp_path, BASE, node="cli")
+    eff = prof.load_effective()
+    prof.check_startup(eff, {"ORAMA_GRANT_SERVING": ""})
+    assert prof.serving_permitted(eff, {"ORAMA_GRANT_SERVING": ""}) is False
+
+
+def test_missing_pyyaml_is_clear_error(monkeypatch, tmp_path, capsys):
+    """Check: a missing PyYAML exits 2 with a clear message."""
+    _env(monkeypatch, tmp_path, BASE)
+    monkeypatch.setitem(prof.sys.modules, "yaml", None)
+    with pytest.raises(ProfileError, match="PyYAML"):
+        prof.load_effective()
+    assert prof.main(["validate"]) == 2
+    assert "PyYAML" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "principal",
+    ["00", "-1", "+0", "0x0", "0.0", "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-512",
+     "S-1-5-80-0", "S-1-5-", "s-1-5-18", "ro\u200bot", "r\u00f6ot", "root ", "",
+     "S-1-5-21-1-2-3-500 "],
+)
+def test_principal_strictness(monkeypatch, tmp_path, principal):
+    """Check: malformed or privileged principals are refused."""
+    extra = f'    identity:\n      expected_principal: "{principal}"\n'
+    _env(monkeypatch, tmp_path, _node(extra))
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize(
+    "principal", ["501", "S-1-5-21-1-2-3-1001", "_orama-serve", "NT SERVICE\\\\OramaServe"]
+)
+def test_principal_accepted(monkeypatch, tmp_path, principal):
+    """Check: ordinary principals are accepted."""
+    extra = f'    identity:\n      expected_principal: "{principal}"\n'
+    _env(monkeypatch, tmp_path, _node(extra))
+    assert prof.load_effective().role == "primary-server"
+
+
+@pytest.mark.parametrize(
+    "root",
+    ["/var/../etc", "C:\\\\x\\\\..\\\\y", "/var/lib\\u0000x", "/mnt/wsl/x",
+     "/run/desktop/mnt/host/c", "/a\\nb"],
+)
+def test_state_root_extra_refusals(monkeypatch, tmp_path, root):
+    """Check: dot-dot, control chars and WSL/Docker mounts are refused."""
+    _env(monkeypatch, tmp_path, _node(f'    state_root: "{root}"\n'))
+    with pytest.raises(ProfileError, match="state_root"):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["srv", "srv:0", "srv:65536", "srv:x", "http://srv:1", "a b:1", ":80"]
+)
+def test_endpoint_must_be_host_port(monkeypatch, tmp_path, endpoint):
+    """Check: malformed endpoints are refused."""
+    text = (
+        "version: 1\nnodes:\n  - id: s\n    os: linux\n    role: primary-server\n"
+        f"    endpoint: '{endpoint}'\n"
+    )
+    _env(monkeypatch, tmp_path, text, node="s")
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+def test_size_cap(monkeypatch, tmp_path):
+    """Check: a profile over 256 KiB is an error."""
+    _env(monkeypatch, tmp_path, BASE + "#" + "x" * (256 * 1024) + "\n")
+    with pytest.raises(ProfileError, match="size"):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize("version", ["true", "1.0", "'1'", "2"])
+def test_version_strict(monkeypatch, tmp_path, version):
+    """Check: only the integer 1 is a valid version."""
+    _env(monkeypatch, tmp_path, BASE.replace("version: 1", f"version: {version}"))
+    with pytest.raises(ProfileError):
+        prof.load_effective()

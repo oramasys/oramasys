@@ -19,20 +19,27 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import platform
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Mapping
 
-import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 ENV_PROFILE = "ORAMA_SERVING_PROFILE"
 ENV_NODE_ID = "ORAMA_NODE_ID"
 ENV_NODE_ROLE = "ORAMA_NODE_ROLE"
 ENV_GRANT_SERVING = "ORAMA_GRANT_SERVING"
+MAX_PROFILE_BYTES = 256 * 1024
 
 Role = Literal["primary-server", "secondary-server", "client", "off"]
 SERVER_ROLES = ("primary-server", "secondary-server")
@@ -78,18 +85,49 @@ def _norm_account(value: str) -> str:
     return value.strip().replace("/", "\\").split("\\")[-1].replace(" ", "").casefold()
 
 
-def _is_forbidden_principal(value: str | int) -> bool:
-    """Return True for uid 0, SYSTEM, LocalService, NetworkService, Administrators."""
-    text = str(value).strip()
-    if text == "0" or text.casefold() in _FORBIDDEN_SIDS:
-        return True
-    return _norm_account(text) in _FORBIDDEN_PRINCIPAL_NAMES
+_SID_RE = re.compile(r"^S-1-\d+(-\d+)+$", re.IGNORECASE)
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$ \\-]*$")
+_DECIMAL_RE = re.compile(r"^[1-9][0-9]*$")
+_FORBIDDEN_RIDS = {"500", "512"}
+_ENDPOINT_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?:([0-9]{1,5})$")
+
+
+def _principal_problem(value: str | int) -> str | None:
+    """Return why ``value`` is not an acceptable expected_principal, else None."""
+    if isinstance(value, bool):
+        return "must be a uid, SID or account name"
+    if isinstance(value, int):
+        return None if value > 0 else "uid must be greater than 0"
+    text = value
+    if _DECIMAL_RE.match(text):
+        return None
+    if re.match(r"^S-\d", text, re.IGNORECASE):
+        if not _SID_RE.match(text):
+            return "malformed SID"
+        low = text.casefold()
+        if low in _FORBIDDEN_SIDS or low == "s-1-5-80-0":
+            return "privileged SID"
+        if low.rsplit("-", 1)[1] in _FORBIDDEN_RIDS:
+            return "administrative RID (500/512)"
+        return None
+    if not _NAME_RE.match(text):
+        return "must be a positive uid, a well-formed SID or an ASCII account name"
+    if _norm_account(text) in _FORBIDDEN_PRINCIPAL_NAMES:
+        return "privileged account name"
+    return None
 
 
 def _state_root_problem(path: str) -> str | None:
     """Return why ``path`` is not an absolute local path, or None if it is fine."""
+    if any(ord(c) < 32 or ord(c) == 127 for c in path):
+        return "control characters are not allowed"
+    if ".." in re.split(r"[\\/]", path):
+        return "'..' segments are not allowed"
     if path.startswith("\\\\") or path.startswith("//"):
         return "UNC/network paths are not allowed"
+    low = path.casefold()
+    if re.match(r"^/mnt/wsl(/|$)", low) or re.match(r"^/run/desktop/mnt/host(/|$)", low):
+        return "WSL/Docker host mounts are not allowed"
     if re.match(r"^/mnt/[A-Za-z](/|$)", path):
         return "WSL /mnt/<drive> paths are not allowed"
     if path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", path):
@@ -115,13 +153,10 @@ class Identity(BaseModel):
             and _norm_account(self.server_account) == _norm_account(self.signer_account)
         ):
             raise ValueError("server_account must differ from signer_account")
-        if self.expected_principal is not None and _is_forbidden_principal(
-            self.expected_principal
-        ):
-            raise ValueError(
-                "expected_principal must not be uid 0, SYSTEM, LocalService, "
-                "NetworkService or Administrators"
-            )
+        if self.expected_principal is not None:
+            problem = _principal_problem(self.expected_principal)
+            if problem:
+                raise ValueError(f"expected_principal: {problem}")
         return self
 
 
@@ -139,15 +174,25 @@ class Node(BaseModel):
     state_root: str | None = None
     public_state: Literal["local", "signed-publication"] = "local"
 
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        """Ids must be non-blank ASCII."""
+        if not value.strip():
+            raise ValueError("node id must not be blank")
+        if not value.isascii():
+            raise ValueError("node id must be ASCII")
+        return value
+
     @model_validator(mode="after")
     def _check(self) -> "Node":
         """Per-node rules: servers need an endpoint; state_root absolute+local."""
         if self.role in SERVER_ROLES and not self.endpoint:
             raise ValueError(f"node {self.id!r}: servers need an endpoint")
-        if self.endpoint is not None and (
-            re.search(r"\s", self.endpoint) or "://" in self.endpoint
-        ):
-            raise ValueError(f"node {self.id!r}: endpoint must be host:port")
+        if self.endpoint is not None:
+            m = _ENDPOINT_RE.match(self.endpoint)
+            if not m or not 1 <= int(m.group(1)) <= 65535:
+                raise ValueError(f"node {self.id!r}: endpoint must be host:port")
         if self.role == "secondary-server" and self.public_state != "signed-publication":
             raise ValueError(
                 f"node {self.id!r}: a secondary-server requires "
@@ -169,10 +214,18 @@ class ServingProfile(BaseModel):
     installation: str | None = None
     nodes: list[Node]
 
+    @field_validator("version", mode="before")
+    @classmethod
+    def _strict_version(cls, value: object) -> object:
+        """Accept only the integer 1 (not true, not 1.0)."""
+        if type(value) is not int:
+            raise ValueError("version must be the integer 1")
+        return value
+
     @model_validator(mode="after")
     def _check(self) -> "ServingProfile":
         """Cross-node rules: unique ids, at most one primary, secondary needs one."""
-        ids = [n.id for n in self.nodes]
+        ids = [n.id.strip().casefold() for n in self.nodes]
         dup = sorted({i for i in ids if ids.count(i) > 1})
         if dup:
             raise ValueError(f"duplicate node ids: {dup}")
@@ -224,12 +277,37 @@ def _fallback(source: str, path: Path | None, note: str, os_name: str) -> Effect
     )
 
 
-def parse_profile(text: str) -> ServingProfile:
-    """Parse and validate profile YAML; raise :class:`ProfileError` if malformed."""
+def _safe_load(text: str) -> object:
+    """Load YAML safely, refusing duplicate mapping keys at every level."""
     try:
-        data = yaml.safe_load(text)
+        import yaml
+    except ImportError as exc:
+        raise ProfileError("PyYAML is required to read the serving profile") from exc
+
+    class _StrictLoader(yaml.SafeLoader):
+        """SafeLoader that raises on duplicate mapping keys."""
+
+        def construct_mapping(self, node, deep=False):
+            """Build a mapping, rejecting a repeated key."""
+            seen = set()
+            for key_node, _ in node.value:
+                key = self.construct_object(key_node, deep=True)
+                if key in seen:
+                    raise yaml.constructor.ConstructorError(
+                        None, None, f"duplicate key {key!r}", key_node.start_mark
+                    )
+                seen.add(key)
+            return super().construct_mapping(node, deep)
+
+    try:
+        return yaml.load(text, Loader=_StrictLoader)  # SafeLoader subclass
     except yaml.YAMLError as exc:
         raise ProfileError(f"profile is not valid YAML: {exc}") from exc
+
+
+def parse_profile(text: str) -> ServingProfile:
+    """Parse and validate profile YAML; raise :class:`ProfileError` if malformed."""
+    data = _safe_load(text)
     if not isinstance(data, dict):
         raise ProfileError("profile must be a YAML mapping")
     try:
@@ -251,8 +329,12 @@ def resolve_node(
     """Select this node, check the OS, and apply the downgrade-only override."""
     os_name = running_os()
     wanted = (env.get(ENV_NODE_ID) or _hostname()).strip()
-    keys = {wanted.casefold(), wanted.split(".")[0].casefold()}
-    node = next((n for n in profile.nodes if n.id.casefold() in keys), None)
+    node = None
+    if wanted.isascii():  # casefold would fold e.g. U+017F into "s"
+        node = next(
+            (n for n in profile.nodes if n.id.strip().casefold() == wanted.casefold()),
+            None,
+        )
     if node is None:
         eff = _fallback("no-matching-node", path, f"no node matches {wanted!r}", os_name)
         eff.profile_sha256 = sha256
@@ -301,12 +383,26 @@ def load_effective(env: Mapping[str, str] | None = None) -> EffectiveNode:
             "unreadable-profile", path,
             f"profile unreadable: {exc.__class__.__name__}", running_os(),
         )
+    if len(raw) > MAX_PROFILE_BYTES:
+        raise ProfileError("profile exceeds the 256 KiB size limit")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ProfileError("profile is not valid UTF-8") from exc
     profile = parse_profile(text)
     return resolve_node(profile, env, path, hashlib.sha256(raw).hexdigest())
+
+
+def _grant_flag(env: Mapping[str, str]) -> bool:
+    """Return True iff ORAMA_GRANT_SERVING is exactly "1"; refuse other values."""
+    value = env.get(ENV_GRANT_SERVING)
+    if not value:
+        return False
+    if value != "1":
+        raise ProfileError(
+            f"{ENV_GRANT_SERVING} must be exactly '1' or unset; refusing (fail closed)"
+        )
+    return True
 
 
 def serving_permitted(
@@ -320,16 +416,15 @@ def serving_permitted(
     yet; the default never matches, so this is False until they are built.
     The profile alone never permits serving.
     """
-    if effective.role not in SERVER_ROLES:
-        return False
-    if not env.get(ENV_GRANT_SERVING):
+    flag = _grant_flag(env)
+    if effective.role not in SERVER_ROLES or not flag:
         return False
     return bool(approval_matcher(effective))
 
 
 def check_startup(effective: EffectiveNode, env: Mapping[str, str]) -> None:
     """Refuse (raise) if ORAMA_GRANT_SERVING is set on a client or off node."""
-    if env.get(ENV_GRANT_SERVING) and effective.role not in SERVER_ROLES:
+    if _grant_flag(env) and effective.role not in SERVER_ROLES:
         raise StartupRefused(
             f"{ENV_GRANT_SERVING} is set but the effective role is "
             f"{effective.role!r}; refusing to start"
@@ -404,6 +499,9 @@ def main(argv: list[str] | None = None) -> int:
         check_startup(eff, os.environ)
     except ProfileError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ImportError as exc:
+        print(f"error: missing dependency: {exc}", file=sys.stderr)
         return 2
     if args.cmd == "show":
         print(json.dumps(eff.to_dict(), indent=2, sort_keys=True))
