@@ -54,16 +54,19 @@ def _node(extra: str, role="primary-server") -> str:
 
 
 def test_no_profile_is_client(monkeypatch, tmp_path):
+    """Check: no profile is client."""
     _env(monkeypatch, tmp_path, None)
     eff = prof.load_effective()
     assert (eff.role, eff.serving, eff.source) == ("client", "not-applicable", "no-profile")
 
 
 def test_unreadable_profile_is_client(monkeypatch, tmp_path):
+    """Check: unreadable profile is client."""
     path = _env(monkeypatch, tmp_path, BASE)
     real = Path.read_bytes
 
     def boom(self):
+        """Check: boom."""
         if self == path:
             raise PermissionError("denied")
         return real(self)
@@ -75,24 +78,28 @@ def test_unreadable_profile_is_client(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("text", ["", "- a\n- b\n", "version: [", "version: 2\nnodes: []\n"])
 def test_malformed_profile_is_error(monkeypatch, tmp_path, text):
+    """Check: malformed profile is error."""
     _env(monkeypatch, tmp_path, text)
     with pytest.raises(ProfileError):
         prof.load_effective()
 
 
 def test_no_matching_node_is_client(monkeypatch, tmp_path):
+    """Check: no matching node is client."""
     _env(monkeypatch, tmp_path, BASE, node="other")
     eff = prof.load_effective()
     assert (eff.role, eff.source) == ("client", "no-matching-node")
 
 
 def test_hostname_fallback(monkeypatch, tmp_path):
+    """Check: hostname fallback."""
     _env(monkeypatch, tmp_path, BASE, node=None)
     monkeypatch.setattr(prof, "_hostname", lambda: "SRV.local")
     assert prof.load_effective().role == "primary-server"
 
 
 def test_server_selected_and_hashed(monkeypatch, tmp_path):
+    """Check: server selected and hashed."""
     _env(monkeypatch, tmp_path, BASE)
     eff = prof.load_effective()
     assert (eff.role, eff.serving) == ("primary-server", "applicable")
@@ -100,6 +107,7 @@ def test_server_selected_and_hashed(monkeypatch, tmp_path):
 
 
 def test_override_can_only_downgrade(monkeypatch, tmp_path):
+    """Check: override can only downgrade."""
     _env(monkeypatch, tmp_path, BASE, ORAMA_NODE_ROLE="client")
     eff = prof.load_effective()
     assert (eff.role, eff.serving) == ("client", "not-applicable")
@@ -115,6 +123,7 @@ def test_override_can_only_downgrade(monkeypatch, tmp_path):
 
 
 def test_os_mismatch_refused_for_selected_node_only(monkeypatch, tmp_path):
+    """Check: os mismatch refused for selected node only."""
     _env(monkeypatch, tmp_path, BASE, platform="darwin")
     with pytest.raises(ProfileError, match="os"):
         prof.load_effective()
@@ -127,11 +136,13 @@ def test_os_mismatch_refused_for_selected_node_only(monkeypatch, tmp_path):
     "platform,name", [("darwin", "macos"), ("linux", "linux"), ("win32", "windows")]
 )
 def test_running_os_mapping(monkeypatch, platform, name):
+    """Check: running os mapping."""
     monkeypatch.setattr(prof.sys, "platform", platform)
     assert prof.running_os() == name
 
 
 def test_two_primaries(monkeypatch, tmp_path):
+    """Check: two primaries."""
     text = BASE.replace(
         "id: cli\n    os: linux\n    role: client",
         "id: cli\n    os: linux\n    role: primary-server\n    endpoint: b.example:1",
@@ -142,6 +153,7 @@ def test_two_primaries(monkeypatch, tmp_path):
 
 
 def test_duplicate_ids(monkeypatch, tmp_path):
+    """Check: duplicate ids."""
     _env(monkeypatch, tmp_path, BASE.replace("id: cli", "id: srv"))
     with pytest.raises(ProfileError, match="duplicate"):
         prof.load_effective()
@@ -159,12 +171,14 @@ nodes:
 
 
 def test_secondary_without_primary(monkeypatch, tmp_path):
+    """Check: secondary without primary."""
     _env(monkeypatch, tmp_path, SECONDARY)
     with pytest.raises(ProfileError, match="without a primary"):
         prof.load_effective()
 
 
 def test_secondary_local_state_rejected(monkeypatch, tmp_path):
+    """Check: secondary local state rejected."""
     text = (
         BASE + "  - id: sec\n    os: linux\n    role: secondary-server\n"
         "    endpoint: sec.example:8443\n"
@@ -184,6 +198,7 @@ def test_secondary_local_state_rejected(monkeypatch, tmp_path):
      "LocalService", "NetworkService"],
 )
 def test_privileged_principal_refused(monkeypatch, tmp_path, principal):
+    """Check: privileged principal refused."""
     extra = f"    identity:\n      expected_principal: '{principal}'\n"
     _env(monkeypatch, tmp_path, _node(extra))
     with pytest.raises(ProfileError, match="expected_principal"):
@@ -191,17 +206,20 @@ def test_privileged_principal_refused(monkeypatch, tmp_path, principal):
 
 
 def test_uid_zero_integer_refused(monkeypatch, tmp_path):
+    """Check: uid zero integer refused."""
     _env(monkeypatch, tmp_path, _node("    identity:\n      expected_principal: 0\n"))
     with pytest.raises(ProfileError):
         prof.load_effective()
 
 
 def test_unprivileged_principal_accepted(monkeypatch, tmp_path):
+    """Check: unprivileged principal accepted."""
     _env(monkeypatch, tmp_path, _node("    identity:\n      expected_principal: 501\n"))
     assert prof.load_effective().role == "primary-server"
 
 
 def test_same_server_and_signer_refused(monkeypatch, tmp_path):
+    """Check: same server and signer refused."""
     extra = "    identity:\n      server_account: Svc\n      signer_account: svc\n"
     _env(monkeypatch, tmp_path, _node(extra))
     with pytest.raises(ProfileError, match="differ"):
@@ -213,18 +231,21 @@ def test_same_server_and_signer_refused(monkeypatch, tmp_path):
     ["\\\\\\\\server\\\\share", "//server/share", "/mnt/c/data", "/mnt/D", "relative/path"],
 )
 def test_bad_state_root_refused(monkeypatch, tmp_path, root):
+    """Check: bad state root refused."""
     _env(monkeypatch, tmp_path, _node(f'    state_root: "{root}"\n'))
     with pytest.raises(ProfileError, match="state_root"):
         prof.load_effective()
 
 
 def test_good_state_roots(monkeypatch, tmp_path):
+    """Check: good state roots."""
     for root in ["/var/lib/orama", "C:\\\\ProgramData\\\\Oramasys", "/mnt/data"]:
         _env(monkeypatch, tmp_path, _node(f'    state_root: "{root}"\n'))
         assert prof.load_effective().state_root
 
 
 def test_server_needs_endpoint(monkeypatch, tmp_path):
+    """Check: server needs endpoint."""
     text = "version: 1\nnodes:\n  - id: srv\n    os: linux\n    role: primary-server\n"
     _env(monkeypatch, tmp_path, text)
     with pytest.raises(ProfileError, match="endpoint"):
@@ -233,24 +254,28 @@ def test_server_needs_endpoint(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("extra", ["    bogus: 1\n", "    identity:\n      bogus: 1\n"])
 def test_unknown_node_keys_refused(monkeypatch, tmp_path, extra):
+    """Check: unknown node keys refused."""
     _env(monkeypatch, tmp_path, _node(extra))
     with pytest.raises(ProfileError):
         prof.load_effective()
 
 
 def test_unknown_top_level_key_refused(monkeypatch, tmp_path):
+    """Check: unknown top level key refused."""
     _env(monkeypatch, tmp_path, BASE + "extra: 1\n")
     with pytest.raises(ProfileError):
         prof.load_effective()
 
 
 def test_serves_other_than_verify_refused(monkeypatch, tmp_path):
+    """Check: serves other than verify refused."""
     _env(monkeypatch, tmp_path, _node("    serves: [verify, sign]\n"))
     with pytest.raises(ProfileError):
         prof.load_effective()
 
 
 def test_check_startup_refuses_grant_on_client(monkeypatch, tmp_path):
+    """Check: check startup refuses grant on client."""
     _env(monkeypatch, tmp_path, BASE, node="cli")
     eff = prof.load_effective()
     with pytest.raises(StartupRefused):
@@ -261,6 +286,7 @@ def test_check_startup_refuses_grant_on_client(monkeypatch, tmp_path):
 
 
 def test_serving_permitted_needs_all_three(monkeypatch, tmp_path):
+    """Check: serving permitted needs all three."""
     _env(monkeypatch, tmp_path, BASE)
     eff = prof.load_effective()
 
@@ -307,6 +333,7 @@ def _example_cases():
 
 
 def test_example_profiles_validate(monkeypatch, tmp_path):
+    """Check: example profiles validate."""
     assert len(_alternatives()) == 3
     for text, node, platform, role in _example_cases():
         _env(monkeypatch, tmp_path, text, node=node, platform=platform)
@@ -314,6 +341,7 @@ def test_example_profiles_validate(monkeypatch, tmp_path):
 
 
 def test_example_is_ip_free():
+    """Check: example is ip free."""
     assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", EXAMPLE.read_text(encoding="utf-8"))
 
 
@@ -324,6 +352,7 @@ def _cli(monkeypatch, tmp_path, text, args, **kw):
 
 
 def test_cli_exit_codes(monkeypatch, tmp_path, capsys):
+    """Check: cli exit codes."""
     assert _cli(monkeypatch, tmp_path, BASE, ["validate"]) == 0
     assert _cli(monkeypatch, tmp_path, None, ["validate"]) == 0
     assert "not-applicable" in capsys.readouterr().out
@@ -337,6 +366,7 @@ def test_cli_exit_codes(monkeypatch, tmp_path, capsys):
 
 
 def test_plan_server_text_and_env(monkeypatch, tmp_path, capsys):
+    """Check: plan server text and env."""
     for platform, marker in [("linux", "orama-serve"), ("darwin", "_orama-serve"),
                              ("win32", "pywin32")]:
         text = BASE.replace("os: linux", f"os: {OS_BY_PLATFORM[platform]}")
@@ -351,6 +381,7 @@ def test_plan_server_text_and_env(monkeypatch, tmp_path, capsys):
 
 
 def test_plan_client_has_endpoint_only(monkeypatch, tmp_path, capsys):
+    """Check: plan client has endpoint only."""
     assert _cli(monkeypatch, tmp_path, BASE, ["plan"], node="cli") == 0
     out = capsys.readouterr().out
     assert "srv.example:8443" in out

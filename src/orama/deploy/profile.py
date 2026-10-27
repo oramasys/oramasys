@@ -20,7 +20,7 @@ import hashlib
 import json
 import os
 import re
-import socket
+import platform
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -70,7 +70,7 @@ def running_os() -> str:
 
 def _hostname() -> str:
     """Return this host's name (a seam for tests)."""
-    return socket.gethostname()
+    return platform.node()
 
 
 def _norm_account(value: str) -> str:
