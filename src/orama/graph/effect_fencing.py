@@ -10,7 +10,10 @@ the same ``BEGIN IMMEDIATE`` transaction as the ledger transition:
   a replay with the same identity gets the same refusal back, and the table is append-only. The
   record carries the contract's public fields (``disposition``, ``refusal_code``, ``receipt_ref``,
   ``recorded_at``); the internal ``kind``, ``rule`` and ``reason`` stay beside them for logs and
-  internals only and never reach a response.
+  internals only and never reach a response. The row is an overlay that fences the attempt: it does
+  not release the reservation or delete the outbox row, and a trigger (``outbox_no_send_after_refusal``)
+  aborts any later ``send_started`` update on the attempt, so a refused attempt can never send even if
+  a writer skips the store's own checks.
 
 Functions take an open connection: the caller owns the transaction. This module holds no policy and
 no I/O beyond that connection.
@@ -37,6 +40,9 @@ FENCING_SCHEMA: Final = (
     " BEGIN SELECT RAISE(ABORT, 'attempt_refusals is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS attempt_refusals_no_delete BEFORE DELETE ON attempt_refusals"
     " BEGIN SELECT RAISE(ABORT, 'attempt_refusals is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS outbox_no_send_after_refusal BEFORE UPDATE OF send_started ON outbox"
+    " WHEN EXISTS (SELECT 1 FROM attempt_refusals WHERE attempt_id = NEW.attempt_id)"
+    " BEGIN SELECT RAISE(ABORT, 'a refused attempt cannot start a send'); END",
     "CREATE TRIGGER IF NOT EXISTS fencing_epoch_log_no_update BEFORE UPDATE ON fencing_epoch_log"
     " BEGIN SELECT RAISE(ABORT, 'fencing_epoch_log is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS fencing_epoch_log_no_delete BEFORE DELETE ON fencing_epoch_log"
