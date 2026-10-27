@@ -321,3 +321,73 @@ def test_a_naive_observation_is_never_fresh() -> None:
     assert revocation_observation_fresh(now, now) is True
     assert revocation_observation_fresh(now, now.replace(tzinfo=None)) is False
     assert revocation_observation_fresh(now.replace(tzinfo=None), now) is False
+
+
+# ------------------------------------------------------------ F9 / F10: capability record parser
+
+
+def _record_text(**bits: bool) -> str:
+    """Return a well-formed unsigned record as JSON text."""
+    import json
+
+    from tests.test_capabilities import make_record
+
+    return json.dumps(make_record(**bits))
+
+
+def test_a_duplicate_key_in_the_record_is_unreadable_and_denies_every_bit() -> None:
+    """A repeated key is refused, even when its last value would be an all-false record."""
+    from orama.api.capabilities import CAPABILITY_BITS, read_capability_record
+
+    text = _record_text()
+    duplicate = text.replace('"issuer"', '"record_id": "other", "issuer"', 1)
+    nested = text.replace('"serving": false', '"serving": true, "serving": false', 1)
+    for raw in (duplicate, nested):
+        view = read_capability_record(raw)
+        assert view.record_state == "capability.record_unreadable"
+        assert not any(view.is_effective(bit) for bit in CAPABILITY_BITS)
+
+
+def test_a_record_over_8_kib_is_denied_and_one_at_the_limit_is_parsed() -> None:
+    """The cap is 8192 bytes: one byte over is unreadable, exactly 8192 is read normally."""
+    from orama.api.capabilities import read_capability_record
+
+    base = _record_text().encode()
+    padded = base[:-1] + b" " * (8192 - len(base)) + b"}"
+    assert len(padded) == 8192
+    assert read_capability_record(padded).record_state == "valid"
+    assert read_capability_record(padded + b" ").record_state == "capability.record_unreadable"
+
+
+def test_the_capability_reason_set_is_the_one_closed_set() -> None:
+    """Every state the reader can report is in the shared closed set (plus ``valid``)."""
+    import json
+
+    from orama.api.capabilities import CAPABILITY_BITS, read_capability_record
+    from tests.test_capabilities import BIN, CFG, make_record
+
+    closed = {
+        "capability.record_missing", "capability.record_unreadable", "capability.schema_unsupported",
+        "capability.record_invalid", "capability.bit_invalid", "capability.digest_mismatch",
+        "capability.digest_unverified", "capability.unsigned_enablement",
+    }
+    cases = []
+    record = make_record()
+    cases.append((None, {}))
+    cases.append((b"\xff", {}))
+    cases.append((json.dumps({**record, "schema": "x"}), {}))
+    cases.append((json.dumps({**record, "extra": 1}), {}))
+    cases.append((json.dumps([1]), {}))
+    cases.append((json.dumps({**record, "capabilities": {**record["capabilities"], "serving": "yes"}}), {}))
+    cases.append((json.dumps({**record, "capabilities": {"serving": False}}), {}))
+    cases.append((json.dumps(record), {"expected_binary_digest": "sha256:" + "c" * 64}))
+    true_unsigned = make_record(serving=True)
+    cases.append((json.dumps(true_unsigned), {}))
+    cases.append((json.dumps(true_unsigned), {"expected_binary_digest": BIN, "expected_config_digest": CFG}))
+    seen = set()
+    for raw, kwargs in cases:
+        view = read_capability_record(raw, **kwargs)
+        seen.add(view.record_state)
+        assert not any(view.is_effective(bit) for bit in CAPABILITY_BITS)
+    assert seen <= closed and len(seen) >= 6
+    assert "capability.record_malformed" not in seen

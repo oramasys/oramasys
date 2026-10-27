@@ -3,8 +3,11 @@
 One runtime capability record carries five independent, default-deny bits. The reader is pure: it
 takes bytes, text or a parsed mapping and returns a ``CapabilityView``; it never reads a file, an
 environment variable or a clock, and it never infers one bit from another. A missing, unreadable,
-malformed, unknown-schema, digest-mismatched or unsigned-enablement record makes every effective bit
-``False`` and reports a stable reason code. ``serving`` never implies ``effects``.
+invalid, unknown-schema, digest-mismatched or unsigned-enablement record makes every effective bit
+``False`` and reports a stable reason code from one closed set shared with Phylax:
+``record_missing``, ``record_unreadable``, ``schema_unsupported``, ``record_invalid``,
+``bit_invalid``, ``digest_mismatch``, ``digest_unverified`` and ``unsigned_enablement``. A record
+over 8 KiB, with a repeated JSON key or that is not UTF-8 JSON is ``record_unreadable``. ``serving`` never implies ``effects``.
 
 ``signature: null`` is only valid while every bit is ``False``. A ``True`` bit needs an operator
 signature verified through the injected ``OperatorSignatureVerifier``; this repository wires none, so
@@ -31,10 +34,9 @@ CAPABILITY_BITS: Final[tuple[str, ...]] = (
 
 REASON_MISSING: Final = "capability.record_missing"
 REASON_UNREADABLE: Final = "capability.record_unreadable"
-REASON_MALFORMED: Final = "capability.record_malformed"
+REASON_INVALID: Final = "capability.record_invalid"
 REASON_SCHEMA: Final = "capability.schema_unsupported"
-REASON_BIT_MISSING: Final = "capability.bit_missing"
-REASON_BIT_NOT_BOOLEAN: Final = "capability.bit_not_boolean"
+REASON_BIT_INVALID: Final = "capability.bit_invalid"
 REASON_DIGEST_MISMATCH: Final = "capability.digest_mismatch"
 REASON_DIGEST_UNVERIFIED: Final = "capability.digest_unverified"
 UNSIGNED_ENABLEMENT: Final = "capability.unsigned_enablement"
@@ -60,7 +62,7 @@ _RECORD_KEYS: Final = frozenset(
 _RFC3339_UTC_RE: Final = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z"
 )
-_MAX_RECORD_BYTES: Final = 64 * 1024
+_MAX_RECORD_BYTES: Final = 8 * 1024
 
 
 class OperatorSignatureVerifier(Protocol):
@@ -127,8 +129,22 @@ def _deny(state: str) -> CapabilityView:
     )
 
 
+def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Refuse a JSON object that repeats a key: two readers could disagree on which value wins."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
 def _parse(raw: bytes | str | Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
-    """Decode the raw record into a plain dict, or return the reason it cannot be used."""
+    """Decode the raw record into a plain dict, or return the reason it cannot be used.
+
+    Text and bytes are capped at 8 KiB and parsed with duplicate keys refused; either is
+    ``record_unreadable``.
+    """
     if raw is None:
         return None, REASON_MISSING
     if isinstance(raw, Mapping):
@@ -138,11 +154,11 @@ def _parse(raw: bytes | str | Mapping[str, Any] | None) -> tuple[dict[str, Any] 
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > _MAX_RECORD_BYTES:
         return None, REASON_UNREADABLE
     try:
-        decoded = json.loads(bytes(raw).decode("utf-8"))
+        decoded = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=_reject_duplicates)
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None, REASON_UNREADABLE
     if not isinstance(decoded, dict):
-        return None, REASON_MALFORMED
+        return None, REASON_INVALID
     return decoded, ""
 
 
@@ -158,34 +174,34 @@ def _shape_reason(record: Mapping[str, Any]) -> str | None:
     if record.get("schema") != CAPABILITY_SCHEMA:
         return REASON_SCHEMA
     if set(record) != _RECORD_KEYS:
-        return REASON_MALFORMED
+        return REASON_INVALID
     for name in ("record_id", "issuer"):
         value = record[name]
         if not isinstance(value, str) or not value.strip():
-            return REASON_MALFORMED
+            return REASON_INVALID
     issued = record["issued_at"]
     if not isinstance(issued, str) or not _RFC3339_UTC_RE.fullmatch(issued):
-        return REASON_MALFORMED
+        return REASON_INVALID
     try:
         datetime.fromisoformat(issued.replace("Z", "+00:00"))
     except ValueError:
-        return REASON_MALFORMED
+        return REASON_INVALID
     bits, binds = record["capabilities"], record["binds"]
     if not isinstance(bits, dict) or not isinstance(binds, dict):
-        return REASON_MALFORMED
+        return REASON_INVALID
     if set(binds) != {"binary_digest", "config_digest"} or not all(
         isinstance(v, str) and _DIGEST_RE.fullmatch(v) for v in binds.values()
     ):
-        return REASON_MALFORMED
+        return REASON_INVALID
     if any(name not in bits for name in CAPABILITY_BITS):
-        return REASON_BIT_MISSING
+        return REASON_BIT_INVALID
     if set(bits) - set(CAPABILITY_BITS):
-        return REASON_MALFORMED
+        return REASON_INVALID
     if any(type(bits[name]) is not bool for name in CAPABILITY_BITS):
-        return REASON_BIT_NOT_BOOLEAN
+        return REASON_BIT_INVALID
     signature = record["signature"]
     if signature is not None and (not isinstance(signature, str) or not signature.strip()):
-        return REASON_MALFORMED
+        return REASON_INVALID
     return None
 
 
