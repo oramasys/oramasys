@@ -7,9 +7,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from orama.api.authz import AUTHENTICATED_CONTROL_PLANE_PRINCIPAL
+from orama.api.public_errors import DENY_STATUS
 from orama.api.server import create_app
+from orama.graph.effect_denial_codes import public_denial_code
 from orama.graph.execution_guard import StepLedger
 from orama.graph.grant_verifier import (
+    CONSUMPTION_REFUSAL_CODES,
     VERIFICATION_REFUSAL_CODES,
     AdjustmentGrantConsumer,
     AdjustmentGrantRefused,
@@ -54,7 +57,7 @@ async def test_an_unwired_deployment_refuses_every_adjustment() -> None:
     """Without an injected consumer the route is inert, not absent."""
     response = await post(create_app(), {"grant": "{}"}, AUTH)
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
 
 
 async def test_the_route_requires_the_bearer_capability(ledger: StepLedger) -> None:
@@ -70,7 +73,7 @@ async def test_insecure_dev_never_authenticates_an_adjustment(
     monkeypatch.setenv("ORAMA_INSECURE_DEV", "1")
     response = await post(wired(ledger, StubVerifier()), {"grant": "{}"})
     assert response.status_code == 401
-    assert response.json()["detail"]["code"] == "authentication_required"
+    assert response.json()["error"]["code"] == "deny.unauthorized_caller"
 
 
 async def test_a_verified_grant_is_spent_and_the_receipt_returned(ledger: StepLedger) -> None:
@@ -88,13 +91,13 @@ async def test_a_verified_grant_is_spent_and_the_receipt_returned(ledger: StepLe
     assert ledger.used("run-1") == 0
 
 
-async def test_a_grant_for_another_principal_is_a_conflict(ledger: StepLedger) -> None:
-    """Principal binding is enforced against the authenticated caller."""
+async def test_a_grant_for_another_principal_is_unauthorized(ledger: StepLedger) -> None:
+    """Principal binding is enforced against the authenticated caller: 401, not a ledger conflict."""
     epoch, hold = unknown_hold(ledger)
     g = grant(ledger, hold, epoch, principal="someone-else")
     response = await post(wired(ledger, StubVerifier(result=g)), {"grant": wire_for(g).decode()}, AUTH)
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "grant.principal_mismatch"
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "deny.unauthorized_caller"
     assert ledger.hold_state("run-1", "node::a::0") == "unknown"
 
 
@@ -103,18 +106,20 @@ async def test_a_deny_all_consumer_is_retryable_unavailable(ledger: StepLedger) 
     response = await post(create_app(adjustment_consumer=AdjustmentGrantConsumer(ledger)),
                           {"grant": "{}"}, AUTH)
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "verifier.unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
 
 
 @pytest.mark.parametrize("code", sorted(VERIFICATION_REFUSAL_CODES))
-async def test_every_verification_refusal_is_a_503_not_a_ledger_conflict(
+async def test_every_verification_refusal_is_a_public_deny_not_a_ledger_conflict(
     ledger: StepLedger, code: str
 ) -> None:
-    """Verification refusals never read as definitive ledger answers (409)."""
+    """Verification refusals map to their public deny code and never read as a ledger conflict (409)."""
     verifier = StubVerifier(error=AdjustmentGrantRefused(code))  # type: ignore[arg-type]
     response = await post(wired(ledger, verifier), {"grant": "{}"}, AUTH)
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == code
+    public = public_denial_code(code)
+    assert response.status_code == DENY_STATUS[public] != 409
+    assert response.json()["error"]["code"] == public
+    assert code not in response.text
 
 
 async def test_an_exact_retry_returns_the_same_receipt(ledger: StepLedger) -> None:
@@ -133,7 +138,9 @@ async def test_an_exact_retry_returns_the_same_receipt(ledger: StepLedger) -> No
 async def test_malformed_requests_are_rejected_before_the_ledger(ledger: StepLedger, body: dict) -> None:
     """Shape and size are validated at the boundary."""
     response = await post(wired(ledger, StubVerifier()), body, AUTH)
-    assert response.status_code == 422
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "deny.malformed_grant"
+    assert "detail" not in response.json()
 
 
 async def test_refusal_reasons_are_logged_with_the_correlation_id(ledger: StepLedger, caplog) -> None:
@@ -144,6 +151,42 @@ async def test_refusal_reasons_are_logged_with_the_correlation_id(ledger: StepLe
     g = grant(ledger, hold, epoch, principal="someone-else")
     with caplog.at_level(logging.WARNING, logger="orama.api.server"):
         response = await post(wired(ledger, StubVerifier(result=g)), {"grant": wire_for(g).decode()}, AUTH)
-    cid = response.json()["detail"]["correlation_id"]
+    cid = response.json()["error"]["correlation_id"]
     record = next(r for r in caplog.records if getattr(r, "correlation_id", None) == cid)
     assert record.reason == "grant.principal_mismatch"
+
+
+class RefusingConsumer:
+    """Consumer double whose ``consume`` refuses with one closed code, as the ledger would."""
+
+    def __init__(self, code: str) -> None:
+        """Remember the refusal code."""
+        self.code = code
+
+    def consume(self, wire: bytes, *, caller_principal: str):
+        """Refuse with the scripted closed code."""
+        raise AdjustmentGrantRefused(self.code)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "code", sorted(CONSUMPTION_REFUSAL_CODES - {"grant.principal_mismatch", "grant.clock_regressed"})
+)
+async def test_every_ledger_consumption_refusal_is_the_409_grant_conflict(code: str) -> None:
+    """Definitive ledger answers stay 409 but hide the internal reason behind one public code."""
+    app = create_app(adjustment_consumer=RefusingConsumer(code))  # type: ignore[arg-type]
+    response = await post(app, {"grant": "{}"}, AUTH)
+    assert response.status_code == 409
+    body = response.json()
+    assert set(body) == {"error"} and set(body["error"]) == {"code", "correlation_id"}
+    assert body["error"]["code"] == "deny.grant_conflict"
+    assert code not in response.text and "detail" not in body
+
+
+async def test_a_clock_regression_is_unavailable_not_a_conflict() -> None:
+    """A clock the ledger cannot vouch for is a retryable 503, not a definitive answer."""
+    response = await post(
+        create_app(adjustment_consumer=RefusingConsumer("grant.clock_regressed")),  # type: ignore[arg-type]
+        {"grant": "{}"}, AUTH,
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"

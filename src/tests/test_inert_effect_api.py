@@ -384,24 +384,23 @@ async def test_a_missing_bearer_on_the_live_route_gets_the_public_denial(bound: 
     untouched(bound)
 
 
-async def test_the_dark_route_keeps_the_plain_401_and_the_404(bound: Bound) -> None:
+async def test_the_dark_route_keeps_the_public_401_and_the_404(bound: Bound) -> None:
     """Dark at startup, or dark for this request: the auth-failure hook stays silent.
 
-    An unauthenticated caller gets the middleware's plain 401 (unchanged) and an authenticated
+    An unauthenticated caller gets the middleware's public 401 (``deny.unauthorized_caller``, no receipt_ref) and an authenticated
     caller the contract's 404 ``serving.route_not_exposed``; neither reaches the sender.
     """
     sender = FinalBoundarySender(bound.composer, sealed(bound))
     for app in (create_app(inert_sender=sender), bare_app(StartupOnlyEffects(), sender)):
         for headers in ({}, {"Authorization": "Bearer wrong-token-0000000000000"}):
             response = await post(app, {"attempt_id": ATTEMPT}, headers=headers)
-            assert response.status_code == 401
-            assert response.json() == {"detail": "Unauthorized"}
+            public_error(response, 401, "deny.unauthorized_caller")
         public_error(await post(app, {"attempt_id": ATTEMPT}), 404, "serving.route_not_exposed")
     untouched(bound)
 
 
 async def test_an_auth_failure_hook_can_never_turn_a_denial_into_an_allow(bound: Bound) -> None:
-    """The middleware takes only a 401 from a route's hook; anything else is its plain 401."""
+    """The middleware takes only a 401 from a route's hook; anything else is its public 401."""
 
     def allow(request):
         """A misbehaving hook that tries to answer a failed bearer with a success."""
@@ -415,8 +414,7 @@ async def test_an_auth_failure_hook_can_never_turn_a_denial_into_an_allow(bound:
         app = live_app(bound)
         app.state.auth_failure_handlers["/effects/inert"] = hook
         response = await post(app, {"attempt_id": ATTEMPT}, headers={})
-        assert response.status_code == 401
-        assert response.json() == {"detail": "Unauthorized"}
+        public_error(response, 401, "deny.unauthorized_caller")
     untouched(bound)
 
 

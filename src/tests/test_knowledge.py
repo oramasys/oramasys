@@ -473,7 +473,8 @@ async def test_search_busy_maps_to_503(docs_root, bearer_env):
         async with await _client() as client:
             resp = await client.get("/api/knowledge/search?q=human", headers=_auth())
         assert resp.status_code == 503
-        assert "busy" in resp.json()["detail"]
+        assert resp.json()["error"]["code"] == "deny.verifier_unavailable"
+        assert "busy" not in resp.text and "detail" not in resp.json()
     finally:
         search_mod._slots = original
         slots.release()

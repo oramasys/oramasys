@@ -116,7 +116,7 @@ async def test_failed_verifier_open_is_unavailable_and_never_constructs_a_ledger
     assert (await health(app))["grants"] == "unavailable"
     response = await adjustment(app, "{}")
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
     assert constructed is False
     assert not ledger.exists()
 
@@ -177,8 +177,8 @@ async def test_ready_capability_stays_ready_when_one_grant_is_refused(
     )
 
     response = await adjustment(app, "{}")
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "grant.expired"
+    assert response.status_code == 400  # a verification refusal: its public deny code, never a conflict
+    assert response.json()["error"]["code"] == "deny.malformed_grant"
     assert (await health(app))["grants"] == "ready"
 
 
@@ -286,7 +286,7 @@ async def test_a_ledger_open_failure_closes_the_verifier_and_is_unavailable(
     )
     response = await adjustment(app, "{}")
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
 
 
 async def test_a_failing_verifier_cleanup_still_closes_the_ledger_through_the_app(

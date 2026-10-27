@@ -163,8 +163,8 @@ async def test_a_revocation_after_open_is_refused_and_readiness_does_not_change(
         response = await request(
             app, "POST", "/adjustments", json={"grant": second.to_wire().decode()}, headers=AUTH
         )
-        assert response.status_code == 503  # verification refusals are 503, never a 409 conflict
-        assert response.json()["detail"]["code"] == "grant.revoked"
+        assert response.status_code == 403  # a verification refusal: deny.revoked_grant, never a 409
+        assert response.json()["error"]["code"] == "deny.revoked_grant"
         assert world.ledger.hold_state(RUN, first_attempt) == "released"
         assert world.ledger.hold_state(RUN, second_attempt) == "unknown"
         assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
@@ -188,7 +188,7 @@ async def test_missing_verifier_state_is_unavailable_and_never_opens_the_ledger(
     assert (await request(app, "GET", "/health")).json()["grants"] == "unavailable"
     response = await request(app, "POST", "/adjustments", json={"grant": "{}"}, headers=AUTH)
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
     assert constructed == []
     assert list(empty.iterdir()) == []
 

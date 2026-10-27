@@ -168,3 +168,112 @@ def test_a_divergence_found_by_the_recheck_writes_the_refusal_row(bound: Bound) 
     assert bound.h.store.terminal_refusal(ATTEMPT).reason == "issuer_revoked"
     assert sim.calls == 0
     untouched(bound)
+
+
+# ------------------------------------------------------------ F5: one closed error envelope
+
+TOKEN = "test-control-plane-token-32b"
+
+
+def _has_detail(value: object) -> bool:
+    """Return True when a ``"detail"`` key occurs anywhere in a decoded JSON value."""
+    if isinstance(value, dict):
+        return "detail" in value or any(_has_detail(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_detail(v) for v in value)
+    return False
+
+
+@pytest.mark.parametrize("auth", ["none", "wrong", "good", "token-unconfigured"])
+async def test_no_route_response_carries_a_detail_key(monkeypatch: pytest.MonkeyPatch, auth: str) -> None:
+    """Every route, wrong method, unknown path and malformed body answers in the public envelope.
+
+    Sweeps every registered route with every common method and bodies that fail validation (422 in
+    stock FastAPI), plus unknown paths, under each authentication state.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from orama.api.public_errors import PUBLIC_CODES
+    from orama.api.server import create_app
+
+    if auth == "token-unconfigured":
+        monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", TOKEN)
+    monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
+    headers = {
+        "none": {}, "wrong": {"Authorization": "Bearer wrong-token-0000000000000"},
+        "good": {"Authorization": f"Bearer {TOKEN}"}, "token-unconfigured": {"Authorization": "Bearer x"},
+    }[auth]
+    app = create_app()
+    paths = {getattr(route, "path", "") for route in app.routes} | {"/no/such/route", "/effects"}
+    paths = {p.replace("{", "x").replace("}", "") for p in paths if p}
+    bodies = [b"{}", b"not json", b'{"grant": 5}', b""]
+    checked = 0
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        for path in sorted(paths):
+            for method in ("GET", "POST", "PUT", "DELETE", "PATCH"):
+                for body in bodies:
+                    response = await client.request(
+                        method, path, content=body, headers={**headers, "Content-Type": "application/json"}
+                    )
+                    checked += 1
+                    if response.status_code >= 400:
+                        decoded = response.json()
+                        assert not _has_detail(decoded), (method, path, response.text)
+                        assert decoded["error"]["code"] in PUBLIC_CODES, (method, path, response.text)
+    assert checked > 100
+
+
+async def test_framework_validation_unknown_route_and_wrong_method_use_public_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """422 becomes 400 deny.malformed_grant; an unknown route or wrong method is 404 route_not_exposed."""
+    from httpx import ASGITransport, AsyncClient
+
+    from orama.api.server import create_app
+
+    monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", TOKEN)
+    monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://127.0.0.1") as client:
+        invalid = await client.post("/run", json={"unexpected": 1}, headers=auth)
+        unknown = await client.get("/no/such/route", headers=auth)
+        wrong_method = await client.delete("/healthz", headers=auth)
+    assert invalid.status_code == 400 and invalid.json()["error"]["code"] == "deny.malformed_grant"
+    assert unknown.status_code == 404 and unknown.json()["error"]["code"] == "serving.route_not_exposed"
+    assert wrong_method.status_code == 404
+    assert wrong_method.json()["error"]["code"] == "serving.route_not_exposed"
+
+
+async def test_an_unconfigured_token_is_not_ready_and_a_bad_bearer_is_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The middleware answers 503 serving.not_ready without a token and 401 with a wrong one."""
+    from httpx import ASGITransport, AsyncClient
+
+    from orama.api.server import create_app
+
+    monkeypatch.delenv("ORAMA_INSECURE_DEV", raising=False)
+    monkeypatch.delenv("ORAMA_CONTROL_PLANE_TOKEN", raising=False)
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://127.0.0.1") as client:
+        unconfigured = await client.post("/run", json={})
+        monkeypatch.setenv("ORAMA_CONTROL_PLANE_TOKEN", TOKEN)
+        wrong = await client.post("/run", json={}, headers={"Authorization": "Bearer nope"})
+    assert unconfigured.status_code == 503
+    assert unconfigured.json()["error"]["code"] == "serving.not_ready"
+    assert wrong.status_code == 401 and wrong.json()["error"]["code"] == "deny.unauthorized_caller"
+
+
+def test_the_public_vocabulary_drops_two_codes_and_adds_the_grant_conflict() -> None:
+    """``serving.disabled`` and ``deny.attempt_binding_conflict`` are gone; ``deny.grant_conflict`` is 409."""
+    from orama.api.public_errors import DENY_STATUS, PUBLIC_CODES
+
+    assert "serving.disabled" not in PUBLIC_CODES
+    assert "deny.attempt_binding_conflict" not in PUBLIC_CODES
+    assert "deny.grant_conflict" in PUBLIC_CODES and DENY_STATUS["deny.grant_conflict"] == 409
+    assert PUBLIC_CODES - {"deny.grant_conflict"} == {
+        "serving.not_ready", "serving.route_not_exposed", "deny.revocation_stale", "deny.unknown_key",
+        "deny.malformed_grant", "deny.revoked_grant", "deny.missing_capability_record",
+        "deny.unauthorized_caller", "deny.verifier_unavailable",
+    }
