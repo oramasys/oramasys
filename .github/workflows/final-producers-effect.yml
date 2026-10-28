@@ -1,0 +1,227 @@
+name: effect candidate qualification
+on:
+  workflow_call:
+    inputs:
+      freeze_record:
+        type: string
+        required: false
+        default: ""
+      rehearsal:
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    paths:
+      - "requirements/effect-qualification/**"
+      - ".github/workflows/final-producers-effect.yml"
+      - "scripts/final_set_install_plan.py"
+      - "scripts/validate_coverage_packet.py"
+      - "src/tests/test_effect_qualification_packet.py"
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  freeze-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.freeze.outputs.mode }}
+      approval_binding: ${{ steps.freeze.outputs.approval_binding }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - id: freeze
+        name: Select evidence, rehearsal or skip
+        env:
+          DISPATCH_FREEZE_RECORD: ${{ inputs.freeze_record }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+          GITHUB_TOKEN: ${{ github.token }}
+          QUALIFICATION_REPOSITORY: ${{ github.repository }}
+          QUALIFICATION_PULL_REQUEST: "81"
+        run: |
+          set -eu
+          mode=skip
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$REHEARSAL" = true ]; then
+            mode=rehearsal
+            echo '::warning::Rehearsal run: artifacts are not qualification evidence.'
+          else
+            record="$RUNNER_TEMP/freeze.json"
+            if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+              printf '%s' "$DISPATCH_FREEZE_RECORD" > "$record"
+            else
+              record="$GITHUB_WORKSPACE/requirements/effect-qualification/approval.json"
+            fi
+            if python scripts/qualification_freeze.py verify requirements/effect-qualification/manifest.v3.json requirements/effect-qualification/coverage.v2.json --consumer 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb --harness "$GITHUB_SHA" --record "$record" && \
+               python scripts/qualification_approval.py verify requirements/effect-qualification/manifest.v3.json requirements/effect-qualification/coverage.v2.json --consumer 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb --harness "$GITHUB_SHA" --repository "$QUALIFICATION_REPOSITORY" --pull-request "$QUALIFICATION_PULL_REQUEST" --record "$record"; then
+              mode=evidence
+              binding="$(python scripts/qualification_freeze.py binding requirements/effect-qualification/manifest.v3.json requirements/effect-qualification/coverage.v2.json --consumer 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb --harness "$GITHUB_SHA" --record "$record")"
+              printf 'approval_binding=%s\n' "$binding" >> "$GITHUB_OUTPUT"
+            else
+              echo 'No approved matching candidate record; refusing evidence mode.'
+              exit 1
+            fi
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+  final-producers:
+    needs: freeze-gate
+    if: needs.freeze-gate.outputs.mode != 'skip'
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    runs-on: ubuntu-latest
+    env:
+      QUALIFICATION_MODE: ${{ needs.freeze-gate.outputs.mode }}
+      APPROVAL_BINDING: ${{ needs.freeze-gate.outputs.approval_binding }}
+      ORAMA_EFFECT_INTEROP_REQUIRED: "1"
+      ORAMA_REQUIRE_AGATE_EVIDENCE: "1"
+      ORAMA_REQUIRE_CLEAN_INSTALL: "1"
+      ORAMA_REQUIRE_CORE_GATE: "1"
+      ORAMA_REQUIRE_CORE_R3: "1"
+      ORAMA_REQUIRE_CORE_START_SEAM: "1"
+      ORAMA_REQUIRE_OWNER_CANDIDATES: "1"
+      ORAMA_REQUIRE_PHYLAX_INTEROP: "1"
+      ORAMA_DOCS_V2_REGISTRY: ${{ github.workspace }}/registry/docs/v2/references/loop-graph-compatibility-2026-10-09/ownership-registry.json
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a clean harness checkout before any nested checkout
+        run: test -z "$(git status --porcelain)"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: oramasys/oramasys
+          ref: 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb
+          path: consumer
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: oramasys/oramasys
+          ref: 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb
+          path: consumer-rebuild
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: diazMelgarejo/orama-system
+          ref: a5bdcd2b76a865e61f0ff2e752550ee73d18f82e
+          path: registry
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Verify checked-out inputs and candidate plan
+        run: |
+          test -z "$(git -C consumer status --porcelain)"
+          test -z "$(git -C consumer-rebuild status --porcelain)"
+          test -f "$ORAMA_DOCS_V2_REGISTRY"
+          python scripts/check_harness_consumer_drift.py 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb "$GITHUB_SHA"
+          PYTHONPATH=src python scripts/validate_coverage_packet.py requirements/effect-qualification/coverage.v2.json requirements/effect-qualification/manifest.v3.json
+          python scripts/final_set_install_plan.py validate requirements/effect-qualification/install-plan.v2.json requirements/effect-qualification/manifest.v3.json
+      - name: Build consumer wheel twice and record provenance
+        run: |
+          python -m venv "$RUNNER_TEMP/build-venv"
+          BUILD_PY="$RUNNER_TEMP/build-venv/bin/python"
+          "$BUILD_PY" -m pip install --disable-pip-version-check -r requirements/qualification-build-tools.txt
+          export SOURCE_DATE_EPOCH="$(git -C consumer show -s --format=%ct HEAD)"
+          "$BUILD_PY" -m build --no-isolation --wheel --sdist --outdir "$RUNNER_TEMP/dist-one" consumer
+          "$BUILD_PY" scripts/build_provenance.py record --source-repo consumer --source-commit 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb --sdist "$RUNNER_TEMP/dist-one/$(basename "$RUNNER_TEMP/dist-one"/*.tar.gz)" --wheel "$RUNNER_TEMP/dist-one/$(basename "$RUNNER_TEMP/dist-one"/*.whl)" --output "$RUNNER_TEMP/provenance-one.json"
+          export SOURCE_DATE_EPOCH="$(git -C consumer-rebuild show -s --format=%ct HEAD)"
+          "$BUILD_PY" -m build --no-isolation --wheel --sdist --outdir "$RUNNER_TEMP/dist-two" consumer-rebuild
+          "$BUILD_PY" scripts/build_provenance.py record --source-repo consumer-rebuild --source-commit 02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb --sdist "$RUNNER_TEMP/dist-two/$(basename "$RUNNER_TEMP/dist-two"/*.tar.gz)" --wheel "$RUNNER_TEMP/dist-two/$(basename "$RUNNER_TEMP/dist-two"/*.whl)" --output "$RUNNER_TEMP/provenance-two.json"
+          # A non-identical rebuild is a recorded limitation, not a failure: the
+          # comparison is kept in the receipt and surfaced as a warning.
+          if ! "$BUILD_PY" scripts/build_provenance.py compare "$RUNNER_TEMP/provenance-one.json" "$RUNNER_TEMP/provenance-two.json" > "$RUNNER_TEMP/rebuild-comparison.json"; then
+            echo '::warning::Rebuild is not bit-identical; recorded as a stated limitation in rebuild-comparison.json.'
+          fi
+      - name: Install the exact candidate set and prove identities
+        run: |
+          python -m venv "$RUNNER_TEMP/qualification-venv"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip install --disable-pip-version-check "./consumer[dev,grant-serving]"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip install --disable-pip-version-check --force-reinstall --no-deps "$RUNNER_TEMP/dist-one/"*.whl
+          python scripts/final_set_install_plan.py emit requirements/effect-qualification/install-plan.v2.json requirements/effect-qualification/manifest.v3.json > "$RUNNER_TEMP/producers.json"
+          export QUALIFICATION_PYTHON="$RUNNER_TEMP/qualification-venv/bin/python"
+          export QUALIFICATION_REPORT_DIR="$RUNNER_TEMP/install-reports"
+          mkdir "$QUALIFICATION_REPORT_DIR"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          requirements = json.loads(Path(os.environ["RUNNER_TEMP"]).joinpath("producers.json").read_text())
+          for index, requirement in enumerate(requirements, start=1):
+              subprocess.run([
+                  "python", "scripts/install_with_retry.py", "--python", os.environ["QUALIFICATION_PYTHON"],
+                  "--report", str(Path(os.environ["QUALIFICATION_REPORT_DIR"]) / f"producer-{index}.json"),
+                  "--", "--disable-pip-version-check", "--force-reinstall", "--no-deps", requirement,
+              ], check=True)
+          PY
+          consumer_wheel="$(find "$RUNNER_TEMP/dist-one" -maxdepth 1 -name '*.whl' -type f -print -quit)"
+          test -n "$consumer_wheel"
+          mkdir "$RUNNER_TEMP/outside"
+          cd "$RUNNER_TEMP/outside"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/verify_installed_identity.py" "$GITHUB_WORKSPACE/requirements/effect-qualification/install-plan.v2.json" --consumer-wheel "$consumer_wheel" --consumer-provenance "$RUNNER_TEMP/provenance-one.json" > "$RUNNER_TEMP/identity.json"
+          "$RUNNER_TEMP/qualification-venv/bin/python" -m pip check
+      - name: Run installed suite and deterministic scenarios
+        run: |
+          mkdir "$RUNNER_TEMP/outside-suite" "$RUNNER_TEMP/scenario-traces"
+          # The bundle is a git worktree, not an archive: several harness tests
+          # run repository scripts that require a git repository.
+          git worktree add --detach "$RUNNER_TEMP/harness-bundle" "$GITHUB_SHA"
+          rm -rf "$RUNNER_TEMP/harness-bundle/src/orama"
+          consumer_wheel="$(find "$RUNNER_TEMP/dist-one" -maxdepth 1 -name '*.whl' -type f -print -quit)"
+          test -n "$consumer_wheel"
+          cd "$RUNNER_TEMP/outside-suite"
+          ORAMA_QUALIFICATION_SOURCE_ROOT="$GITHUB_WORKSPACE/consumer" ORAMA_QUALIFICATION_INSTALL_PLAN="$GITHUB_WORKSPACE/requirements/effect-qualification/install-plan.v2.json" ORAMA_QUALIFICATION_CONSUMER_WHEEL="$consumer_wheel" ORAMA_QUALIFICATION_CONSUMER_PROVENANCE="$RUNNER_TEMP/provenance-one.json" "$RUNNER_TEMP/qualification-venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/run_installed_qualification_suite.py" --bundle "$RUNNER_TEMP/harness-bundle" --junit "$RUNNER_TEMP/final-results.xml" --collection "$RUNNER_TEMP/collection.json"
+          python "$GITHUB_WORKSPACE/scripts/collection_gate.py" "$RUNNER_TEMP/final-results.xml" "$GITHUB_WORKSPACE/requirements/effect-qualification/coverage.v2.json" "$RUNNER_TEMP/collection.json" > "$RUNNER_TEMP/collection-gate.json"
+          "$RUNNER_TEMP/qualification-venv/bin/python" "$GITHUB_WORKSPACE/scripts/run_qualification_scenarios.py" --manifest-digest "$("$RUNNER_TEMP/qualification-venv/bin/python" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from orama.compat.manifest import canonical_digest
+          print(canonical_digest(json.loads(Path(os.environ['GITHUB_WORKSPACE'], 'requirements/effect-qualification/manifest.v3.json').read_text())))
+          PY
+          )" --coverage-digest "$("$RUNNER_TEMP/qualification-venv/bin/python" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from orama.compat.manifest import canonical_digest
+          print(canonical_digest(json.loads(Path(os.environ['GITHUB_WORKSPACE'], 'requirements/effect-qualification/coverage.v2.json').read_text())))
+          PY
+          )" --trace-dir "$RUNNER_TEMP/scenario-traces" --output "$RUNNER_TEMP/scenarios.json"
+      - name: Seal the retained records into the evidence status
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          if [ "$QUALIFICATION_MODE" = evidence ]; then
+            test -n "$APPROVAL_BINDING"
+            printf '%s\n' "$APPROVAL_BINDING" > "$RUNNER_TEMP/approval-binding.json"
+          fi
+          python scripts/stamp_evidence_status.py --directory "$RUNNER_TEMP" --mode "$QUALIFICATION_MODE" --job-status "$JOB_STATUS" --head-sha "$GITHUB_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
+      - name: Retain sanitized artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: effect-candidate-${{ needs.freeze-gate.outputs.mode }}-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/evidence-status.json
+            ${{ runner.temp }}/identity.json
+            ${{ runner.temp }}/collection-gate.json
+            ${{ runner.temp }}/scenarios.json
+            ${{ runner.temp }}/scenario-traces
+            ${{ runner.temp }}/provenance-one.json
+            ${{ runner.temp }}/provenance-two.json
+            ${{ runner.temp }}/collection.json
+            ${{ runner.temp }}/final-results.xml
+            ${{ runner.temp }}/rebuild-comparison.json
+            ${{ runner.temp }}/approval-binding.json
+            ${{ runner.temp }}/install-reports
+          if-no-files-found: error
+          retention-days: 90

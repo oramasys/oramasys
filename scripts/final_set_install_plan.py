@@ -41,7 +41,8 @@ PRODUCERS = {
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
-def unique_object(pairs):
+def unique_object(pairs: list[tuple[str, object]]) -> dict:
+    """Reject duplicate keys in install-plan JSON rather than choosing a value."""
     result = {}
     for key, value in pairs:
         if key in result:
@@ -50,20 +51,32 @@ def unique_object(pairs):
     return result
 
 
-def load_json(path):
+def load_json(path: str | Path) -> object:
+    """Read one strict-key JSON document."""
     with Path(path).open(encoding="utf-8") as stream:
         return json.load(stream, object_pairs_hook=unique_object)
 
 
-def validate_structure(plan):
+def validate_structure(plan: dict) -> dict:
+    """Preserve frozen schema 1; allow immutable manifest-bound schema-2 consumers."""
     if not isinstance(plan, dict) or set(plan) != {"schema", "consumer", "producers"}:
         raise ValueError("invalid plan fields")
     if (
         type(plan["schema"]) is not int
-        or plan["schema"] != 1
-        or plan["consumer"] != CONSUMER
+        or plan["schema"] not in (1, 2)
     ):
         raise ValueError("invalid schema or consumer tuple")
+    consumer = plan["consumer"]
+    if not isinstance(consumer, dict) or set(consumer) != set(CONSUMER):
+        raise ValueError("invalid consumer fields")
+    expected = dict(CONSUMER)
+    if plan["schema"] == 2:
+        commit = consumer["commit"]
+        if not isinstance(commit, str) or not SHA.fullmatch(commit):
+            raise ValueError("invalid consumer commit")
+        expected["commit"] = commit
+    if consumer != expected:
+        raise ValueError("invalid consumer tuple")
     entries = plan["producers"]
     if not isinstance(entries, dict) or set(entries) != set(PRODUCERS):
         raise ValueError("invalid producer roles")
@@ -96,7 +109,8 @@ def validate_structure(plan):
     return plan
 
 
-def validate_plan(plan, manifest):
+def validate_plan(plan: dict, manifest: dict) -> dict:
+    """Bind every consumer and producer identity to the reviewed manifest."""
     validate_structure(plan)
     if (
         not isinstance(manifest, dict)
@@ -106,7 +120,7 @@ def validate_plan(plan, manifest):
         raise ValueError("invalid manifest schema")
     if manifest.get("consumer") != {
         "repository": CONSUMER["repository"],
-        "sha": CONSUMER_COMMIT,
+        "sha": plan["consumer"]["commit"],
     }:
         raise ValueError("manifest consumer mismatch")
     producers = manifest.get("producers")
@@ -130,7 +144,8 @@ def validate_plan(plan, manifest):
     return plan
 
 
-def emit_requirements(plan, manifest):
+def emit_requirements(plan: dict, manifest: dict) -> list[str]:
+    """Emit immutable VCS dependencies only after complete tuple validation."""
     validate_plan(plan, manifest)
     return [
         f"{plan['producers'][role]['distribution']} @ git+{plan['producers'][role]['url']}@{plan['producers'][role]['commit']}"
@@ -138,7 +153,8 @@ def emit_requirements(plan, manifest):
     ]
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
+    """Validate or emit the exact install set without mutating any generation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("validate", "emit"))
     parser.add_argument("plan")
