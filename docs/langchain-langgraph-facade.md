@@ -10,8 +10,10 @@
 
 ## Invariants (each enforced by `test_langchain_facade.py`)
 1. Every call goes through the caller-supplied admission runner exactly once.
-2. Config is closed: only `tags`, `metadata`, `run_name`, `max_concurrency` are honoured; non-empty
-   `callbacks`, `configurable`, `recursion_limit` or unknown keys are refused. Framework empty defaults pass.
+2. Config is closed: only `tags`, `metadata`, `run_name`, `max_concurrency` are honoured. `callbacks`,
+   `recursion_limit` and `run_id` are tolerated because real LangChain propagates them into every nested
+   call, but they are never invoked or acted on (no tracing). Non-empty `configurable` or unknown keys are
+   refused. A real `langchain_core` chain test found the original stricter rule broke composition.
 3. `max_concurrency` defaults to 1 and is capped at 8; zero, booleans and non-integers are refused.
 4. A run that is not `done`, has an error, or lacks the named output key raises; stale data is never returned.
 5. Streaming is one final chunk. Sync entry points refuse inside a running event loop.

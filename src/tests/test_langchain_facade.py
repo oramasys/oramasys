@@ -101,9 +101,7 @@ def test_every_call_goes_through_the_admission_runner() -> None:
 
 
 @pytest.mark.parametrize("config,code", [
-    ({"callbacks": [object()]}, "facade.callbacks_unsupported"),
     ({"configurable": {"x": 1}}, "facade.config_unsupported"),
-    ({"recursion_limit": 5}, "facade.config_unsupported"),
     ({"unknown": "x"}, "facade.config_unsupported"),
     ("not a mapping", "facade.config_unsupported"),
 ])
@@ -112,6 +110,19 @@ def test_unsupported_config_is_refused(config, code) -> None:
     with pytest.raises(FacadeRefused) as caught:
         check_config(config)
     assert caught.value.code == code
+
+
+def test_framework_propagated_keys_are_tolerated_but_never_invoked() -> None:
+    """Real LangChain passes callbacks/recursion_limit/run_id into nested calls; they are ignored."""
+    class Handler:
+        called = False
+
+        def __getattr__(self, name):
+            Handler.called = True
+            raise AttributeError(name)
+
+    cfg = {"callbacks": [Handler()], "recursion_limit": 25, "run_id": "x", "tags": ["t"]}
+    assert check_config(cfg) == {"tags": ["t"]} and not Handler.called
 
 
 def test_empty_framework_defaults_and_honoured_keys_pass() -> None:

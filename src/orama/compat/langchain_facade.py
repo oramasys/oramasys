@@ -8,8 +8,10 @@ the caller-supplied admission ``runner``, so nothing here widens what the graph 
 
 Closed and refused rather than emulated, because each would be an unadmitted execution path:
 
-* ``callbacks``, ``configurable``, ``recursion_limit`` and any other config key are refused when
-  non-empty; only ``tags``, ``metadata``, ``run_name`` and ``max_concurrency`` are honoured.
+* ``configurable`` and any unknown config key are refused when non-empty. ``callbacks``,
+  ``recursion_limit`` and ``run_id`` are tolerated but *never acted on* (real LangChain propagates
+  them into every nested call); no callback is ever invoked, so there is no tracing. Only ``tags``,
+  ``metadata``, ``run_name`` and ``max_concurrency`` are honoured.
 * ``astream`` yields exactly one final chunk; there is no incremental or token streaming.
 * ``invoke`` (sync) refuses inside a running event loop instead of nesting one.
 * Every facade carries ``effect_kind = "untrusted"``; production foreign effects stay refused.
@@ -22,8 +24,9 @@ from typing import Any, Final
 
 HONOURED_CONFIG_KEYS: Final = frozenset({"tags", "metadata", "run_name", "max_concurrency"})
 MAX_CONCURRENCY_CEILING: Final = 8
+IGNORED_CONFIG_KEYS: Final = frozenset({"callbacks", "recursion_limit", "run_id"})
 FACADE_REFUSAL_CODES: Final = frozenset({
-    "facade.config_unsupported", "facade.callbacks_unsupported", "facade.sync_in_running_loop",
+    "facade.config_unsupported", "facade.sync_in_running_loop",
     "facade.schema_unavailable", "facade.bad_input", "facade.bad_concurrency",
 })
 
@@ -46,9 +49,9 @@ def check_config(config: object) -> dict[str, Any]:
     if not isinstance(config, Mapping):
         raise FacadeRefused("facade.config_unsupported")
     for key, value in config.items():
-        if key in HONOURED_CONFIG_KEYS or not value:
+        if key in HONOURED_CONFIG_KEYS or key in IGNORED_CONFIG_KEYS or not value:
             continue
-        raise FacadeRefused("facade.callbacks_unsupported" if key == "callbacks" else "facade.config_unsupported")
+        raise FacadeRefused("facade.config_unsupported")
     return {key: config[key] for key in HONOURED_CONFIG_KEYS if key in config}
 
 
