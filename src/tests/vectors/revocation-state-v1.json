@@ -1,0 +1,50 @@
+{
+ "description": "Golden signed revocation state produced by Phylax revocation_publication.build_state; the consumer must verify it with the Ed25519ph state domain.",
+ "issuer_id": "issuer-1",
+ "issuer_key_id": "key-1",
+ "public_key": "48075a597e721a156e2e0799de5cc0c5324dc6e7eaf1cdd46250868ec53215dd",
+ "generated_at": "2026-11-02T04:00:00.000000Z",
+ "state": "{\"body\":{\"cascades\":[{\"approval_id\":\"ap-cascade\",\"grant_ids\":[\"g-cascaded\",\"g-cascaded-2\"],\"issuer_authority_version\":1,\"version\":3}],\"generated_at\":\"2026-11-02T04:00:00.000000Z\",\"head_event_digest\":\"df6ff5aebf746ee3c5ca563a1f442235c7a2918bcdb98ad011755b114624fb50\",\"head_version\":3,\"issuer_id\":\"issuer-1\",\"issuer_revoked\":false,\"revoked_approvals\":[\"ap-revoked\"],\"revoked_grants\":[\"g-revoked\"],\"schema_version\":1},\"issuer_key_id\":\"key-1\",\"signature\":\"EPyExccGsr8_NrVHMax88ltXHuYRB_Kg3dcTPliK2VmdPBoI-bbHXPWs71ytY_6ipvmZymPvTlnFTzJtpDbpAQ\"}",
+ "events": [
+  {
+   "version": 1,
+   "kind": "revocation",
+   "body": {
+    "subject_id": "g-revoked",
+    "subject_kind": "grant"
+   },
+   "previous_event_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+   "event_digest": "8c4903d51d5583fbac82acd0ff9c62785c9e5918a136a86bf5e78f2938dcbfff",
+   "issuer_key_id": "key-1",
+   "signature": "ML-kxsyFRS44xPJpQDVbbJFbyYwRlgX2SrDJTkxJHne10_ebPHg-YgWfL-kCraKsdVBBB1aUr_2UTLJHUTOAAg"
+  },
+  {
+   "version": 2,
+   "kind": "revocation",
+   "body": {
+    "subject_id": "ap-revoked",
+    "subject_kind": "approval"
+   },
+   "previous_event_digest": "8c4903d51d5583fbac82acd0ff9c62785c9e5918a136a86bf5e78f2938dcbfff",
+   "event_digest": "53ba56fb2d3dc91f4ce948219d4a4299c5ef7d935bcfbcd47a32c2afb5bdaebe",
+   "issuer_key_id": "key-1",
+   "signature": "NU8jICoIW4Eslk3zQ1lWSvt5Y2IaCL-sQ4icd-I0eaNorkq-tYjU7MvVsBHoqPs374wyBs0EjyF3uQjk6s6rCQ"
+  },
+  {
+   "version": 3,
+   "kind": "cascade",
+   "body": {
+    "approval_id": "ap-cascade",
+    "grant_ids": [
+     "g-cascaded",
+     "g-cascaded-2"
+    ],
+    "issuer_authority_version": 1
+   },
+   "previous_event_digest": "53ba56fb2d3dc91f4ce948219d4a4299c5ef7d935bcfbcd47a32c2afb5bdaebe",
+   "event_digest": "df6ff5aebf746ee3c5ca563a1f442235c7a2918bcdb98ad011755b114624fb50",
+   "issuer_key_id": "key-1",
+   "signature": "67K8cbV9fCjx2fsMpGI9-exYNFt6YNJoYGKxml10nIzrPc7-NckT9kh0g-Cp3TvwR7WcEH18m4oWXv-nhsNMCA"
+  }
+ ]
+}
