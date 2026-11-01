@@ -13,6 +13,8 @@ src/tests/fixtures/agate-hardware-profiles-172bfc3.json -text
 # Vendored phylax dispatch vectors, pinned by sha256 over the file bytes.
 src/tests/vectors/dispatch-permit-v1.json -text
 src/tests/vectors/dispatch-events-v1.json -text
+src/tests/vectors/revocation-lookup-v1.json -text
+src/tests/vectors/revocation-state-v1.json -text
 # Interop probes pinned byte for byte: the slice-2 probe by sha256, the part-3 probe by cmp in CI.
 src/tests/interop/c2_slice2_probe.py -text
 src/tests/interop/c2_part3_events_probe.py -text
