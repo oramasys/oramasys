@@ -272,10 +272,10 @@ def test_check_startup_refuses_grant_on_client(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path, BASE, node="cli")
     eff = prof.load_effective()
     with pytest.raises(StartupRefused):
-        prof.check_startup(eff, {"ORAMA_GRANT_SERVING": "1"})
+        prof.check_startup(eff, {"ORAMA_GRANT_SERVING": "enabled"})
     prof.check_startup(eff, {})
     server = prof.EffectiveNode("s", "linux", "primary-server", "applicable", "profile")
-    prof.check_startup(server, {"ORAMA_GRANT_SERVING": "1"})
+    prof.check_startup(server, {"ORAMA_GRANT_SERVING": "enabled"})
 
 
 def test_serving_permitted_needs_all_three(monkeypatch, tmp_path):
@@ -287,7 +287,7 @@ def test_serving_permitted_needs_all_three(monkeypatch, tmp_path):
         """Stand-in D6 matcher that always approves."""
         return True
 
-    on = {"ORAMA_GRANT_SERVING": "1"}
+    on = {"ORAMA_GRANT_SERVING": "enabled"}
     assert prof.serving_permitted(eff, {}) is False  # profile alone
     assert prof.serving_permitted(eff, {}, approved) is False  # no env var
     assert prof.serving_permitted(eff, on) is False  # no approval (default)
@@ -352,7 +352,7 @@ def test_cli_exit_codes(monkeypatch, tmp_path, capsys):
     assert _cli(monkeypatch, tmp_path, "version: [", ["validate"]) == 2
     assert _cli(monkeypatch, tmp_path, BASE, ["validate"], platform="darwin") == 2
     assert _cli(monkeypatch, tmp_path, BASE, ["validate"], node="cli",
-                ORAMA_GRANT_SERVING="1") == 2
+                ORAMA_GRANT_SERVING="enabled") == 2
     capsys.readouterr()
     assert _cli(monkeypatch, tmp_path, BASE, ["show"]) == 0
     assert json.loads(capsys.readouterr().out)["role"] == "primary-server"
@@ -529,3 +529,10 @@ def test_version_strict(monkeypatch, tmp_path, version):
     _env(monkeypatch, tmp_path, BASE.replace("version: 1", f"version: {version}"))
     with pytest.raises(ProfileError):
         prof.load_effective()
+
+
+def test_grant_flag_one_is_refused_only_enabled_accepted():
+    """"1" is not the contract value; only exact "enabled" counts (matches serve script)."""
+    with pytest.raises(prof.ProfileError):
+        prof._grant_flag({"ORAMA_GRANT_SERVING": "1"})
+    assert prof._grant_flag({"ORAMA_GRANT_SERVING": "enabled"}) is True

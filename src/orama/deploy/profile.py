@@ -39,6 +39,8 @@ ENV_PROFILE = "ORAMA_SERVING_PROFILE"
 ENV_NODE_ID = "ORAMA_NODE_ID"
 ENV_NODE_ROLE = "ORAMA_NODE_ROLE"
 ENV_GRANT_SERVING = "ORAMA_GRANT_SERVING"
+# Same exact value serve_with_phylax_grants.py already requires (one source of truth).
+GRANT_SERVING_ENABLED = "enabled"
 MAX_PROFILE_BYTES = 256 * 1024
 
 Role = Literal["primary-server", "secondary-server", "client", "off"]
@@ -394,13 +396,13 @@ def load_effective(env: Mapping[str, str] | None = None) -> EffectiveNode:
 
 
 def _grant_flag(env: Mapping[str, str]) -> bool:
-    """Return True iff ORAMA_GRANT_SERVING is exactly "1"; refuse other values."""
+    """Return True iff ORAMA_GRANT_SERVING is exactly "enabled"; refuse other values."""
     value = env.get(ENV_GRANT_SERVING)
     if not value:
         return False
-    if value != "1":
+    if value != GRANT_SERVING_ENABLED:
         raise ProfileError(
-            f"{ENV_GRANT_SERVING} must be exactly '1' or unset; refusing (fail closed)"
+            f"{ENV_GRANT_SERVING} must be exactly 'enabled' or unset; refusing (fail closed)"
         )
     return True
 
@@ -448,9 +450,9 @@ _SERVER_STEPS = {
 }
 _SERVER_COMMON = [
     "Record the numeric uid/SID of the server account as identity.expected_principal in the profile.",
-    "Run the R4 serving-identity check as the serving user: scripts/qualify_serving_identity.py --expected-uid <serving uid> --seed-file <seed file> --issuer-db <issuer db> --public-state <public verifier state dir>.",
+    "Run the evidence script as the serving user (it runs the R4 serving-identity check, R5 installed identity and the Phylax pin check): bash scripts/operator_serving_checks.sh; see docs/serving-activation-runbook.md.",
     "Obtain a D6 approval record under docs/v2/activation/ for this node.",
-    "Follow docs/serving-activation-runbook.md and fill docs/templates/serving-activation-receipt.md; ORAMA_GRANT_SERVING stays unset until the operator ratifies the receipt.",
+    "Fill docs/templates/serving-activation-receipt.md from the evidence; ORAMA_GRANT_SERVING stays unset until the operator ratifies the receipt.",
 ]
 
 
