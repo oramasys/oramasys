@@ -222,24 +222,28 @@ class RetainedDispatchAuthority:
     permit: Mapping[str, Any]
     finalization: Mapping[str, Any]
 
+    def __post_init__(self) -> None:
+        """Snapshot the flat wire mappings, including for directly constructed evidence."""
+        object.__setattr__(self, "permit", MappingProxyType(dict(self.permit)))
+        object.__setattr__(self, "finalization", MappingProxyType(dict(self.finalization)))
+
     @property
     def grant_id(self) -> str:
         """Return the grant identifier from the validated retained permit."""
         return self.permit["grant_id"]
 
     def reverify(self, verifier: SignatureVerifier) -> bool:
-        """Return whether both retained signatures and their immutable linkage verify."""
+        """Check linkage and signatures using a verifier trusted for ``issuer_id``.
+
+        The wire carries a key id, not an issuer id: the injected adapter must bind
+        that key to this issuer. This is not a current-authority decision.
+        """
         try:
             permit = validate_permit_wire(self.permit)
             finalization = validate_finalization_wire(self.finalization)
-        except WireError:
+        except (ValueError, TypeError, UnicodeError, RecursionError):
             return False
-        if (
-            permit["attempt_id"] != self.attempt_id
-            or finalization["attempt_id"] != self.attempt_id
-            or finalization["permit_id"] != permit["permit_id"]
-            or finalization["permit_digest"] != permit["payload_digest"]
-        ):
+        if not _retained_linkage(self.attempt_id, permit, finalization):
             return False
         return (
             verifier.verify_permit(
@@ -251,6 +255,21 @@ class RetainedDispatchAuthority:
                 finalization["issuer_signature"],
             ) is True
         )
+
+
+def _retained_linkage(
+    attempt_id: str, permit: Mapping[str, Any], fin: Mapping[str, Any]
+) -> bool:
+    """Check the immutable bindings shared by retained reads and reverification."""
+    return (
+        permit["attempt_id"] == fin["attempt_id"] == attempt_id
+        and fin["permit_id"] == permit["permit_id"]
+        and fin["permit_digest"] == permit["payload_digest"]
+        == permit_payload_digest(permit_body(permit))
+        and all(fin[name] == permit[name] for name in (
+            "reservation_id", "ledger_store_id", "authority_epoch",
+        ))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +312,10 @@ _SCHEMA: Final = (
     "CREATE TRIGGER IF NOT EXISTS retained_dispatch_authority_no_delete BEFORE DELETE ON "
     "retained_dispatch_authority BEGIN SELECT RAISE(ABORT, 'retained dispatch authority is "
     "append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS retained_dispatch_authority_no_replace BEFORE INSERT ON "
+    "retained_dispatch_authority WHEN EXISTS (SELECT 1 FROM retained_dispatch_authority "
+    "WHERE attempt_id = NEW.attempt_id) BEGIN SELECT RAISE(ABORT, 'retained dispatch authority "
+    "is append-only'); END",
     "CREATE TABLE IF NOT EXISTS dispatch_attempts ("
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, reservation_id TEXT NOT NULL,"
     " state TEXT NOT NULL, fenced INTEGER NOT NULL DEFAULT 0,"
@@ -1218,29 +1241,48 @@ class SqliteAttemptStore:
         """
         with self._lock:
             row = self._db.execute(
-                "SELECT issuer_id, permit_wire, finalization_wire FROM retained_dispatch_authority "
-                "WHERE attempt_id = ?",
+                "SELECT e.issuer_id, e.permit_wire, e.finalization_wire, a.grant_id,"
+                " a.reservation_id, a.permit_id, a.permit_digest, a.finalization_digest,"
+                " a.r_p, a.r_f, i.authority_pair, s.expires_at"
+                " FROM retained_dispatch_authority e"
+                " JOIN dispatch_attempts a ON a.attempt_id = e.attempt_id"
+                " JOIN dispatch_intents i ON i.attempt_id = a.attempt_id"
+                " JOIN outbox o ON o.attempt_id = a.attempt_id"
+                " JOIN grant_use g ON g.attempt_id = a.attempt_id AND g.grant_id = a.grant_id"
+                " JOIN send_authority s ON s.attempt_id = a.attempt_id AND s.issuer_id = e.issuer_id"
+                " WHERE e.attempt_id = ? AND"
+                " (a.grant_id, a.permit_id, a.permit_digest, a.finalization_digest, a.r_p, a.r_f)"
+                " = (i.grant_id, i.permit_id, i.permit_digest, i.finalization_digest, i.r_p, i.r_f)"
+                " AND (i.grant_id, i.permit_id, i.permit_digest, i.finalization_digest, i.r_p, i.r_f,"
+                " i.authority_pair, i.acked_through) = (o.grant_id, o.permit_id, o.permit_digest,"
+                " o.finalization_digest, o.r_p, o.r_f, o.authority_pair, o.acked_through)",
                 (attempt_id,),
             ).fetchone()
         if row is None:
             return None
-        issuer_id, permit_wire, finalization_wire = row
+        issuer_id, permit_wire, finalization_wire, *committed = row
         if not isinstance(issuer_id, str) or not issuer_id.strip():
             return None
         try:
-            permit_bytes = bytes(permit_wire)
-            finalization_bytes = bytes(finalization_wire)
+            if not isinstance(permit_wire, bytes) or not isinstance(finalization_wire, bytes):
+                return None
+            permit_bytes = permit_wire
+            finalization_bytes = finalization_wire
             permit = validate_permit_wire(json.loads(permit_bytes))
             finalization = validate_finalization_wire(json.loads(finalization_bytes))
-        except (TypeError, ValueError, WireError):
+        except (TypeError, ValueError, UnicodeError, RecursionError):
             return None
         if (
             canonical_bytes(permit) != permit_bytes
             or canonical_bytes(finalization) != finalization_bytes
-            or permit["attempt_id"] != attempt_id
-            or finalization["attempt_id"] != attempt_id
-            or finalization["permit_id"] != permit["permit_id"]
-            or finalization["permit_digest"] != permit["payload_digest"]
+            or not _retained_linkage(attempt_id, permit, finalization)
+            or committed != [
+                permit["grant_id"], permit["reservation_id"], permit["permit_id"],
+                permit["payload_digest"], _fin_digest(finalization),
+                permit["revocation_version"], finalization["revocation_version"],
+                f'{permit["configuration_policy_epoch"]}:{permit["authority_epoch"]}',
+                _earliest_expiry(permit["expires_at"], finalization["expires_at"]),
+            ]
         ):
             return None
         return RetainedDispatchAuthority(
