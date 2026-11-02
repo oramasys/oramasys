@@ -63,15 +63,15 @@ def test_no_profile_is_client(monkeypatch, tmp_path):
 def test_unreadable_profile_is_client(monkeypatch, tmp_path):
     """Check: unreadable profile is client."""
     path = _env(monkeypatch, tmp_path, BASE)
-    real = Path.read_bytes
+    real = Path.open
 
-    def boom(self):
+    def boom(self, *args, **kwargs):
         """Check: boom."""
         if self == path:
             raise PermissionError("denied")
-        return real(self)
+        return real(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", boom)
+    monkeypatch.setattr(Path, "open", boom)
     eff = prof.load_effective()
     assert (eff.role, eff.source) == ("client", "unreadable-profile")
 
@@ -369,7 +369,7 @@ def test_plan_server_text_and_env(monkeypatch, tmp_path, capsys):
         assert not re.search(r"password|token|secret|private key", out, re.I)
     assert _cli(monkeypatch, tmp_path, BASE, ["plan", "--format", "env"]) == 0
     env_out = capsys.readouterr().out
-    assert "ORAMA_NODE_ROLE=primary-server" in env_out
+    assert "ORAMA_NODE_ROLE='primary-server'" in env_out
     assert "GRANT_SERVING" not in env_out
 
 
@@ -380,7 +380,7 @@ def test_plan_client_has_endpoint_only(monkeypatch, tmp_path, capsys):
     assert "srv.example:8443" in out
     assert not re.search(r"useradd|dscl|New-LocalUser|sc\.exe|pywin32|account|Operator", out)
     assert _cli(monkeypatch, tmp_path, BASE, ["plan", "--format", "env"], node="cli") == 0
-    assert "ORAMA_SERVING_ENDPOINT=srv.example:8443" in capsys.readouterr().out
+    assert "ORAMA_SERVING_ENDPOINT='srv.example:8443'" in capsys.readouterr().out
 
 
 
@@ -470,11 +470,17 @@ def test_missing_pyyaml_is_clear_error(monkeypatch, tmp_path, capsys):
     "principal",
     ["00", "-1", "+0", "0x0", "0.0", "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-512",
      "S-1-5-80-0", "S-1-5-", "s-1-5-18", "ro\u200bot", "r\u00f6ot", "root ", "",
-     "S-1-5-21-1-2-3-500 "],
+     "S-1-5-21-1-2-3-500 ", "S-1-5-18\n", "S-1-5-21-1-2-3-500\n", "501\n"],
 )
 def test_principal_strictness(monkeypatch, tmp_path, principal):
     """Check: malformed or privileged principals are refused."""
-    extra = f'    identity:\n      expected_principal: "{principal}"\n'
+    escaped = (
+        principal.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+    extra = f'    identity:\n      expected_principal: "{escaped}"\n'
     _env(monkeypatch, tmp_path, _node(extra))
     with pytest.raises(ProfileError):
         prof.load_effective()
@@ -503,13 +509,19 @@ def test_state_root_extra_refusals(monkeypatch, tmp_path, root):
 
 
 @pytest.mark.parametrize(
-    "endpoint", ["srv", "srv:0", "srv:65536", "srv:x", "http://srv:1", "a b:1", ":80"]
+    "endpoint", ["srv", "srv:0", "srv:65536", "srv:x", "http://srv:1", "a b:1", ":80", "srv:80\n"]
 )
 def test_endpoint_must_be_host_port(monkeypatch, tmp_path, endpoint):
     """Check: malformed endpoints are refused."""
+    escaped = (
+        endpoint.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
     text = (
         "version: 1\nnodes:\n  - id: s\n    os: linux\n    role: primary-server\n"
-        f"    endpoint: '{endpoint}'\n"
+        f'    endpoint: "{escaped}"\n'
     )
     _env(monkeypatch, tmp_path, text, node="s")
     with pytest.raises(ProfileError):
@@ -569,3 +581,202 @@ def test_enable_value_matches_serve_script():
     }
     assert found["ENABLED"] == prof.GRANT_SERVING_ENABLED
     assert found["ENABLE_VARIABLE"] == prof.ENV_GRANT_SERVING
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    ["? [a]\n: val\n", "? [a, b]\n: val\n", "? {a: 1}\n: val\n"],
+)
+def test_unhashable_mapping_keys_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_key: str
+) -> None:
+    """Check: complex or unhashable mapping keys raise ProfileError and exit 2."""
+    text = f"version: 1\nnodes:\n  - id: srv\n    os: linux\n{bad_key}"
+    _env(monkeypatch, tmp_path, text)
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+    assert prof.main(["validate"]) == 2
+
+
+def test_size_limit_enforced_while_reading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check: size limit is enforced while reading at most MAX_PROFILE_BYTES + 1."""
+    path = _env(monkeypatch, tmp_path, BASE)
+    read_lengths: list[int] = []
+    real_open = Path.open
+
+    def tracking_open(self: Path, *args: object, **kwargs: object) -> object:
+        """Track read lengths on opened file handles."""
+        handle = real_open(self, *args, **kwargs)
+        if self == path:
+            real_read = handle.read
+
+            def tracking_read(size: int = -1) -> bytes:
+                """Record requested read size."""
+                read_lengths.append(size)
+                return real_read(size)
+
+            handle.read = tracking_read  # type: ignore[method-assign]
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    prof.load_effective()
+    assert read_lengths == [prof.MAX_PROFILE_BYTES + 1]
+
+
+def test_unreadable_profile_on_value_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check: ValueError while opening or reading profile falls back safely."""
+    _env(monkeypatch, tmp_path, BASE)
+
+    def boom(self: Path, *args: object, **kwargs: object) -> object:
+        """Simulate ValueError during file access."""
+        raise ValueError("stream corrupted")
+
+    monkeypatch.setattr(Path, "open", boom)
+    eff = prof.load_effective()
+    assert (eff.role, eff.source) == ("client", "unreadable-profile")
+
+
+def test_block_scalar_trailing_newline_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check: block scalar with trailing newline is refused by validator."""
+    text = (
+        "version: 1\nnodes:\n  - id: srv\n    os: linux\n"
+        "    role: primary-server\n    endpoint: srv.example:8443\n"
+        "    identity:\n      expected_principal: |\n        S-1-5-18\n"
+    )
+    _env(monkeypatch, tmp_path, text)
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize(
+    "account",
+    ["root", "Administrator", "SYSTEM", "LocalSystem", "NT AUTHORITY\\SYSTEM",
+     "BUILTIN\\Administrators", "S-1-5-18"],
+)
+def test_privileged_server_account_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, account: str
+) -> None:
+    """Check: privileged accounts in identity.server_account are refused."""
+    extra = f"    identity:\n      server_account: '{account}'\n      signer_account: safe-signer\n"
+    _env(monkeypatch, tmp_path, _node(extra))
+    with pytest.raises(ProfileError, match="server_account"):
+        prof.load_effective()
+
+
+@pytest.mark.parametrize(
+    "account",
+    ["root", "Administrator", "SYSTEM", "LocalSystem", "NT AUTHORITY\\SYSTEM",
+     "BUILTIN\\Administrators", "S-1-5-18"],
+)
+def test_privileged_signer_account_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, account: str
+) -> None:
+    """Check: privileged accounts in identity.signer_account are refused."""
+    extra = f"    identity:\n      server_account: safe-srv\n      signer_account: '{account}'\n"
+    _env(monkeypatch, tmp_path, _node(extra))
+    with pytest.raises(ProfileError, match="signer_account"):
+        prof.load_effective()
+
+
+def test_override_applied_on_missing_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Check: ORAMA_NODE_ROLE=off applies to missing-profile fallback."""
+    _env(monkeypatch, tmp_path, None, ORAMA_NODE_ROLE="off")
+    eff = prof.load_effective()
+    assert (eff.role, eff.source) == ("off", "no-profile")
+    assert _cli(monkeypatch, tmp_path, None, ["show"], ORAMA_NODE_ROLE="off") == 0
+    assert json.loads(capsys.readouterr().out)["role"] == "off"
+    assert _cli(monkeypatch, tmp_path, None, ["plan"], ORAMA_NODE_ROLE="off") == 0
+    assert "role off" in capsys.readouterr().out
+
+
+def test_override_applied_on_unreadable_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check: ORAMA_NODE_ROLE=off applies to unreadable-profile fallback."""
+    _env(monkeypatch, tmp_path, BASE, ORAMA_NODE_ROLE="off")
+
+    def boom(self: Path, *args: object, **kwargs: object) -> object:
+        """Simulate permission error."""
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "open", boom)
+    eff = prof.load_effective()
+    assert (eff.role, eff.source) == ("off", "unreadable-profile")
+
+
+@pytest.mark.parametrize("fallback_text", [None, "unreadable"])
+def test_invalid_override_refused_on_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fallback_text: str | None
+) -> None:
+    """Check: invalid ORAMA_NODE_ROLE raises ProfileError on missing or unreadable fallback."""
+    if fallback_text == "unreadable":
+        _env(monkeypatch, tmp_path, BASE, ORAMA_NODE_ROLE="bogus")
+
+        def boom(self: Path, *args: object, **kwargs: object) -> object:
+            """Simulate permission error."""
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "open", boom)
+    else:
+        _env(monkeypatch, tmp_path, None, ORAMA_NODE_ROLE="bogus")
+    with pytest.raises(ProfileError, match="not a valid role"):
+        prof.load_effective()
+
+
+def test_promotion_override_ignored_on_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Check: promotion override is ignored on fallback and sets override_ignored."""
+    _env(monkeypatch, tmp_path, None, ORAMA_NODE_ROLE="primary-server")
+    eff = prof.load_effective()
+    assert eff.role == "client"
+    assert eff.override_ignored and "would promote" in eff.override_ignored
+
+
+def test_plan_uses_configured_account_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Check: plan uses configured server_account and signer_account names."""
+    extra = "    identity:\n      server_account: custom-svc\n      signer_account: custom-signer\n"
+    for platform in ["linux", "darwin", "win32"]:
+        text = _node(extra).replace("os: linux", f"os: {OS_BY_PLATFORM[platform]}")
+        assert _cli(monkeypatch, tmp_path, text, ["plan"], platform=platform) == 0
+        out = capsys.readouterr().out
+        assert "custom-svc" in out
+        assert "custom-signer" in out
+
+
+@pytest.mark.parametrize(
+    "raw_path",
+    ["/Library/Application Support/Oramasys", "C:\\ProgramData\\Oramasys"],
+)
+def test_plan_env_format_quotes_and_roundtrips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], raw_path: str
+) -> None:
+    """Check: plan --format env quotes values safely for POSIX shell round-trip."""
+    import shlex
+
+    extra = f"    state_root: '{raw_path}'\n"
+    text = _node(extra)
+    assert _cli(monkeypatch, tmp_path, text, ["plan", "--format", "env"]) == 0
+    env_out = capsys.readouterr().out
+    assignments: dict[str, str] = {}
+    for line in env_out.splitlines():
+        if line.strip():
+            k, v = line.split("=", 1)
+            assert v.startswith("'") and v.endswith("'"), f"Unquoted value: {line}"
+            tokens = shlex.split(v, posix=True)
+            assert len(tokens) == 1, f"Expected 1 token for {v}, got {tokens}"
+            assignments[k] = tokens[0]
+    assert assignments["ORAMA_STATE_ROOT"] == raw_path
+    assert assignments["ORAMA_NODE_ROLE"] == "primary-server"
+    assert assignments["ORAMA_NODE_ID"] == "srv"
+    assert assignments["ORAMA_SERVING_ENDPOINT"] == "srv.example:8443"
