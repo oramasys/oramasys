@@ -104,6 +104,7 @@ def test_retained_authority_survives_reopen_as_read_only_evidence(tmp_path: Path
 
 
 def test_retained_constructor_snapshots_caller_mappings(tmp_path: Path) -> None:
+    """A caller cannot mutate retained evidence through the original dictionaries."""
     store, verifier, permit, fin = _authorize(tmp_path)
     try:
         retained = replace(store.retained_dispatch_authority(ATTEMPT), permit=permit, finalization=fin)
@@ -119,6 +120,7 @@ def test_retained_constructor_snapshots_caller_mappings(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("change", ["digest", "reservation_id", "ledger_store_id", "authority_epoch"])
 def test_reverify_refuses_broken_immutable_linkage(tmp_path: Path, change: str) -> None:
+    """Valid-looking wires still refuse mismatched digests or shared binding fields."""
     store, verifier, permit, fin = _authorize(tmp_path)
     try:
         if change == "digest":
@@ -133,6 +135,7 @@ def test_reverify_refuses_broken_immutable_linkage(tmp_path: Path, change: str) 
 
 @pytest.mark.parametrize("operation", ["UPDATE", "DELETE", "INSERT OR REPLACE", "REPLACE"])
 def test_retention_is_append_only(tmp_path: Path, operation: str) -> None:
+    """Direct SQL mutation and replacement leave the committed evidence unchanged."""
     store, _verifier, _permit, _fin = _authorize(tmp_path)
     try:
         before = store._db.execute("SELECT * FROM retained_dispatch_authority").fetchone()
@@ -157,6 +160,7 @@ def test_retention_is_append_only(tmp_path: Path, operation: str) -> None:
     ("send_authority", "issuer_id = 'replacement'"),
 ])
 def test_read_requires_matching_committed_authorization(tmp_path: Path, table: str, assignment: str) -> None:
+    """Retained evidence is unavailable when any committed authorization row differs."""
     store, _verifier, _permit, _fin = _authorize(tmp_path)
     try:
         store._db.execute(f"UPDATE {table} SET {assignment} WHERE attempt_id = ?", (ATTEMPT,))
@@ -168,6 +172,7 @@ def test_read_requires_matching_committed_authorization(tmp_path: Path, table: s
 @pytest.mark.parametrize("column", ["permit_wire", "finalization_wire"])
 @pytest.mark.parametrize("damage", ["digest", "substitution", "noncanonical", "invalid_utf8", "surrogate", "deep", "text", "integer"])
 def test_malformed_or_substituted_retention_is_unavailable(tmp_path: Path, damage: str, column: str) -> None:
+    """Corrupt or substituted stored bytes never produce retained authority."""
     store, _verifier, permit, fin = _authorize(tmp_path)
     try:
         store._db.execute("DROP TRIGGER retained_dispatch_authority_no_update")
@@ -198,6 +203,7 @@ def test_malformed_or_substituted_retention_is_unavailable(tmp_path: Path, damag
 
 
 def test_retention_insert_failure_rolls_back_authorization(tmp_path: Path) -> None:
+    """An evidence-write failure rolls back use, authorization and outbox state together."""
     store = SqliteAttemptStore(tmp_path / "attempts.sqlite")
     flow = vector_flow()
     verifier = FakeVerifier()
@@ -219,6 +225,7 @@ def test_retention_insert_failure_rolls_back_authorization(tmp_path: Path) -> No
 
 
 def test_legacy_migration_never_reconstructs_evidence(tmp_path: Path) -> None:
+    """Repeated legacy migration preserves the attempt without manufacturing signed proof."""
     store, _verifier, _permit, _fin = _authorize(tmp_path)
     store._db.execute("DROP TABLE retained_dispatch_authority")
     store.close()
@@ -234,6 +241,7 @@ def test_legacy_migration_never_reconstructs_evidence(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("port", ["permit_ok", "finalization_ok"])
 def test_reverify_requires_both_verifier_decisions(tmp_path: Path, port: str) -> None:
+    """Both domain-separated public signature decisions must succeed."""
     store, verifier, permit, _fin = _authorize(tmp_path)
     try:
         retained = store.retained_dispatch_authority(ATTEMPT)
@@ -245,3 +253,58 @@ def test_reverify_requires_both_verifier_decisions(tmp_path: Path, port: str) ->
             assert verifier.calls[1] == f'finalization:{permit["issuer_key_id"]}'
     finally:
         store.close()
+
+
+_REPLACE_FORMS = (
+    "INSERT OR REPLACE INTO retained_dispatch_authority "
+    "(attempt_id, issuer_id, permit_wire, finalization_wire) VALUES (?, 'evil', x'00', x'00')",
+    "REPLACE INTO retained_dispatch_authority "
+    "(attempt_id, issuer_id, permit_wire, finalization_wire) VALUES (?, 'evil', x'00', x'00')",
+    "INSERT INTO retained_dispatch_authority (attempt_id, issuer_id, permit_wire, finalization_wire) "
+    "VALUES (?, 'evil', x'00', x'00') ON CONFLICT(attempt_id) DO UPDATE SET issuer_id = 'evil'",
+    "INSERT INTO retained_dispatch_authority (attempt_id, issuer_id, permit_wire, finalization_wire) "
+    "VALUES (?, 'evil', x'00', x'00')",
+)
+
+
+@pytest.mark.parametrize("statement", _REPLACE_FORMS)
+def test_retained_authority_cannot_be_replaced_by_any_insert_form(tmp_path: Path, statement: str) -> None:
+    """REPLACE and upsert forms skip the DELETE/UPDATE triggers, so a BEFORE INSERT guard must stop them."""
+    store, verifier, permit, fin = _authorize(tmp_path)
+    path = tmp_path / "attempts.sqlite"
+    store.close()
+    raw = sqlite3.connect(path)
+    try:
+        before = raw.execute("SELECT * FROM retained_dispatch_authority").fetchall()
+        with pytest.raises(sqlite3.DatabaseError, match="append-only|UNIQUE"):
+            raw.execute(statement, (ATTEMPT,))
+        raw.rollback()
+        assert raw.execute("SELECT * FROM retained_dispatch_authority").fetchall() == before
+    finally:
+        raw.close()
+    reopened = SqliteAttemptStore(path)
+    try:
+        retained = reopened.retained_dispatch_authority(ATTEMPT)
+        assert retained is not None
+        assert retained.permit == permit and retained.finalization == fin
+        assert retained.reverify(verifier) is True
+    finally:
+        reopened.close()
+
+
+def test_replace_guard_is_added_to_an_existing_database_on_open(tmp_path: Path) -> None:
+    """A database created before the guard existed gets it when the store opens it."""
+    store, _verifier, _permit, _fin = _authorize(tmp_path)
+    path = tmp_path / "attempts.sqlite"
+    store.close()
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TRIGGER retained_dispatch_authority_no_replace")
+    raw.commit()
+    raw.close()
+    SqliteAttemptStore(path).close()
+    raw = sqlite3.connect(path)
+    try:
+        names = {row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
+        assert "retained_dispatch_authority_no_replace" in names
+    finally:
+        raw.close()
