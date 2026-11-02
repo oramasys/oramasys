@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
+from inspect import getattr_static
 from typing import Final
 
 from orama.graph.dispatch_attempts import SqliteAttemptStore
@@ -120,9 +121,10 @@ class SealedInertDriver:
             issuer_id=self._issuer_id, now=now,
         )
         try:
+            checked_authority = self._transactional_authority(binding, authority_check)
             self._store.begin_bound_send(
                 binding, now, issuer_id=self._issuer_id, clock=self._clock,
-                envelope_digest=envelope.digest, authority_check=authority_check,
+                envelope_digest=envelope.digest, authority_check=checked_authority,
             )
         except FinalBoundaryRefused as refusal:
             if refusal.terminal and refusal.reason in TERMINAL_REASONS:
@@ -140,6 +142,39 @@ class SealedInertDriver:
             raise SendOutcomeUnknown("outcome_unrecorded") from error
         self._publish(envelope.attempt_id, receipt)
         return receipt
+
+    def _transactional_authority(
+        self, binding: FinalBoundaryBinding, authority_check: Callable[[], None] | None,
+    ) -> Callable[[], None] | None:
+        """Combine an optional public-trust recheck with the required signed-grant check.
+
+        Preparation may read the attempt store here, before its write transaction.
+        The returned callback must be store-free and bounded local work. Legacy
+        trusted verify-only ports keep their existing behavior; a present but
+        broken preparation port refuses, never silently degrades to legacy mode.
+        """
+        try:
+            absent = object()
+            if getattr_static(self._approvals, "prepare_recheck", absent) is absent:
+                return authority_check
+            prepare = getattr(self._approvals, "prepare_recheck")
+            recheck = prepare(binding)
+            if not callable(recheck) or authority_check is None:
+                raise ValueError("transactional approval and grant checks are both required")
+        except Exception:
+            raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
+
+        def check() -> None:
+            """Keep both current grant authority and dispatch-key trust at the send boundary."""
+            authority_check()
+            try:
+                verified = recheck()
+            except Exception:
+                raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
+            if verified is not True:
+                raise FinalBoundaryRefused("approval_not_verified", terminal=True)
+
+        return check
 
     def publish_pending(self, limit: int = 100) -> int:
         """Deliver receipts whose publication never completed; bounded, idempotent, report-only.

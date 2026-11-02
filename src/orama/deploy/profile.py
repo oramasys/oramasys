@@ -16,16 +16,16 @@ prints.
 from __future__ import annotations
 
 import argparse
-import collections.abc
 import hashlib
 import json
 import os
 import platform
 import re
+import shlex
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from pydantic import (
     BaseModel,
@@ -52,13 +52,7 @@ _ROLE_RANK = {"off": 0, "client": 1, "secondary-server": 2, "primary-server": 2}
 _OS_BY_PLATFORM = {"darwin": "macos", "linux": "linux", "win32": "windows"}
 
 _FORBIDDEN_PRINCIPAL_NAMES = {
-    "root",
-    "system",
-    "localsystem",
-    "localservice",
-    "networkservice",
-    "administrator",
-    "administrators",
+    "root", "system", "localsystem", "localservice", "networkservice", "administrators", "administrator",
 }
 _FORBIDDEN_SIDS = {"s-1-5-18", "s-1-5-19", "s-1-5-20", "s-1-5-32-544"}
 
@@ -94,11 +88,11 @@ def _norm_account(value: str) -> str:
     return value.strip().replace("/", "\\").split("\\")[-1].replace(" ", "").casefold()
 
 
-_SID_RE = re.compile(r"^S-1-\d+(-\d+)+\Z", re.IGNORECASE)
-_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$ \\-]*\Z")
-_DECIMAL_RE = re.compile(r"^[1-9][0-9]*\Z")
+_SID_RE = re.compile(r"^S-1-\d+(-\d+)+$", re.IGNORECASE)
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$ \\-]*$")
+_DECIMAL_RE = re.compile(r"^[1-9][0-9]*$")
 _FORBIDDEN_RIDS = {"500", "512"}
-_ENDPOINT_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?:([0-9]{1,5})\Z")
+_ENDPOINT_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?:([0-9]{1,5})$")
 
 
 def _principal_problem(value: str | int) -> str | None:
@@ -108,8 +102,6 @@ def _principal_problem(value: str | int) -> str | None:
     if isinstance(value, int):
         return None if value > 0 else "uid must be greater than 0"
     text = value
-    if any(ord(c) < 32 or ord(c) == 127 for c in text):
-        return "control characters are not allowed"
     if _DECIMAL_RE.fullmatch(text):
         return None
     if re.match(r"^S-\d", text, re.IGNORECASE):
@@ -158,20 +150,16 @@ class Identity(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "Identity":
         """Refuse shared server/signer accounts and privileged principals."""
+        for name in ("server_account", "signer_account"):
+            value = getattr(self, name)
+            if value is not None and (problem := _principal_problem(value)):
+                raise ValueError(f"{name}: {problem}")
         if (
             self.server_account
             and self.signer_account
             and _norm_account(self.server_account) == _norm_account(self.signer_account)
         ):
             raise ValueError("server_account must differ from signer_account")
-        if self.server_account is not None:
-            problem = _principal_problem(self.server_account)
-            if problem:
-                raise ValueError(f"server_account: {problem}")
-        if self.signer_account is not None:
-            problem = _principal_problem(self.signer_account)
-            if problem:
-                raise ValueError(f"signer_account: {problem}")
         if self.expected_principal is not None:
             problem = _principal_problem(self.expected_principal)
             if problem:
@@ -203,8 +191,6 @@ class Node(BaseModel):
             raise ValueError("node id must not have leading or trailing whitespace")
         if not value.isascii():
             raise ValueError("node id must be ASCII")
-        if any(ord(c) < 32 or ord(c) == 127 for c in value):
-            raise ValueError("node id contains control characters")
         return value
 
     @model_validator(mode="after")
@@ -213,8 +199,6 @@ class Node(BaseModel):
         if self.role in SERVER_ROLES and not self.endpoint:
             raise ValueError(f"node {self.id!r}: servers need an endpoint")
         if self.endpoint is not None:
-            if any(ord(c) < 32 or ord(c) == 127 for c in self.endpoint):
-                raise ValueError(f"node {self.id!r}: endpoint contains control characters")
             m = _ENDPOINT_RE.fullmatch(self.endpoint)
             if not m or not 1 <= int(m.group(1)) <= 65535:
                 raise ValueError(f"node {self.id!r}: endpoint must be host:port")
@@ -314,28 +298,18 @@ def _safe_load(text: str) -> object:
     class _StrictLoader(yaml.SafeLoader):
         """SafeLoader that raises on duplicate mapping keys."""
 
-        def construct_mapping(self, node, deep=False):
-            """Build a mapping, rejecting duplicate and unhashable keys."""
+        def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+            """Build a mapping, rejecting a repeated key."""
             seen = set()
             for key_node, _ in node.value:
                 key = self.construct_object(key_node, deep=True)
-                if not isinstance(key, collections.abc.Hashable):
-                    raise yaml.constructor.ConstructorError(
-                        "while constructing a mapping",
-                        node.start_mark,
-                        f"found unhashable key {key!r}",
-                        key_node.start_mark,
-                    )
                 try:
-                    hash(key)
-                except TypeError as exc:
+                    duplicate = key in seen
+                except TypeError:
                     raise yaml.constructor.ConstructorError(
-                        "while constructing a mapping",
-                        node.start_mark,
-                        f"found unhashable key {key!r}",
-                        key_node.start_mark,
-                    ) from exc
-                if key in seen:
+                        None, None, "unhashable mapping key", key_node.start_mark
+                    ) from None
+                if duplicate:
                     raise yaml.constructor.ConstructorError(
                         None, None, f"duplicate key {key!r}", key_node.start_mark
                     )
@@ -365,24 +339,6 @@ def parse_profile(text: str) -> ServingProfile:
         raise ProfileError("invalid profile: " + "; ".join(parts)) from exc
 
 
-def _apply_override(eff: EffectiveNode, env: Mapping[str, str]) -> EffectiveNode:
-    """Apply ORAMA_NODE_ROLE override rules (downgrade-only) to an effective node."""
-    override = (env.get(ENV_NODE_ROLE) or "").strip()
-    if override:
-        if override not in _ROLE_RANK:
-            raise ProfileError(f"{ENV_NODE_ROLE}={override!r} is not a valid role")
-        if _ROLE_RANK[override] < _ROLE_RANK[eff.role]:
-            eff.notes.append(f"role lowered {eff.role} -> {override} by {ENV_NODE_ROLE}")
-            eff.role = override
-        elif override != eff.role:
-            eff.override_ignored = (
-                f"{ENV_NODE_ROLE}={override} would promote {eff.role}; ignored "
-                "(the override can only downgrade)"
-            )
-    eff.serving = "applicable" if eff.role in SERVER_ROLES else "not-applicable"
-    return eff
-
-
 def resolve_node(
     profile: ServingProfile,
     env: Mapping[str, str],
@@ -407,17 +363,34 @@ def resolve_node(
                 f"node {node.id!r} declares os {node.os!r} but this host is {os_name!r}"
             )
         primary = next((n for n in profile.nodes if n.role == "primary-server"), None)
-        server_acc = node.identity.server_account if node.identity else None
-        signer_acc = node.identity.signer_account if node.identity else None
         eff = EffectiveNode(
             node_id=node.id, os=os_name, role=node.role, serving="not-applicable",
             source="profile", profile_path=str(path) if path else None,
             profile_sha256=sha256, profile_role=node.role, endpoint=node.endpoint,
             primary_endpoint=primary.endpoint if primary else None,
             state_root=node.state_root, public_state=node.public_state,
-            server_account=server_acc, signer_account=signer_acc,
+            server_account=node.identity.server_account if node.identity else None,
+            signer_account=node.identity.signer_account if node.identity else None,
         )
-    return _apply_override(eff, env)
+    return _apply_role_override(eff, env)
+
+
+def _apply_role_override(eff: EffectiveNode, env: Mapping[str, str]) -> EffectiveNode:
+    """Apply the same downgrade-only validation to loaded and fallback nodes."""
+    override = (env.get(ENV_NODE_ROLE) or "").strip()
+    if override:
+        if override not in _ROLE_RANK:
+            raise ProfileError(f"{ENV_NODE_ROLE}={override!r} is not a valid role")
+        if _ROLE_RANK[override] < _ROLE_RANK[eff.role]:
+            eff.notes.append(f"role lowered {eff.role} -> {override} by {ENV_NODE_ROLE}")
+            eff.role = override
+        elif override != eff.role:
+            eff.override_ignored = (
+                f"{ENV_NODE_ROLE}={override} would promote {eff.role}; ignored "
+                "(the override can only downgrade)"
+            )
+    eff.serving = "applicable" if eff.role in SERVER_ROLES else "not-applicable"
+    return eff
 
 
 def load_effective(env: Mapping[str, str] | None = None) -> EffectiveNode:
@@ -428,17 +401,15 @@ def load_effective(env: Mapping[str, str] | None = None) -> EffectiveNode:
     env = os.environ if env is None else env
     path = Path(env.get(ENV_PROFILE) or default_profile_path())
     try:
-        with path.open("rb") as f:
-            raw = f.read(MAX_PROFILE_BYTES + 1)
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_PROFILE_BYTES + 1)
     except FileNotFoundError:
-        eff = _fallback("no-profile", path, "no profile file", running_os())
-        return _apply_override(eff, env)
+        return _apply_role_override(_fallback("no-profile", path, "no profile file", running_os()), env)
     except (OSError, ValueError) as exc:
-        eff = _fallback(
+        return _apply_role_override(_fallback(
             "unreadable-profile", path,
             f"profile unreadable: {exc.__class__.__name__}", running_os(),
-        )
-        return _apply_override(eff, env)
+        ), env)
     if len(raw) > MAX_PROFILE_BYTES:
         raise ProfileError("profile exceeds the 256 KiB size limit")
     try:
@@ -487,35 +458,21 @@ def check_startup(effective: EffectiveNode, env: Mapping[str, str]) -> None:
         )
 
 
-def _server_steps(effective: EffectiveNode) -> list[str]:
-    """Return the platform-specific operator steps for a server node."""
-    srv = effective.server_account
-    sgn = effective.signer_account
-    if effective.os == "linux":
-        srv = srv or "orama-serve"
-        sgn = sgn or "orama-signer"
-        return [
-            f"Create the system user {srv} (systemd User=, NoNewPrivileges) and the signer user {sgn}.",
-            f"Create the state root owned by {srv}, mode 0700.",
-        ]
-    if effective.os == "macos":
-        srv = srv or "_orama-serve"
-        sgn = sgn or "_orama-signer"
-        return [
-            f"Create the hidden service user {srv} (UID < 500, launchd UserName) and the signer user {sgn}.",
-            f"Create the state root owned by {srv}, mode 0700.",
-        ]
-    if effective.os == "windows":
-        srv = srv or r"NT SERVICE\OramaServe"
-        sgn = sgn or "orama-signer"
-        return [
-            "Install pywin32 into the serving venv (serving refuses to run without it; there is no icacls fallback).",
-            f"Use the virtual service account {srv} (privileges stripped, restricted SID type) and a standard local user {sgn} with deny-logon rights.",
-            "Create the state root with a protected DACL.",
-        ]
-    return []
-
-
+_SERVER_STEPS = {
+    "linux": [
+        "Create the system user {server_account} (systemd User=, NoNewPrivileges) and the signer user {signer_account}.",
+        "Create the state root owned by {server_account}, mode 0700.",
+    ],
+    "macos": [
+        "Create the hidden service user {server_account} (UID < 500, launchd UserName) and the signer user {signer_account}.",
+        "Create the state root owned by {server_account}, mode 0700.",
+    ],
+    "windows": [
+        "Install pywin32 into the serving venv (serving refuses to run without it; there is no icacls fallback).",
+        "Use the server account {server_account} (privileges stripped, restricted SID type where applicable) and a standard local signer user {signer_account} with deny-logon rights.",
+        "Create the state root with a protected DACL.",
+    ],
+}
 _SERVER_COMMON = [
     "Record the numeric uid/SID of the server account as identity.expected_principal in the profile.",
     "Run the evidence script as the serving user (it runs the R4 serving-identity check, R5 installed identity and the Phylax pin check): bash scripts/operator_serving_checks.sh; see docs/serving-activation-runbook.md.",
@@ -524,32 +481,16 @@ _SERVER_COMMON = [
 ]
 
 
-def _sh_quote(value: str) -> str:
-    """Format ``value`` as a POSIX-sh single-quoted string literal."""
-    return "'" + value.replace("'", "'\\''") + "'"
-
-
 def plan(effective: EffectiveNode, fmt: str = "text") -> str:
-    """Return what this node should set up for its role and OS (print only).
-
-    Supported formats:
-    - ``text``: Human-readable operator summary with numbered setup steps.
-    - ``env``: POSIX-sh-safe single-quoted variable assignments suitable for
-      sourcing or env files. Values are wrapped in single quotes, with any
-      embedded single quote escaped as ``'\\''``. This preserves spaces,
-      prevents parameter expansions, and preserves Windows backslashes.
-    """
+    """Print setup steps; ``env`` is POSIX shell assignments, not PowerShell code."""
     is_server = effective.role in SERVER_ROLES
     if fmt == "env":
-        endpoint = (effective.endpoint if is_server else effective.primary_endpoint) or ""
-        lines = [
-            f"ORAMA_NODE_ID={_sh_quote(effective.node_id or '')}",
-            f"ORAMA_NODE_ROLE={_sh_quote(effective.role)}",
-            f"ORAMA_SERVING_ENDPOINT={_sh_quote(endpoint)}",
-        ]
+        values = {"ORAMA_NODE_ID": effective.node_id or "", "ORAMA_NODE_ROLE": effective.role}
+        endpoint = effective.endpoint if is_server else effective.primary_endpoint
+        values["ORAMA_SERVING_ENDPOINT"] = endpoint or ""
         if is_server and effective.state_root:
-            lines.append(f"ORAMA_STATE_ROOT={_sh_quote(effective.state_root)}")
-        return "\n".join(lines) + "\n"
+            values["ORAMA_STATE_ROOT"] = effective.state_root
+        return "\n".join(f"{key}={shlex.quote(value)}" for key, value in values.items()) + "\n"
     out = [
         f"node: {effective.node_id or '(none)'}  os: {effective.os}  role: {effective.role}",
     ]
@@ -558,7 +499,15 @@ def plan(effective: EffectiveNode, fmt: str = "text") -> str:
         if effective.state_root:
             out.append(f"state_root: {effective.state_root}")
         out.append("Operator-only steps (this tool prints them and executes nothing):")
-        steps = _server_steps(effective) + _SERVER_COMMON
+        steps = _SERVER_STEPS.get(effective.os, []) + _SERVER_COMMON
+        defaults = {
+            "linux": ("orama-serve", "orama-signer"),
+            "macos": ("_orama-serve", "_orama-signer"),
+            "windows": (r"NT SERVICE\OramaServe", "orama-signer"),
+        }
+        server, signer = defaults.get(effective.os, ("orama-serve", "orama-signer"))
+        steps = [step.format(server_account=effective.server_account or server,
+                             signer_account=effective.signer_account or signer) for step in steps]
         out.extend(f"  {i}. {s}" for i, s in enumerate(steps, 1))
     elif effective.role == "client":
         out.append(

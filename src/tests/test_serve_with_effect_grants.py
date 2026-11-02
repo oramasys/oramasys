@@ -5,7 +5,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -242,6 +242,76 @@ def effective() -> CapabilityConfig:
         record=signed(effects=True), expected_binary_digest=BIN, expected_config_digest=CFG,
         signature_verifier=Signer(), permit_verifier=object(),
     )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["approval_verifier", "revocations", "issuer_id"],
+    ids=["approval-verifier", "revocation-view", "issuer-id"],
+)
+def test_r3_final_boundary_ports_refuse_every_incomplete_port_set(missing: str) -> None:
+    """An incomplete final-boundary port set cannot be substituted at startup."""
+    values: dict[str, object] = {
+        "approval_verifier": Approvals(),
+        "revocations": FakeRevocations(),
+        "issuer_id": ISSUER,
+    }
+    values[missing] = None if missing != "issuer_id" else " "
+    with pytest.raises(ValueError, match="final-boundary ports must all be supplied|issuer_id"):
+        FinalBoundaryPorts(**values)  # type: ignore[arg-type]
+
+
+def test_r3_public_opener_uses_only_the_verify_only_phylax_api(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The serving root requests only public verification state, never an issuer capability."""
+    opened = object()
+    seen: dict[str, object] = {}
+
+    class PublicConfig:
+        """Capture the state directory received by the public verifier configuration."""
+
+        def __init__(self, *, state_dir: Path) -> None:
+            """Record the sole public-state input permitted at this boundary."""
+            seen["state_dir"] = state_dir
+
+    def open_effect_grant_verifier(config: object) -> object:
+        """Record the public configuration and return the verify-only double."""
+        seen["config"] = config
+        return opened
+
+    monkeypatch.setitem(
+        sys.modules,
+        "phylax",
+        SimpleNamespace(
+            GrantVerifierConfig=PublicConfig,
+            open_effect_grant_verifier=open_effect_grant_verifier,
+        ),
+    )
+    state_dir = tmp_path / "public-state"
+    assert module.open_public_verifier(state_dir) is opened
+    assert seen["state_dir"] == state_dir
+    assert isinstance(seen["config"], PublicConfig)
+
+
+def test_r3_public_verifier_failure_precedes_effect_store_opening(
+    module: ModuleType, tmp_path: Path
+) -> None:
+    """An unavailable public verifier cannot create an effect-store fallback."""
+    missing_store = tmp_path / "missing.sqlite"
+
+    def unavailable(_: Path) -> object:
+        """Model a public verifier opener that cannot establish trusted state."""
+        raise RuntimeError("public verifier unavailable")
+
+    with pytest.raises(RuntimeError, match="public verifier unavailable"):
+        module.build_app(
+            environ(tmp_path, missing_store),
+            capability_config=effective(),
+            final_boundary=ports(),
+            open_verifier=unavailable,
+        )
+    assert not missing_store.exists()
 
 
 def test_effective_effects_without_final_boundary_ports_refuse_at_startup(

@@ -210,6 +210,69 @@ class AttemptRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class RetainedDispatchAuthority:
+    """Immutable signed permit/finalization evidence retained with authorization.
+
+    This is an audit and recovery prerequisite, never a current approval or
+    revocation decision. Callers must separately establish current authority.
+    """
+
+    attempt_id: str
+    issuer_id: str
+    permit: Mapping[str, Any]
+    finalization: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        """Snapshot the flat wire mappings, including for directly constructed evidence."""
+        object.__setattr__(self, "permit", MappingProxyType(dict(self.permit)))
+        object.__setattr__(self, "finalization", MappingProxyType(dict(self.finalization)))
+
+    @property
+    def grant_id(self) -> str:
+        """Return the grant identifier from the validated retained permit."""
+        return self.permit["grant_id"]
+
+    def reverify(self, verifier: SignatureVerifier) -> bool:
+        """Check linkage and signatures using a verifier trusted for ``issuer_id``.
+
+        The wire carries a key id, not an issuer id: the injected adapter must bind
+        that key to this issuer. This is not a current-authority decision.
+        """
+        try:
+            permit = validate_permit_wire(self.permit)
+            finalization = validate_finalization_wire(self.finalization)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return False
+        if not _retained_linkage(self.attempt_id, permit, finalization):
+            return False
+        return (
+            verifier.verify_permit(
+                permit["issuer_key_id"], permit_body(permit), permit["issuer_signature"]
+            ) is True
+            and verifier.verify_finalization(
+                permit["issuer_key_id"],
+                finalization_body(finalization),
+                finalization["issuer_signature"],
+            ) is True
+        )
+
+
+def _retained_linkage(
+    attempt_id: str, permit: Mapping[str, Any], fin: Mapping[str, Any]
+) -> bool:
+    """Check the immutable bindings shared by retained reads and reverification."""
+    return (
+        permit["attempt_id"] == fin["attempt_id"] == attempt_id
+        and fin["permit_id"] == permit["permit_id"]
+        and fin["permit_digest"] == permit["payload_digest"]
+        == permit_payload_digest(permit_body(permit))
+        and all(fin[name] == permit[name] for name in (
+            "reservation_id", "ledger_store_id", "authority_epoch",
+        ))
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedDispatchGrant:
     """Dispatch-grant facts produced by the future verified-v2 composition boundary.
 
@@ -240,6 +303,19 @@ _SCHEMA: Final = (
     " attempt_id TEXT PRIMARY KEY, grant_wire BLOB NOT NULL, context TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS send_authority ("
     " attempt_id TEXT PRIMARY KEY, issuer_id TEXT NOT NULL, expires_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS retained_dispatch_authority ("
+    " attempt_id TEXT PRIMARY KEY, issuer_id TEXT NOT NULL, permit_wire BLOB NOT NULL,"
+    " finalization_wire BLOB NOT NULL)",
+    "CREATE TRIGGER IF NOT EXISTS retained_dispatch_authority_no_update BEFORE UPDATE ON "
+    "retained_dispatch_authority BEGIN SELECT RAISE(ABORT, 'retained dispatch authority is "
+    "append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS retained_dispatch_authority_no_delete BEFORE DELETE ON "
+    "retained_dispatch_authority BEGIN SELECT RAISE(ABORT, 'retained dispatch authority is "
+    "append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS retained_dispatch_authority_no_replace BEFORE INSERT ON "
+    "retained_dispatch_authority WHEN EXISTS (SELECT 1 FROM retained_dispatch_authority "
+    "WHERE attempt_id = NEW.attempt_id) BEGIN SELECT RAISE(ABORT, 'retained dispatch authority "
+    "is append-only'); END",
     "CREATE TABLE IF NOT EXISTS dispatch_attempts ("
     " attempt_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, reservation_id TEXT NOT NULL,"
     " state TEXT NOT NULL, fenced INTEGER NOT NULL DEFAULT 0,"
@@ -284,6 +360,10 @@ _SCHEMA: Final = (
     "CREATE TRIGGER IF NOT EXISTS effect_grant_bindings_no_replace BEFORE INSERT ON effect_grant_bindings"
     " WHEN EXISTS (SELECT 1 FROM effect_grant_bindings WHERE attempt_id = NEW.attempt_id)"
     " BEGIN SELECT RAISE(ABORT, 'effect_grant_bindings is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS retained_dispatch_authority_no_replace BEFORE INSERT ON"
+    " retained_dispatch_authority"
+    " WHEN EXISTS (SELECT 1 FROM retained_dispatch_authority WHERE attempt_id = NEW.attempt_id)"
+    " BEGIN SELECT RAISE(ABORT, 'retained dispatch authority is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS reservations_no_replace_consumed BEFORE INSERT ON reservations"
     " WHEN EXISTS (SELECT 1 FROM reservations WHERE consumed_attempt_id IS NOT NULL AND"
     " (reservation_id = NEW.reservation_id OR consumed_attempt_id = NEW.consumed_attempt_id))"
@@ -595,6 +675,11 @@ def _write_authorization(
             values["permit_id"], values["permit_digest"], values["finalization_digest"],
             values["r_p"], values["r_f"], attempt.attempt_id,
         ),
+    )
+    db.execute(
+        "INSERT INTO retained_dispatch_authority (attempt_id, issuer_id, permit_wire, "
+        "finalization_wire) VALUES (?, ?, ?, ?)",
+        (attempt.attempt_id, issuer_id, canonical_bytes(permit), canonical_bytes(fin)),
     )
 
 
@@ -1151,6 +1236,65 @@ class SqliteAttemptStore:
         """
         with self._lock:
             return _binding_in(self._db, attempt_id)
+
+    def retained_dispatch_authority(self, attempt_id: str) -> RetainedDispatchAuthority | None:
+        """Return canonical retained signed evidence, or None when it is absent or malformed.
+
+        Historical rows that predate retention deliberately remain unavailable: the store never
+        reconstructs signed authority from mutable attempt fields or stored digests.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT e.issuer_id, e.permit_wire, e.finalization_wire, a.grant_id,"
+                " a.reservation_id, a.permit_id, a.permit_digest, a.finalization_digest,"
+                " a.r_p, a.r_f, i.authority_pair, s.expires_at"
+                " FROM retained_dispatch_authority e"
+                " JOIN dispatch_attempts a ON a.attempt_id = e.attempt_id"
+                " JOIN dispatch_intents i ON i.attempt_id = a.attempt_id"
+                " JOIN outbox o ON o.attempt_id = a.attempt_id"
+                " JOIN grant_use g ON g.attempt_id = a.attempt_id AND g.grant_id = a.grant_id"
+                " JOIN send_authority s ON s.attempt_id = a.attempt_id AND s.issuer_id = e.issuer_id"
+                " WHERE e.attempt_id = ? AND"
+                " (a.grant_id, a.permit_id, a.permit_digest, a.finalization_digest, a.r_p, a.r_f)"
+                " = (i.grant_id, i.permit_id, i.permit_digest, i.finalization_digest, i.r_p, i.r_f)"
+                " AND (i.grant_id, i.permit_id, i.permit_digest, i.finalization_digest, i.r_p, i.r_f,"
+                " i.authority_pair, i.acked_through) = (o.grant_id, o.permit_id, o.permit_digest,"
+                " o.finalization_digest, o.r_p, o.r_f, o.authority_pair, o.acked_through)",
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        issuer_id, permit_wire, finalization_wire, *committed = row
+        if not isinstance(issuer_id, str) or not issuer_id.strip():
+            return None
+        try:
+            if not isinstance(permit_wire, bytes) or not isinstance(finalization_wire, bytes):
+                return None
+            permit_bytes = permit_wire
+            finalization_bytes = finalization_wire
+            permit = validate_permit_wire(json.loads(permit_bytes))
+            finalization = validate_finalization_wire(json.loads(finalization_bytes))
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            return None
+        if (
+            canonical_bytes(permit) != permit_bytes
+            or canonical_bytes(finalization) != finalization_bytes
+            or not _retained_linkage(attempt_id, permit, finalization)
+            or committed != [
+                permit["grant_id"], permit["reservation_id"], permit["permit_id"],
+                permit["payload_digest"], _fin_digest(finalization),
+                permit["revocation_version"], finalization["revocation_version"],
+                f'{permit["configuration_policy_epoch"]}:{permit["authority_epoch"]}',
+                _earliest_expiry(permit["expires_at"], finalization["expires_at"]),
+            ]
+        ):
+            return None
+        return RetainedDispatchAuthority(
+            attempt_id=attempt_id,
+            issuer_id=issuer_id,
+            permit=MappingProxyType(permit),
+            finalization=MappingProxyType(finalization),
+        )
 
     def revocation_refusal(self, attempt_id: str, issuer_id: str) -> str | None:
         """Return the locally recorded Rule 4 revocation reason for the attempt, or None."""
