@@ -207,6 +207,8 @@ def test_golden_state_fails_when_any_byte_or_the_clock_is_wrong() -> None:
     (state_bytes(head_version=0, head_event_digest="d" * 64), "state.malformed"),
     (state_bytes(issuer_revoked="no"), "state.malformed"),
     (state_bytes(extra=1), "state.malformed"),
+    (state_bytes(revoked_grants=[["x"]]), "state.malformed"),
+    (state_bytes(revoked_grants=["a", 1]), "state.malformed"),
     (state_bytes(schema_version=True), "state.malformed"),
     (state_bytes(schema_version=1.0), "state.malformed"),
     (state_bytes(cascades=[{"version": None, "approval_id": None, "issuer_authority_version": 1,
@@ -297,3 +299,28 @@ def test_refusal_codes_are_closed_and_the_module_holds_no_cryptography() -> None
     assert isinstance(RevocationStateFacts(0, "0" * 64, False, frozenset(), frozenset(), frozenset()), RevocationStateFacts)
     with pytest.raises(ValueError):
         SignedStateRevocationView(Source(), Verifier(), issuer_id=" ", clock=lambda: NOW)
+
+
+def test_resolver_and_verifier_faults_fail_closed_with_stable_codes() -> None:
+    """A raising approval resolver or verifier never propagates and never reads as not revoked."""
+    def boom(_grant):
+        raise RuntimeError("resolver down")
+
+    lookup = view(state_bytes(), approval_ref_for=boom)
+    assert lookup.revoked(grant_id="g1", issuer_id=ISSUER) is True and lookup.refusal == "state.unavailable"
+
+    class Raising:
+        def verify_state(self, key_id, body, signature):
+            raise ValueError("bad signature string")
+
+    with pytest.raises(StateRefused) as caught:
+        verify_state(state_bytes(), verifier=Raising(), issuer_id=ISSUER, now=NOW, acknowledged=None)
+    assert caught.value.code == "state.signature"
+
+    class Truthy:
+        def verify_state(self, key_id, body, signature):
+            return "yes"
+
+    with pytest.raises(StateRefused) as caught:
+        verify_state(state_bytes(), verifier=Truthy(), issuer_id=ISSUER, now=NOW, acknowledged=None)
+    assert caught.value.code == "state.signature"

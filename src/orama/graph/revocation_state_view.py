@@ -106,9 +106,11 @@ def _is_digest(value: object) -> bool:
 
 def _ids(value: object) -> frozenset[str]:
     """Return a strictly sorted, duplicate-free identifier list as a set, or refuse."""
-    if not isinstance(value, list) or value != sorted(set(value)):
+    if not isinstance(value, list):
         raise StateRefused("state.malformed")
     if any(not isinstance(i, str) or not i or not i.isascii() or not i.isprintable() or " " in i for i in value):
+        raise StateRefused("state.malformed")
+    if value != sorted(set(value)):  # element types are known to be str here, so this cannot raise
         raise StateRefused("state.malformed")
     return frozenset(value)
 
@@ -179,7 +181,11 @@ def verify_state(
     )
     if body["issuer_id"] != issuer_id:
         raise StateRefused("state.issuer_mismatch")
-    if not verifier.verify_state(key_id, body, signature):
+    try:
+        valid = verifier.verify_state(key_id, body, signature)
+    except Exception as error:
+        raise StateRefused("state.signature") from error
+    if valid is not True:
         raise StateRefused("state.signature")
     if now - generated > timedelta(seconds=max_age_seconds) or generated - now > timedelta(seconds=CLOCK_SKEW_SECONDS):
         raise StateRefused("state.stale")
@@ -225,7 +231,11 @@ class SignedStateRevocationView:
         if issuer_id != self._issuer_id:
             self.refusal = "state.issuer_mismatch"
             return True
-        approval = None if self._approval_ref_for is None else self._approval_ref_for(grant_id)
+        try:
+            approval = None if self._approval_ref_for is None else self._approval_ref_for(grant_id)
+        except Exception:  # noqa: BLE001 - a resolver fault must fail closed, never propagate
+            self.refusal = "state.unavailable"
+            return True
         return self.reason(grant_id, approval) is not None
 
     def _facts(self) -> RevocationStateFacts | None:
