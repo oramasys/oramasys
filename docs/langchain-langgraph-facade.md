@@ -14,7 +14,8 @@
    `recursion_limit` and `run_id` are tolerated because real LangChain propagates them into every nested
    call, but they are never invoked or acted on (no tracing). Non-empty `configurable` or unknown keys are
    refused. A real `langchain_core` chain test found the original stricter rule broke composition.
-3. `max_concurrency` defaults to 1 and is capped at 8; zero, booleans and non-integers are refused.
+3. `max_concurrency` defaults to 1. Values above 8, zero, booleans and non-integers are refused with
+   `facade.bad_concurrency` (never silently reduced).
 4. A run that is not `done`, has an error, or lacks the named output key raises; stale data is never returned.
 5. Streaming is one final chunk. Sync entry points refuse inside a running event loop.
 6. `effect_kind = "untrusted"`; no new effect capability is introduced and effects remain refused.

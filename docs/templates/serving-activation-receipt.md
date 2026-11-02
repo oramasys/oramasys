@@ -10,5 +10,6 @@
 - Archive medium and retention owner:
 - Registry authority key ceremony reference:
 - Independent reviewer (name, date, decision):
+- Independent reviewer signature, or reference to the separately signed review artifact:
 - Operator decision (activate / hold):
 - Operator signature:

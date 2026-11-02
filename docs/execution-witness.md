@@ -14,13 +14,16 @@ Closed 14-field body: `schema_version`, `consumer_id`, `sequence`, `previous_wit
 `aborted`, `fenced`, `unknown`. Canonical JSON (the consumer wire encoder). `witness_id` is the
 SHA-256 of the canonical unsigned body, so identity is content-addressed; `sequence` and
 `previous_witness_id` chain one consumer's witnesses from a genesis of 64 zeros. The wire adds
-`witness_id` and a `signature` over the id.
+`witness_id` and a `signature` over the id. `recorded_at` must be timezone-aware and is converted to
+UTC before signing; a naive time is refused (`witness.malformed`).
 
 ## Gate 2: medium, retention owner, durability
 
 * `SqliteWitnessLog` is the local durable source of truth for what **must** exist. It is append-only
   and immutable by trigger, and idempotent per `(attempt_id, outcome)`, so a retry after a crash
-  returns the existing record instead of forking the chain.
+  returns the existing record instead of forking the chain. A log file is bound to one consumer on
+  first open (an older file to the consumer of its first witness); reopening it as another consumer
+  is refused.
 * A `WitnessMedium` port holds the published copy under immutable names `witness-<sequence>.json`.
   Which medium is a deployment decision; the contract is the port.
 * The accountable `retention_owner` is a signed field of every witness, so the party responsible for

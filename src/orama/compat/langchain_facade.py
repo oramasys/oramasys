@@ -145,8 +145,11 @@ def tool_facade(tool: Callable[..., Any], *, input_model: type, description: str
     refuses to build without an admission runner, and every call it makes goes through that runner.
     This facade does not add admission of its own, so an arbitrary callable would run unadmitted.
     """
-    if not callable(tool) or not getattr(tool, "__name__", ""):
-        raise ValueError("tool must be a named graph_tool result")
+    if (
+        not callable(tool) or not getattr(tool, "__name__", "")
+        or getattr(tool, "__orama_admitted__", False) is not True
+    ):
+        raise ValueError("tool must be a graph_tool result")
     name = tool.__name__
 
     def coerce(value: object) -> object:

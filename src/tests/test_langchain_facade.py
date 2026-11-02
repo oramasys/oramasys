@@ -249,3 +249,10 @@ def test_tool_facade_refuses_unnamed_or_non_callable_tools() -> None:
         tool_facade(object(), input_model=Input)
     with pytest.raises(ValueError):
         tool_facade(lambda request: request, input_model=Input)
+
+    async def named(request):
+        """A plain named function that never went through admission."""
+        return request
+
+    with pytest.raises(ValueError):
+        tool_facade(named, input_model=Input)

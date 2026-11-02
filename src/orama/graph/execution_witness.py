@@ -392,8 +392,10 @@ def affected_attempts(
     """Return attempts under a revoked grant that have no safe terminal witness, in order.
 
     An attempt is *affected* if any witness shows it ``started``, ``committed`` or ``unknown`` and no
-    witness shows it ``aborted`` or ``fenced``. The input must come from :func:`read_verified`; this
-    function never treats an empty list from an unverified source as "nothing affected".
+    witness shows it ``aborted`` or ``fenced``. This function cannot tell where its input came from:
+    callers MUST pass the output of :func:`read_verified`, which refuses rather than returning a
+    short or empty list. Passed anything else (for example raw ``log.wires()``), an empty input yields
+    ``[]`` and proves nothing.
     """
     seen: dict[str, set[str]] = {}
     order: list[str] = []

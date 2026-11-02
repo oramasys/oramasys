@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
+import threading
 from collections.abc import Awaitable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
@@ -32,6 +34,8 @@ CREATE TABLE IF NOT EXISTS holds(
   cost INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('held','settled','released')));
 CREATE TABLE IF NOT EXISTS dry_runs(target TEXT PRIMARY KEY, run_id TEXT NOT NULL);
 """
+
+_LOG: Final = logging.getLogger(__name__)
 
 
 class TransportRefused(PermissionError):
@@ -80,6 +84,7 @@ class GuardedForeignInvoker:
     def __init__(self, config: TransportConfig, dial: DialPort, db_path: str) -> None:
         """Open (or create) the durable hold store."""
         self._config, self._dial, self._db = config, dial, db_path
+        self.unsettled_holds: list[int] = []
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
 
@@ -148,12 +153,32 @@ class GuardedForeignInvoker:
         # SQLite can block on a cross-process write lock, so all store work runs off the event loop.
         if not await asyncio.to_thread(self._was_dry_run, target):
             raise TransportRefused("transport.dry_run_required")
-        hold = await asyncio.to_thread(self._reserve, request, target)
+        # The reservation runs in a worker thread that cancellation cannot stop. If the caller is
+        # cancelled while it runs, the hold it places is released once it lands: no dial happened.
+        reservation = asyncio.ensure_future(asyncio.to_thread(self._reserve, request, target))
+        try:
+            hold = await asyncio.shield(reservation)
+        except asyncio.CancelledError:
+            reservation.add_done_callback(self._release_abandoned)
+            raise
         try:
             result = await self._dial(request)
         except Exception as exc:
             # Unknown outcome: the hold deliberately stays charged (never released on failure).
             # Cancellation and other control-flow exceptions are not Exceptions and propagate unchanged.
             raise TransportRefused("transport.dial_failed") from exc
-        await asyncio.to_thread(self._finish, hold, "settled")
+        try:
+            await asyncio.to_thread(self._finish, hold, "settled")
+        except Exception:  # noqa: BLE001 - the provider call completed; never discard its result
+            # The hold stays charged ("held" counts against both caps); record it for the operator.
+            self.unsettled_holds.append(hold)
+            _LOG.warning("transport hold %s could not be settled; it stays charged", hold, exc_info=True)
         return result
+
+    def _release_abandoned(self, reservation: asyncio.Future[int]) -> None:
+        """Release a hold whose reservation finished after its caller was cancelled (never dialled)."""
+        if reservation.cancelled() or reservation.exception() is not None:
+            return
+        threading.Thread(
+            target=self._finish, args=(reservation.result(), "released"), name="transport-release",
+        ).start()

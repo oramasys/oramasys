@@ -15,7 +15,8 @@ for name in SERVING_UID SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN CONSUMER_W
   if [ -z "${!name:-}" ]; then echo "MISSING $name" >&2; fail=1; fi
 done
 [ "$fail" -eq 0 ] || { echo "RESULT: NOT-QUALIFIED (inputs missing)"; exit 2; }
-if [ -n "${ORAMA_GRANT_SERVING:-}" ]; then
+# Presence, not value: an exported empty switch is still "set" and must refuse.
+if [ -n "${ORAMA_GRANT_SERVING+x}" ]; then
   echo "RESULT: NOT-QUALIFIED (ORAMA_GRANT_SERVING is set; it must stay unset during qualification)"
   exit 2
 fi

@@ -13,6 +13,10 @@ the default `TransportConfig()` refuses every call.
    hold **stays charged** (unknown outcome is never refunded). Cancellation and other control-flow
    exceptions propagate unchanged, and the hold stays charged. All store work runs off the event loop
    (`asyncio.to_thread`) and every connection is closed after use.
+7. A caller cancelled while its reservation is still waiting on the store never dials, so the hold
+   that reservation places is released when it lands (repeated timeouts cannot drain the caps).
+8. If settlement fails after a successful dial, the provider result is still returned; the hold stays
+   charged, is listed in `unsettled_holds` and is logged for the operator.
 
 ## Out of scope by design
 No network client, DNS, SSRF, redirect or TLS logic exists here (AST-enforced); those belong to Telos.

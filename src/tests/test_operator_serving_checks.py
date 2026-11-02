@@ -84,3 +84,9 @@ def test_relative_interpreter_path_is_resolved_but_bare_names_stay_on_path(tmp_p
                               capture_output=True, text=True, check=False)
         assert done.returncode == 0, done.stdout
         assert expect in done.stdout
+
+
+def test_an_empty_but_exported_switch_still_refuses() -> None:
+    """Presence, not value, decides: an exported empty switch is set."""
+    done = run({**dict.fromkeys(NAMES, "x"), "ORAMA_GRANT_SERVING": ""})
+    assert done.returncode == 2 and "must stay unset" in done.stdout

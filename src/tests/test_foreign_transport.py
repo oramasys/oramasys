@@ -216,6 +216,61 @@ def test_invoker_does_not_advertise_a_noop_abort() -> None:
     assert not hasattr(GuardedForeignInvoker, "abort")
 
 
+def _states(db):
+    """Return the hold states in the store."""
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        return [r[0] for r in conn.execute("SELECT state FROM holds ORDER BY id")]
+
+
+def test_hold_reserved_after_cancellation_is_released(tmp_path) -> None:
+    """Cancelled while the reservation waits on the store: no dial, and its hold is released."""
+    import sqlite3
+    import time
+
+    db = str(tmp_path / "t.db")
+    run(GuardedForeignInvoker(cfg("dry_run"), Dial(), db), req())
+    dial = Dial()
+    inv = GuardedForeignInvoker(cfg("live", max_calls=1, max_cost=1), dial, db)
+    locker = sqlite3.connect(db, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+
+    async def go() -> None:
+        """Cancel while _reserve waits on the lock, then let it finish."""
+        task = asyncio.ensure_future(inv.invoke(req()))
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        locker.execute("ROLLBACK")
+        await asyncio.sleep(0.5)
+
+    asyncio.run(go())
+    locker.close()
+    deadline = time.monotonic() + 5
+    while "held" in _states(db) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert dial.calls == 0 and _states(db) == ["released"]
+    assert run(GuardedForeignInvoker(cfg("live", max_calls=1, max_cost=1), Dial(), db), req("r2")).content == "ok"
+
+
+def test_settlement_failure_keeps_the_result_and_the_charge(tmp_path, monkeypatch) -> None:
+    """A completed call is returned even if settlement fails; the hold stays charged and listed."""
+    db = str(tmp_path / "t.db")
+    run(GuardedForeignInvoker(cfg("dry_run"), Dial(), db), req())
+    inv = GuardedForeignInvoker(cfg("live", max_calls=1, max_cost=1), Dial(), db)
+
+    def broken(hold, state):
+        """Fail settlement."""
+        raise OSError("disk")
+
+    monkeypatch.setattr(inv, "_finish", broken)
+    assert run(inv, req()).content == "ok"
+    assert len(inv.unsettled_holds) == 1 and _states(db) == ["held"]
+    assert code(GuardedForeignInvoker(cfg("live", max_calls=1, max_cost=1), Dial(), db), req("r2")) == "transport.call_cap"
+
+
 @pytest.mark.parametrize("kw", [{"mode": "on"}, {"max_calls": -1}, {"max_cost": True}, {"cost_per_call": 0}])
 def test_bad_config_is_refused(kw) -> None:
     """Malformed limits never silently widen the gate."""
@@ -232,6 +287,6 @@ def test_module_has_no_network_imports() -> None:
         for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
         for a in (n.names if isinstance(n, ast.Import) else [n])
     }
-    assert roots <= {"__future__", "asyncio", "contextlib", "json", "sqlite3", "collections", "dataclasses", "typing", "orama"}
+    assert roots <= {"__future__", "asyncio", "contextlib", "json", "logging", "sqlite3", "threading", "collections", "dataclasses", "typing", "orama"}
     with pytest.raises(ValueError):
         TransportRefused("transport.invented")
