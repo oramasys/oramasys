@@ -18,3 +18,20 @@
    Host-bound qualification remains explicitly delegated in the handoff.
 5. [ ] Commit the harmonized delta, push once, and open one draft Oramasys PR.
    No Phylax delta remains after the three-way synthesis.
+
+### 2026-11-02 successor round
+
+The preceding checklist records the original #90 candidate, not a claim that
+the complete release is qualified. This round extends that draft additively.
+
+- [x] Verify bundle hashes, current mains and existing PR #90 before editing.
+- [x] Harden retained evidence with replacement protection and committed-row linkage tests.
+- [x] Implement public-only, issuer-scoped inert approval verification outside the kernel.
+- [ ] Finish and review durable authenticated revocation-feed composition.
+- [ ] Rerun final focused, cross-repository and broad suites after all lanes finish.
+- [ ] Commit logical batches, publish once per affected repo and reuse one draft PR per repo.
+- [ ] Record final publication receipts and independently gated host/review work.
+
+The [completion matrix](../docs/release12-r3-completion-matrix-2026-11-02.md)
+classifies all W0–W9/WP0–WP9 areas; unchecked host, ratification and activation
+items are not silently converted into software tasks.
