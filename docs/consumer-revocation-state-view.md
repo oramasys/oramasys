@@ -45,3 +45,8 @@ file; the production adapter belongs outside `src/orama` and is an operator wiri
 The port carries no approval reference. Without an `approval_ref_for` resolver the view treats
 every grant as having an undeclared approval, so any approval revocation refuses it (conservative);
 with a resolver the match is exact. `""` means a single approval and matches no approval revocation.
+
+## Review-driven tightening (2026-11-02)
+
+- `CompositeRevocationLookup` treats any answer other than an exact `False` (including `None`) as revoked, matching the final boundary, so wrapping a broken member can no longer turn it into "not revoked".
+- Signed state is rejected as malformed when `schema_version` is not exactly the integer `1` (`true` and `1.0` no longer pass) or when a cascade entry's `version` or `issuer_authority_version` is not an integer in range, or its `approval_id` is not a well-formed identifier string.

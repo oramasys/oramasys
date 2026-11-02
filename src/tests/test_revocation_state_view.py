@@ -207,6 +207,16 @@ def test_golden_state_fails_when_any_byte_or_the_clock_is_wrong() -> None:
     (state_bytes(head_version=0, head_event_digest="d" * 64), "state.malformed"),
     (state_bytes(issuer_revoked="no"), "state.malformed"),
     (state_bytes(extra=1), "state.malformed"),
+    (state_bytes(schema_version=True), "state.malformed"),
+    (state_bytes(schema_version=1.0), "state.malformed"),
+    (state_bytes(cascades=[{"version": None, "approval_id": None, "issuer_authority_version": 1,
+                            "grant_ids": []}]), "state.malformed"),
+    (state_bytes(cascades=[{"version": 1, "approval_id": None, "issuer_authority_version": 1,
+                            "grant_ids": []}]), "state.malformed"),
+    (state_bytes(cascades=[{"version": True, "approval_id": "a", "issuer_authority_version": 1,
+                            "grant_ids": []}]), "state.malformed"),
+    (state_bytes(cascades=[{"version": 1, "approval_id": "", "issuer_authority_version": 1,
+                            "grant_ids": []}]), "state.malformed"),
 ])
 def test_every_unusable_state_is_treated_as_revoked(raw, code) -> None:
     """Absent, malformed, foreign, stale or invalid states revoke everything, never nothing."""
@@ -267,6 +277,8 @@ def test_composite_is_revoked_if_any_member_is_or_fails() -> None:
     assert CompositeRevocationLookup(Fixed(False), Fixed(False)).revoked(grant_id="g", issuer_id=ISSUER) is False
     assert CompositeRevocationLookup(Fixed(False), Fixed(True)).revoked(grant_id="g", issuer_id=ISSUER) is True
     assert CompositeRevocationLookup(Fixed(False), Fixed(RuntimeError())).revoked(grant_id="g", issuer_id=ISSUER) is True
+    for invalid in (None, 0, "", [], "no"):
+        assert CompositeRevocationLookup(Fixed(False), Fixed(invalid)).revoked(grant_id="g", issuer_id=ISSUER) is True
     with pytest.raises(ValueError):
         CompositeRevocationLookup()
 

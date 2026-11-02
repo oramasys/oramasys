@@ -121,9 +121,10 @@ def _cascade_grants(value: object) -> frozenset[str]:
     for cascade in value:
         if not isinstance(cascade, dict) or set(cascade) != _CASCADE_FIELDS:
             raise StateRefused("state.malformed")
-        authority = cascade["issuer_authority_version"]
-        if isinstance(authority, bool) or not isinstance(authority, int) or not 1 <= authority <= MAX_SAFE_INTEGER:
-            raise StateRefused("state.malformed")
+        for number in (cascade["version"], cascade["issuer_authority_version"]):
+            if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= MAX_SAFE_INTEGER:
+                raise StateRefused("state.malformed")
+        _ids([cascade["approval_id"]])  # a real, well-formed identifier string, never null
         out |= _ids(cascade["grant_ids"])
     return frozenset(out)
 
@@ -160,7 +161,9 @@ def verify_state(
     ):
         raise StateRefused("state.malformed")
     body, signature, key_id = document["body"], document["signature"], document["issuer_key_id"]
-    if not isinstance(body, dict) or set(body) != _BODY_FIELDS or body["schema_version"] != SCHEMA_VERSION:
+    if not isinstance(body, dict) or set(body) != _BODY_FIELDS or (
+        type(body["schema_version"]) is not int or body["schema_version"] != SCHEMA_VERSION
+    ):
         raise StateRefused("state.malformed")
     if not isinstance(signature, str) or not isinstance(key_id, str) or not key_id:
         raise StateRefused("state.malformed")
@@ -245,7 +248,11 @@ class SignedStateRevocationView:
 
 
 class CompositeRevocationLookup:
-    """Revoked if ANY member says revoked; a member that raises counts as revoked."""
+    """Revoked unless EVERY member answers exactly ``False``.
+
+    ``True``, ``None``, any other value and any exception all count as revoked, matching the final
+    boundary, which accepts only an exact ``False``.
+    """
 
     def __init__(self, *lookups: Any) -> None:
         """Hold at least one member lookup."""
@@ -254,10 +261,10 @@ class CompositeRevocationLookup:
         self._lookups: Sequence[Any] = lookups
 
     def revoked(self, *, grant_id: str, issuer_id: str) -> bool:
-        """Return True if any member revokes (or fails)."""
+        """Return True unless every member answers exactly False."""
         for lookup in self._lookups:
             try:
-                if lookup.revoked(grant_id=grant_id, issuer_id=issuer_id):
+                if lookup.revoked(grant_id=grant_id, issuer_id=issuer_id) is not False:
                     return True
             except Exception:  # noqa: BLE001 - fail closed
                 return True
