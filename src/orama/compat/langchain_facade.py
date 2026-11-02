@@ -101,12 +101,15 @@ class FacadeRunnable:
             return asyncio.run(self.ainvoke(input, config, **kwargs))
         raise FacadeRefused("facade.sync_in_running_loop")
 
-    def batch(self, inputs: Sequence[Any], config: object = None, **kwargs: Any) -> list[Any]:
+    def batch(
+        self, inputs: Sequence[Any], config: object = None, *, return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[Any]:
         """Run inputs in order; concurrency is whatever ``max_concurrency`` allows (default 1)."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.abatch(inputs, config, **kwargs))
+            return asyncio.run(self.abatch(inputs, config, return_exceptions=return_exceptions, **kwargs))
         raise FacadeRefused("facade.sync_in_running_loop")
 
     async def abatch(
@@ -136,8 +139,15 @@ class FacadeRunnable:
 
 
 def tool_facade(tool: Callable[..., Any], *, input_model: type, description: str | None = None) -> FacadeRunnable:
-    """Wrap a ``graph_tool`` callable as a StructuredTool-shaped object with validated input."""
-    name = getattr(tool, "__name__", "")
+    """Wrap a ``graph_tool`` result as a StructuredTool-shaped object with validated input.
+
+    ``tool`` MUST be the callable returned by ``orama.compat.graph_tool.graph_tool``: that function
+    refuses to build without an admission runner, and every call it makes goes through that runner.
+    This facade does not add admission of its own, so an arbitrary callable would run unadmitted.
+    """
+    if not callable(tool) or not getattr(tool, "__name__", ""):
+        raise ValueError("tool must be a named graph_tool result")
+    name = tool.__name__
 
     def coerce(value: object) -> object:
         """Accept the typed model or a mapping that validates into it; refuse anything else."""
@@ -204,6 +214,7 @@ def langgraph_node(
         or not callable(getattr(graph, "ainvoke", None)) or not callable(getattr(runner, "invoke", None))
         or not callable(state_from)
         or any(not isinstance(k, str) or not isinstance(v, str) or not k or not v for k, v in output_map.items())
+        or len(set(output_map.values())) != len(output_map)
     ):
         raise ValueError("node name, graph, admission runner, state mapper and output map must be explicit")
     mapping = dict(output_map)

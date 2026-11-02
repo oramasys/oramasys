@@ -181,6 +181,41 @@ def test_store_waits_do_not_block_the_event_loop(tmp_path) -> None:
     locker.close()
 
 
+def test_backend_objects_are_matched_by_name(tmp_path) -> None:
+    """The graph passes a Backend object; its ``name`` is the allowlist identity."""
+    from perpetua_core.discovery import Backend, BackendKind
+
+    backend = Backend(name="acme", base_url="http://x", kind=next(iter(BackendKind)))
+    request = ProviderInvocationRequest(backend=backend, model="m1", run_id="r1",
+                                        messages=(ProviderMessage("user", "hi"),))
+    inv = GuardedForeignInvoker(cfg("dry_run"), Dial(), str(tmp_path / "t.db"))
+    assert run(inv, request).provider_ref == "dry-run"
+
+
+def test_slash_in_names_cannot_share_a_dry_run(tmp_path) -> None:
+    """('a', 'b/c') and ('a/b', 'c') are different targets and need separate dry runs."""
+    db = str(tmp_path / "t.db")
+    allow = frozenset({("a", "b/c"), ("a/b", "c")})
+
+    def build(mode):
+        """Build an invoker over the shared store."""
+        return GuardedForeignInvoker(cfg(mode, allow=allow), Dial(), db)
+
+    def make(backend, model):
+        """Build a request for the pair."""
+        return ProviderInvocationRequest(backend=backend, model=model, run_id="r",
+                                         messages=(ProviderMessage("user", "hi"),))
+
+    run(build("dry_run"), make("a", "b/c"))
+    assert run(build("live"), make("a", "b/c")).content == "ok"
+    assert code(build("live"), make("a/b", "c")) == "transport.dry_run_required"
+
+
+def test_invoker_does_not_advertise_a_noop_abort() -> None:
+    """A no-op abort would claim a capability the injected dial does not provide."""
+    assert not hasattr(GuardedForeignInvoker, "abort")
+
+
 @pytest.mark.parametrize("kw", [{"mode": "on"}, {"max_calls": -1}, {"max_cost": True}, {"cost_per_call": 0}])
 def test_bad_config_is_refused(kw) -> None:
     """Malformed limits never silently widen the gate."""
@@ -197,6 +232,6 @@ def test_module_has_no_network_imports() -> None:
         for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
         for a in (n.names if isinstance(n, ast.Import) else [n])
     }
-    assert roots <= {"__future__", "asyncio", "contextlib", "sqlite3", "collections", "dataclasses", "typing", "orama"}
+    assert roots <= {"__future__", "asyncio", "contextlib", "json", "sqlite3", "collections", "dataclasses", "typing", "orama"}
     with pytest.raises(ValueError):
         TransportRefused("transport.invented")

@@ -9,6 +9,7 @@ durable call/cost holds that survive restarts and concurrent processes. Contract
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import Awaitable, Iterator
 from contextlib import closing, contextmanager
@@ -90,10 +91,15 @@ class GuardedForeignInvoker:
             yield conn
 
     @staticmethod
-    def _target(request: ProviderInvocationRequest) -> str:
-        """Return the allowlist key for the request."""
-        backend = getattr(request.backend, "value", request.backend)
-        return f"{backend}/{request.model}"
+    def _backend_name(request: ProviderInvocationRequest) -> str:
+        """Return the backend identity: ``Backend.name`` (or the plain string a test double passes)."""
+        backend = request.backend
+        return backend if isinstance(backend, str) else str(getattr(backend, "name", ""))
+
+    @classmethod
+    def _target(cls, request: ProviderInvocationRequest) -> str:
+        """Return an unambiguous store key: a JSON pair, so ``/`` in either part cannot collide."""
+        return json.dumps([cls._backend_name(request), request.model])
 
     def _reserve(self, request: ProviderInvocationRequest, target: str) -> int:
         """Atomically check caps and place a hold; unknown outcomes stay charged."""
@@ -134,7 +140,7 @@ class GuardedForeignInvoker:
         if cfg.mode == "disabled":
             raise TransportRefused("transport.disabled")
         target = self._target(request)
-        if (str(getattr(request.backend, "value", request.backend)), request.model) not in cfg.allow:
+        if (self._backend_name(request), request.model) not in cfg.allow:
             raise TransportRefused("transport.not_allowlisted")
         if cfg.mode == "dry_run":
             await asyncio.to_thread(self._record_dry_run, target, request.run_id)
@@ -151,7 +157,3 @@ class GuardedForeignInvoker:
             raise TransportRefused("transport.dial_failed") from exc
         await asyncio.to_thread(self._finish, hold, "settled")
         return result
-
-    async def abort(self, request: ProviderInvocationRequest) -> None:
-        """Abortable-invoker hook; holds are intentionally left charged."""
-        return

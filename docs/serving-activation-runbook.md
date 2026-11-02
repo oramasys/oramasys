@@ -10,10 +10,11 @@ independent reviewer assigned; Phylax pin recorded; deployment files (seed, issu
 ```bash
 export SERVING_UID SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN \
        CONSUMER_WHEEL CONSUMER_PROVENANCE PHYLAX_PIN_FILE ORAMASYS_CHECKOUT PYTHON
-bash "$ORAMASYS_CHECKOUT/scripts/operator_serving_checks.sh" | tee serving-evidence.txt
+set -o pipefail   # keep the script's non-zero exit when tee succeeds
+bash "$ORAMASYS_CHECKOUT/scripts/operator_serving_checks.sh" 2>&1 | tee serving-evidence.txt
 ```
 It runs `qualify_serving_identity.py`, `verify_installed_identity.py` and `verify_phylax_pin.py` under
-`python -I` from a scratch directory, prints each exit code and output digest, and refuses if the switch is set.
+`python -I` from a scratch directory, prints the resolved input paths (the reviewer compares them with the service configuration), each exit code and output digest, and refuses if the switch is set.
 Exit 0 means evidence was printed, not that activation is approved.
 
 ## 3. Receipt

@@ -47,3 +47,23 @@ def test_failing_checks_yield_not_qualified(tmp_path) -> None:
     env = dict.fromkeys(NAMES, "x") | {"ORAMASYS_CHECKOUT": str(tmp_path), "PYTHON": "python3"}
     done = run(env)
     assert done.returncode == 1 and done.stdout.count("sha256=") == 3 and "NOT-QUALIFIED" in done.stdout
+
+
+def test_relative_inputs_are_resolved_and_paths_are_recorded(tmp_path) -> None:
+    """Relative inputs survive the scratch cd, and the evidence lists the resolved paths."""
+    (tmp_path / "scripts").mkdir()
+    for name in ("qualify_serving_identity", "verify_installed_identity", "verify_phylax_pin"):
+        (tmp_path / "scripts" / f"{name}.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+    (tmp_path / "plan.json").write_text("{}", encoding="utf-8")
+    env = dict.fromkeys(NAMES, "x") | {"ORAMASYS_CHECKOUT": ".", "INSTALL_PLAN": "plan.json", "PYTHON": "python3"}
+    done = subprocess.run(["bash", str(SCRIPT)], env={"PATH": os.environ["PATH"], **env}, cwd=tmp_path,
+                          capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stdout
+    assert f"INSTALL_PLAN={tmp_path.resolve()}/plan.json" in done.stdout
+    assert f"ORAMASYS_CHECKOUT={tmp_path.resolve()}" in done.stdout
+
+
+def test_runbook_preserves_the_script_exit_status() -> None:
+    """The documented pipeline enables pipefail so tee cannot mask a failure."""
+    runbook = (SCRIPT.parents[1] / "docs" / "serving-activation-runbook.md").read_text(encoding="utf-8")
+    assert "set -o pipefail" in runbook

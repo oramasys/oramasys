@@ -226,3 +226,26 @@ def test_runnable_protocol_with_the_real_framework_when_installed() -> None:
                               output_key="output", input_model=Input)
     chain = core.RunnableLambda(lambda text: {"text": text}) | core.RunnableLambda(runnable.invoke)
     assert chain.invoke("hello") == "hello"
+
+
+def test_sync_batch_accepts_return_exceptions() -> None:
+    """The synchronous batch forwards return_exceptions like the async one."""
+    runnable = graph_runnable("echo_run", echo_graph(), runner=Runner(), state_from=make_state,
+                              output_key="output", input_model=Input)
+    out = runnable.batch([{"text": "a"}, {"bad": 1}], return_exceptions=True)
+    assert out[0] == "a" and isinstance(out[1], ValueError)
+
+
+def test_duplicate_output_targets_are_refused() -> None:
+    """Two native keys may not update the same LangGraph state key."""
+    with pytest.raises(ValueError):
+        langgraph_node("n", echo_graph(), runner=Runner(), state_from=make_state,
+                       output_map={"output": "answer", "n": "answer"})
+
+
+def test_tool_facade_refuses_unnamed_or_non_callable_tools() -> None:
+    """Only a named graph_tool-style callable is wrapped."""
+    with pytest.raises(ValueError):
+        tool_facade(object(), input_model=Input)
+    with pytest.raises(ValueError):
+        tool_facade(lambda request: request, input_model=Input)

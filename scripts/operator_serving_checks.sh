@@ -19,11 +19,20 @@ if [ -n "${ORAMA_GRANT_SERVING:-}" ]; then
   echo "RESULT: NOT-QUALIFIED (ORAMA_GRANT_SERVING is set; it must stay unset during qualification)"
   exit 2
 fi
+# Resolve every path-valued input against the invoking directory before the checks cd to scratch.
+abspath() { ( cd "$(dirname -- "$1")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename -- "$1")" ) || printf '%s' "$1"; }
+for name in SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN CONSUMER_WHEEL CONSUMER_PROVENANCE \
+            PHYLAX_PIN_FILE ORAMASYS_CHECKOUT; do
+  printf -v "$name" '%s' "$(abspath "${!name}")"
+done
 scripts="$ORAMASYS_CHECKOUT/scripts"
 scratch="$(mktemp -d)"; trap 'rm -rf "$scratch"' EXIT
 stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "evidence-started: $stamp"
 echo "euid: $(id -u)  host: $(hostname)"
+echo "paths (reviewer must compare these with the service configuration):"
+for name in SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN CONSUMER_WHEEL CONSUMER_PROVENANCE \
+            PHYLAX_PIN_FILE ORAMASYS_CHECKOUT; do echo "  $name=${!name}"; done
 
 run_check() {  # name, command...
   local name="$1"; shift
