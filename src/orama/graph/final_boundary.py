@@ -76,6 +76,19 @@ class ApprovalVerifier(Protocol):
         """Return True only if the approval for exactly this binding is valid and unrevoked."""
 
 
+class TransactionalApprovalVerifier(ApprovalVerifier, Protocol):
+    """Optional public-trust extension for adapters whose keys can change before send."""
+
+    def prepare_recheck(self, binding: FinalBoundaryBinding) -> Callable[[], bool]:
+        """Snapshot before locking; return a bounded, store-free local send-time check.
+
+        The sealed driver combines this with the existing grant-authority check
+        inside the send-marker transaction. It never replaces that grant check.
+        No callback may access the attempt store, perform network work or issue
+        authority. Exact settled receipt replay does not reauthorize anything.
+        """
+
+
 class RevocationLookup(Protocol):
     """Injected view of acknowledged issuer revocations (same shape as the store's port)."""
 
