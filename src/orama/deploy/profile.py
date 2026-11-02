@@ -182,6 +182,8 @@ class Node(BaseModel):
         """Ids must be non-blank ASCII."""
         if not value.strip():
             raise ValueError("node id must not be blank")
+        if value != value.strip():
+            raise ValueError("node id must not have leading or trailing whitespace")
         if not value.isascii():
             raise ValueError("node id must be ASCII")
         return value
@@ -305,6 +307,8 @@ def _safe_load(text: str) -> object:
         return yaml.load(text, Loader=_StrictLoader)  # SafeLoader subclass
     except yaml.YAMLError as exc:
         raise ProfileError(f"profile is not valid YAML: {exc}") from exc
+    except (RecursionError, MemoryError) as exc:
+        raise ProfileError("profile is too deeply nested or too large") from exc
 
 
 def parse_profile(text: str) -> ServingProfile:

@@ -536,3 +536,36 @@ def test_grant_flag_one_is_refused_only_enabled_accepted():
     with pytest.raises(prof.ProfileError):
         prof._grant_flag({"ORAMA_GRANT_SERVING": "1"})
     assert prof._grant_flag({"ORAMA_GRANT_SERVING": "enabled"}) is True
+
+
+def test_deeply_nested_yaml_is_profile_error(monkeypatch, tmp_path):
+    """A 3,000-level flow sequence is a ProfileError (exit 2), not RecursionError."""
+    _env(monkeypatch, tmp_path, "[" * 3000)
+    with pytest.raises(ProfileError):
+        prof.load_effective()
+    assert prof.main(["validate"]) == 2
+
+
+def test_node_id_with_surrounding_whitespace_refused():
+    """'a ' and ' a' are refused rather than silently stripped."""
+    for bad in ("a ", " a"):
+        text = BASE.replace("id: srv", "id: '" + bad + "'")
+        with pytest.raises(ProfileError):
+            prof.parse_profile(text)
+
+
+def test_enable_value_matches_serve_script():
+    """The profile's switch value equals the literal in serve_with_phylax_grants.py."""
+    import ast
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "serve_with_phylax_grants.py"
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    found = {
+        t.id: ast.literal_eval(n.value)
+        for n in tree.body
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name) and t.id in ("ENABLE_VARIABLE", "ENABLED")
+    }
+    assert found["ENABLED"] == prof.GRANT_SERVING_ENABLED
+    assert found["ENABLE_VARIABLE"] == prof.ENV_GRANT_SERVING
