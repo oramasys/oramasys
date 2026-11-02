@@ -27,4 +27,5 @@ def graph_tool(name: str, graph: object, *, input_model: type, state_from: objec
     invoke.__name__ = name
     invoke.__doc__ = description
     invoke.__annotations__ = {"request": input_model, "return": object}
+    invoke.__orama_admitted__ = True  # type: ignore[attr-defined]  # built with an admission runner
     return invoke
