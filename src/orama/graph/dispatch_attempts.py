@@ -337,6 +337,10 @@ _SCHEMA: Final = (
     "CREATE TRIGGER IF NOT EXISTS effect_grant_bindings_no_replace BEFORE INSERT ON effect_grant_bindings"
     " WHEN EXISTS (SELECT 1 FROM effect_grant_bindings WHERE attempt_id = NEW.attempt_id)"
     " BEGIN SELECT RAISE(ABORT, 'effect_grant_bindings is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS retained_dispatch_authority_no_replace BEFORE INSERT ON"
+    " retained_dispatch_authority"
+    " WHEN EXISTS (SELECT 1 FROM retained_dispatch_authority WHERE attempt_id = NEW.attempt_id)"
+    " BEGIN SELECT RAISE(ABORT, 'retained dispatch authority is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS reservations_no_replace_consumed BEFORE INSERT ON reservations"
     " WHEN EXISTS (SELECT 1 FROM reservations WHERE consumed_attempt_id IS NOT NULL AND"
     " (reservation_id = NEW.reservation_id OR consumed_attempt_id = NEW.consumed_attempt_id))"
