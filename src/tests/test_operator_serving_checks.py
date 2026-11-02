@@ -1,0 +1,49 @@
+"""The operator script is read-only, fails closed and never sets the serving switch."""
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "operator_serving_checks.sh"
+NAMES = ["SERVING_UID", "SEED_FILE", "ISSUER_DB", "PUBLIC_STATE", "INSTALL_PLAN", "CONSUMER_WHEEL", "CONSUMER_PROVENANCE", "PHYLAX_PIN_FILE", "ORAMASYS_CHECKOUT", "PYTHON"]
+
+
+def run(env_extra):
+    """Run the script with a clean environment plus the given variables."""
+    env = {"PATH": os.environ["PATH"], **env_extra}
+    return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
+
+
+def test_syntax_is_valid() -> None:
+    """The script parses."""
+    assert subprocess.run(["bash", "-n", str(SCRIPT)], check=False).returncode == 0
+
+
+def test_missing_inputs_fail_closed() -> None:
+    """No input is guessed: every missing variable is named and the result is not-qualified."""
+    done = run({})
+    assert done.returncode == 2 and "NOT-QUALIFIED" in done.stdout
+    assert all(name in done.stderr for name in NAMES)
+
+
+def test_refuses_when_the_switch_is_set() -> None:
+    """A set switch aborts qualification."""
+    done = run({**dict.fromkeys(NAMES, "x"), "ORAMA_GRANT_SERVING": "1"})
+    assert done.returncode == 2 and "must stay unset" in done.stdout
+
+
+def test_script_never_sets_the_switch() -> None:
+    """The text contains no assignment or export of the switch."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "export ORAMA_GRANT_SERVING" not in text and "ORAMA_GRANT_SERVING=" not in text
+
+
+def test_failing_checks_yield_not_qualified(tmp_path) -> None:
+    """Pointing at a checkout with failing checks prints evidence and exits non-zero."""
+    (tmp_path / "scripts").mkdir()
+    for name in ("qualify_serving_identity", "verify_installed_identity", "verify_phylax_pin"):
+        (tmp_path / "scripts" / f"{name}.py").write_text("import sys; sys.exit(1)\n", encoding="utf-8")
+    env = dict.fromkeys(NAMES, "x") | {"ORAMASYS_CHECKOUT": str(tmp_path), "PYTHON": "python3"}
+    done = run(env)
+    assert done.returncode == 1 and done.stdout.count("sha256=") == 3 and "NOT-QUALIFIED" in done.stdout
