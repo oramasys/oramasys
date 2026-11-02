@@ -110,6 +110,77 @@ def test_failed_dial_stays_charged(tmp_path) -> None:
     assert code(GuardedForeignInvoker(cfg("live", max_calls=1, max_cost=1), Dial(), db), req("r2")) == "transport.call_cap"
 
 
+def test_cancellation_propagates_and_stays_charged(tmp_path) -> None:
+    """Cancelling an in-flight dial is not a provider failure; the hold is still charged."""
+    db = str(tmp_path / "t.db")
+    run(GuardedForeignInvoker(cfg("dry_run"), Dial(), db), req())
+
+    async def hang(request):
+        """Never finish, so the caller can cancel."""
+        await asyncio.sleep(60)
+
+    inv = GuardedForeignInvoker(cfg("live", max_calls=1, max_cost=1), hang, db)
+
+    async def go() -> None:
+        """Start the call, cancel it, and require CancelledError."""
+        task = asyncio.ensure_future(inv.invoke(req()))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert code(GuardedForeignInvoker(cfg("live", max_calls=1, max_cost=1), Dial(), db), req("r2")) == "transport.call_cap"
+
+
+def test_store_connections_are_closed(tmp_path, monkeypatch) -> None:
+    """Every connection opened for the hold store is closed before the call returns."""
+    import sqlite3
+
+    opened: list[sqlite3.Connection] = []
+    real = sqlite3.connect
+
+    def tracking(*args, **kwargs):
+        """Record each connection."""
+        conn = real(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(ft.sqlite3, "connect", tracking)
+    db = str(tmp_path / "t.db")
+    run(GuardedForeignInvoker(cfg("dry_run"), Dial(), db), req())
+    run(GuardedForeignInvoker(cfg("live"), Dial(), db), req())
+    assert opened
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+
+def test_store_waits_do_not_block_the_event_loop(tmp_path) -> None:
+    """A held write lock must not stall other tasks on the loop."""
+    import sqlite3
+
+    db = str(tmp_path / "t.db")
+    run(GuardedForeignInvoker(cfg("dry_run"), Dial(), db), req())
+    inv = GuardedForeignInvoker(cfg("live"), Dial(), db)
+    locker = sqlite3.connect(db, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+
+    async def go() -> int:
+        """Count loop ticks while the invoke waits on the lock, then release it."""
+        ticks = 0
+        task = asyncio.ensure_future(inv.invoke(req("r3")))
+        for _ in range(10):
+            await asyncio.sleep(0.05)
+            ticks += 1
+        locker.execute("ROLLBACK")
+        await task
+        return ticks
+
+    assert asyncio.run(go()) == 10
+    locker.close()
+
+
 @pytest.mark.parametrize("kw", [{"mode": "on"}, {"max_calls": -1}, {"max_cost": True}, {"cost_per_call": 0}])
 def test_bad_config_is_refused(kw) -> None:
     """Malformed limits never silently widen the gate."""
@@ -126,6 +197,6 @@ def test_module_has_no_network_imports() -> None:
         for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
         for a in (n.names if isinstance(n, ast.Import) else [n])
     }
-    assert roots <= {"__future__", "sqlite3", "collections", "dataclasses", "typing", "orama"}
+    assert roots <= {"__future__", "asyncio", "contextlib", "sqlite3", "collections", "dataclasses", "typing", "orama"}
     with pytest.raises(ValueError):
         TransportRefused("transport.invented")

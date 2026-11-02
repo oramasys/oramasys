@@ -9,8 +9,10 @@ the default `TransportConfig()` refuses every call.
 3. `dry_run` mode records the target and returns without dialing.
 4. `live` requires a prior recorded dry run for the same target → `transport.dry_run_required`.
 5. Durable SQLite holds under `BEGIN IMMEDIATE`: call cap and cost cap, shared across instances/processes.
-6. The injected `DialPort` (Telos-backed) performs the call. Any exception is `transport.dial_failed` and the
-   hold **stays charged** (unknown outcome is never refunded).
+6. The injected `DialPort` (Telos-backed) performs the call. Any `Exception` is `transport.dial_failed` and the
+   hold **stays charged** (unknown outcome is never refunded). Cancellation and other control-flow
+   exceptions propagate unchanged, and the hold stays charged. All store work runs off the event loop
+   (`asyncio.to_thread`) and every connection is closed after use.
 
 ## Out of scope by design
 No network client, DNS, SSRF, redirect or TLS logic exists here (AST-enforced); those belong to Telos.

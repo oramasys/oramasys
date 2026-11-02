@@ -8,8 +8,10 @@ durable call/cost holds that survive restarts and concurrent processes. Contract
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from typing import Final, Literal, Protocol
 
@@ -80,11 +82,12 @@ class GuardedForeignInvoker:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
-        """Return an autocommit connection so BEGIN IMMEDIATE controls transactions."""
-        conn = sqlite3.connect(self._db, timeout=30, isolation_level=None)
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield an autocommit connection (BEGIN IMMEDIATE controls transactions) and always close it."""
+        with closing(sqlite3.connect(self._db, timeout=30, isolation_level=None)) as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            yield conn
 
     @staticmethod
     def _target(request: ProviderInvocationRequest) -> str:
@@ -95,8 +98,7 @@ class GuardedForeignInvoker:
     def _reserve(self, request: ProviderInvocationRequest, target: str) -> int:
         """Atomically check caps and place a hold; unknown outcomes stay charged."""
         cfg = self._config
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             calls, cost = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(cost),0) FROM holds WHERE state!='released'").fetchone()
@@ -110,13 +112,21 @@ class GuardedForeignInvoker:
                                (request.run_id, target, cfg.cost_per_call))
             conn.execute("COMMIT")
             return int(cur.lastrowid)
-        finally:
-            conn.close()
 
     def _finish(self, hold: int, state: str) -> None:
         """Move a hold to ``settled`` or ``released``."""
         with self._connect() as conn:
             conn.execute("UPDATE holds SET state=? WHERE id=?", (state, hold))
+
+    def _record_dry_run(self, target: str, run_id: str) -> None:
+        """Remember that ``target`` has been dry-run."""
+        with self._connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO dry_runs(target,run_id) VALUES(?,?)", (target, run_id))
+
+    def _was_dry_run(self, target: str) -> bool:
+        """Return whether ``target`` has a recorded dry run."""
+        with self._connect() as conn:
+            return conn.execute("SELECT 1 FROM dry_runs WHERE target=?", (target,)).fetchone() is not None
 
     async def invoke(self, request: ProviderInvocationRequest) -> ProviderInvocationResult:
         """Run the request through every gate; live calls require a prior dry run."""
@@ -127,21 +137,19 @@ class GuardedForeignInvoker:
         if (str(getattr(request.backend, "value", request.backend)), request.model) not in cfg.allow:
             raise TransportRefused("transport.not_allowlisted")
         if cfg.mode == "dry_run":
-            with self._connect() as conn:
-                conn.execute("INSERT OR REPLACE INTO dry_runs(target,run_id) VALUES(?,?)",
-                             (target, request.run_id))
+            await asyncio.to_thread(self._record_dry_run, target, request.run_id)
             return ProviderInvocationResult(content="", provider_ref="dry-run", decision_ref="dry-run")
-        with self._connect() as conn:
-            seen = conn.execute("SELECT 1 FROM dry_runs WHERE target=?", (target,)).fetchone()
-        if seen is None:
+        # SQLite can block on a cross-process write lock, so all store work runs off the event loop.
+        if not await asyncio.to_thread(self._was_dry_run, target):
             raise TransportRefused("transport.dry_run_required")
-        hold = self._reserve(request, target)
+        hold = await asyncio.to_thread(self._reserve, request, target)
         try:
             result = await self._dial(request)
-        except BaseException as exc:
+        except Exception as exc:
             # Unknown outcome: the hold deliberately stays charged (never released on failure).
+            # Cancellation and other control-flow exceptions are not Exceptions and propagate unchanged.
             raise TransportRefused("transport.dial_failed") from exc
-        self._finish(hold, "settled")
+        await asyncio.to_thread(self._finish, hold, "settled")
         return result
 
     async def abort(self, request: ProviderInvocationRequest) -> None:
