@@ -6,7 +6,8 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from orama.api.authz import authenticated_control_plane_principal, install_authz
 from orama.api.capabilities import CapabilityConfig, evaluate
 from orama.api.denial_audit import DenialAuditLog
@@ -17,7 +18,16 @@ from orama.graph.effect_reconciliation import (
     startup_reconciliation_report,
 )
 from orama.api.verify_route import install_verify_route
-from orama.api.public_errors import SERVING_NOT_READY, error_response, new_correlation_id
+from orama.api.public_errors import (
+    DENY_STATUS,
+    DENY_UNAUTHORIZED_CALLER,
+    DENY_VERIFIER_UNAVAILABLE,
+    SERVING_NOT_READY,
+    error_response,
+    install_public_error_handlers,
+    new_correlation_id,
+    public_adjustment_denial_code,
+)
 from orama.api.readiness import ReadinessProbes, collect_facts
 from orama.api.contracts import (
     AdjustmentReceiptResponse,
@@ -32,7 +42,6 @@ from orama.graph.admission_runtime import (
     UnconfiguredGraphRunner,
 )
 from orama.graph.grant_verifier import (
-    VERIFICATION_REFUSAL_CODES,
     AdjustmentGrantConsumer,
     AdjustmentGrantRefused,
     AdjustmentGrantVerifier,
@@ -43,8 +52,9 @@ from orama.knowledge import router as knowledge_router
 _log = logging.getLogger(__name__)
 
 
-# Every verification-side refusal is 503 (the authority could not vouch for the grant);
-# 409 is reserved for definitive ledger answers, i.e. the consumption refusals.
+# Every refusal answers with the public envelope (``orama.api.public_errors``). A ledger consumption
+# refusal is the definitive 409 ``deny.grant_conflict`` (do not retry) without its internal reason;
+# verification refusals use their public deny codes (``public_adjustment_denial_code``).
 
 
 GRANT_CAPABILITY_STATES = ("disabled", "ready", "unavailable")
@@ -142,6 +152,7 @@ def create_app(
     app.state.capabilities = capabilities
     app.state.reconciliation_report = _startup_report(attempt_store)
     install_authz(app)
+    install_public_error_handlers(app)
     from orama.workspace.api import router as workspace_router
     app.include_router(workspace_router)
     app.include_router(knowledge_router)
@@ -151,7 +162,7 @@ def create_app(
     install_inert_effect_route(app, capabilities=capabilities, sender=inert_sender)
 
     @app.post("/run", response_model=RunResponse)
-    async def run(req: RunRequest, request: Request) -> RunResponse:
+    async def run(req: RunRequest, request: Request) -> RunResponse | JSONResponse:
         """Run only through the configured admission-aware invocation boundary."""
         try:
             request_runner = active_runner
@@ -167,24 +178,29 @@ def create_app(
                 "run refused",
                 extra={"correlation_id": correlation_id, "reason": error.reason},
             )
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "run_unavailable", "correlation_id": correlation_id},
-            ) from error
+            code = (
+                DENY_UNAUTHORIZED_CALLER
+                if error.reason == "admission.authenticated_context_required"
+                else DENY_VERIFIER_UNAVAILABLE
+            )
+            return error_response(DENY_STATUS[code], code, correlation_id)
         return RunResponse.from_state(result)
 
     @app.post("/adjustments", response_model=AdjustmentReceiptResponse)
-    async def adjust(req: AdjustmentRequest, request: Request) -> AdjustmentReceiptResponse:
+    async def adjust(
+        req: AdjustmentRequest, request: Request
+    ) -> AdjustmentReceiptResponse | JSONResponse:
         """Spend one Phylax-issued grant against an unknown hold, as the caller."""
         principal = authenticated_control_plane_principal(request)
-        if principal is None:
-            raise HTTPException(status_code=401, detail={"code": "authentication_required"})
         correlation_id = str(uuid.uuid4())
+        if principal is None:
+            return error_response(
+                DENY_STATUS[DENY_UNAUTHORIZED_CALLER], DENY_UNAUTHORIZED_CALLER, correlation_id
+            )
         if adjustment_consumer is None:
             _log.warning("adjustment refused", extra={"correlation_id": correlation_id, "reason": "not_wired"})
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "adjustments_unavailable", "correlation_id": correlation_id},
+            return error_response(
+                DENY_STATUS[DENY_VERIFIER_UNAVAILABLE], DENY_VERIFIER_UNAVAILABLE, correlation_id
             )
         try:
             receipt = await asyncio.to_thread(
@@ -195,11 +211,8 @@ def create_app(
                 "adjustment refused",
                 extra={"correlation_id": correlation_id, "reason": refused.code},
             )
-            status = 503 if refused.code in VERIFICATION_REFUSAL_CODES else 409
-            raise HTTPException(
-                status_code=status,
-                detail={"code": refused.code, "correlation_id": correlation_id},
-            ) from refused
+            code = public_adjustment_denial_code(refused.code)
+            return error_response(DENY_STATUS[code], code, correlation_id)
         return AdjustmentReceiptResponse(
             grant_id=receipt.grant_id,
             run_id=receipt.run_id,

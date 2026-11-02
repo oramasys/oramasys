@@ -22,6 +22,16 @@ from orama.compat.interaction_risk_receipt import MANDATORY_SCENARIOS
 from orama.compat.manifest import FINAL_PROFILE, canonical_digest
 
 PACKET_VERSION = 1
+EFFECT_MODULES = (
+    "src/tests/effect_interop/test_signed_effect_grant.py",
+    "src/tests/test_effect_grant_composition.py",
+    "src/tests/test_final_boundary.py",
+    "src/tests/test_inert_effect_api.py",
+    "src/tests/test_inert_effect_integration.py",
+    "src/tests/test_inert_effect_process_crashes.py",
+    "src/tests/test_sealed_effect_qualification.py",
+    "src/tests/test_sealed_inert_driver.py",
+)
 AGATE_PROFILE_FIXTURE = "src/tests/fixtures/agate-hardware-profiles-172bfc3.json"
 # Reviewed raw bytes from the producer candidate, not a packet-supplied trust anchor.
 AGATE_PROFILE_SHA256 = "ce0eed94041e191398516958b240fb3bb838255c3644eb63bec55508e7051edc"
@@ -91,6 +101,7 @@ def discovered_gates(repo: Path) -> list[str]:
 
 
 def _nonblank_list(value: object) -> bool:
+    """Require a nonempty list of nonblank strings for packet inventories."""
     return isinstance(value, list) and bool(value) and all(
         isinstance(item, str) and item.strip() for item in value)
 
@@ -105,8 +116,9 @@ def validate_packet(packet: object, manifest: Mapping[str, object], repo: Path) 
     if set(packet) != KEYS:
         problems.append(f"packet keys differ: {sorted(set(packet) ^ KEYS)}")
         return problems
-    if type(packet["packet_version"]) is not int or packet["packet_version"] != PACKET_VERSION:
+    if type(packet["packet_version"]) is not int or packet["packet_version"] not in (PACKET_VERSION, 2):
         problems.append("packet_version is not 1")
+    effect = type(packet["packet_version"]) is int and packet["packet_version"] == 2
     profiles = packet["agate_profiles"]
     if not (_nonblank_list(profiles) and len(profiles) == 3 and len(set(profiles)) == 3):
         problems.append("agate_profiles must list exactly three distinct profile ids")
@@ -138,8 +150,11 @@ def validate_packet(packet: object, manifest: Mapping[str, object], repo: Path) 
             problems.append("required_modules and historical_only_modules must have no duplicates")
         if set(modules) & set(historical):
             problems.append("required_modules and historical_only_modules must be disjoint")
-        if sorted(modules + historical) != discovered_modules(repo):
+        inventory = discovered_modules(repo) + (list(EFFECT_MODULES) if effect else [])
+        if sorted(modules + historical) != sorted(inventory):
             problems.append("required_modules and historical_only_modules union must equal the capability-gated inventory")
+        if effect and any(not (repo / name).is_file() for name in EFFECT_MODULES):
+            problems.append("required effect module is absent")
         try:
             expected_historical = discovered_historical_modules(repo)
         except (OSError, SyntaxError, ValueError, TypeError) as error:
@@ -148,7 +163,8 @@ def validate_packet(packet: object, manifest: Mapping[str, object], repo: Path) 
             if sorted(historical) != expected_historical:
                 problems.append("historical_only_modules must equal the literal _SEAM_ABSENT_ONLY policy")
     gates = packet["required_environment"]
-    if not _nonblank_list(gates) or sorted(gates) != discovered_gates(repo):
+    expected_gates = discovered_gates(repo) + (["ORAMA_EFFECT_INTEROP_REQUIRED"] if effect else [])
+    if not _nonblank_list(gates) or sorted(gates) != sorted(expected_gates):
         problems.append("required_environment must equal the ORAMA_REQUIRE_* gates the tests name")
     if packet["required_setup_inputs"] != REQUIRED_SETUP_INPUTS:
         problems.append("required_setup_inputs must equal the established ORAMA_DOCS_V2_REGISTRY input")

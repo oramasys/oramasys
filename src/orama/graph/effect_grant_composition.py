@@ -257,8 +257,18 @@ class TrustedEffectGrantComposer:
     def _require_principal(
         store: SqliteAttemptStore, attempt_id: str, authenticated_principal: str
     ) -> tuple[bytes, dict[str, Any]]:
-        """Return the durable grant binding, refusing a caller that is not the attempt's principal."""
-        wire, context = store.effect_grant_binding(attempt_id)
+        """Return the durable grant binding, refusing a caller that is not the attempt's principal.
+
+        An unknown ``attempt_id`` (no binding row) is refused exactly like a wrong principal
+        (``PRINCIPAL_MISMATCH``), so the route answers both with the identical 401 and a caller
+        cannot use the status to learn which attempt ids exist.
+        """
+        try:
+            wire, context = store.effect_grant_binding(attempt_id)
+        except OutcomeRefused as error:
+            if getattr(error, "reason", None) != "effect_grant_binding_missing":
+                raise
+            raise EffectGrantRefused(PRINCIPAL_MISMATCH) from None
         if context.get("principal") != authenticated_principal:
             raise EffectGrantRefused(PRINCIPAL_MISMATCH)
         return wire, context

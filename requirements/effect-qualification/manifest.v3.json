@@ -1,0 +1,174 @@
+{
+  "schema": 3,
+  "producer_registry": {
+    "repository": "diazMelgarejo/orama-system",
+    "ref": "a5bdcd2b76a865e61f0ff2e752550ee73d18f82e"
+  },
+  "cells": [
+    {
+      "profile": "production",
+      "python": "3.11",
+      "core_file": "requirements/compatibility-core-production.txt",
+      "core_sha": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+      "require_r3": true,
+      "min_passed": 360,
+      "max_skipped": 1
+    },
+    {
+      "profile": "production",
+      "python": "3.12",
+      "core_file": "requirements/compatibility-core-production.txt",
+      "core_sha": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+      "require_r3": true,
+      "min_passed": 360,
+      "max_skipped": 1
+    },
+    {
+      "profile": "policy-r3",
+      "python": "3.11",
+      "core_file": "requirements/compatibility-core-policy-r3.txt",
+      "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a",
+      "require_r3": false,
+      "min_passed": 345,
+      "max_skipped": 5
+    },
+    {
+      "profile": "policy-r3",
+      "python": "3.12",
+      "core_file": "requirements/compatibility-core-policy-r3.txt",
+      "core_sha": "04759a50c748444ff97136ea95c1e1289eac3a1a",
+      "require_r3": false,
+      "min_passed": 345,
+      "max_skipped": 5
+    },
+    {
+      "profile": "core-r3",
+      "python": "3.11",
+      "core_file": "requirements/compatibility-core-candidate.txt",
+      "core_sha": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68",
+      "require_r3": true,
+      "min_passed": 360,
+      "max_skipped": 1
+    },
+    {
+      "profile": "core-r3",
+      "python": "3.12",
+      "core_file": "requirements/compatibility-core-candidate.txt",
+      "core_sha": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68",
+      "require_r3": true,
+      "min_passed": 360,
+      "max_skipped": 1
+    },
+    {
+      "profile": "final-producers",
+      "python": "3.11",
+      "require_r3": true,
+      "min_passed": 2540,
+      "max_skipped": 0,
+      "candidate_set": {
+        "neutral-mechanics": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+        "endpoint-policy": "931b6347142e8e66b31136e3ac8159d86eb5b2f7",
+        "hardware-eligibility": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
+        "grant-authority": "cf3a300c6d39092ab64df54f0d1ab3fea3db3c38"
+      }
+    },
+    {
+      "profile": "final-producers",
+      "python": "3.12",
+      "require_r3": true,
+      "min_passed": 2540,
+      "max_skipped": 0,
+      "candidate_set": {
+        "neutral-mechanics": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+        "endpoint-policy": "931b6347142e8e66b31136e3ac8159d86eb5b2f7",
+        "hardware-eligibility": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
+        "grant-authority": "cf3a300c6d39092ab64df54f0d1ab3fea3db3c38"
+      }
+    }
+  ],
+  "consumer": {
+    "repository": "oramasys/oramasys",
+    "sha": "02e4f6d7b0b24a50fa3f50f11977cbccf2915bcb"
+  },
+  "producers": {
+    "neutral-mechanics": {
+      "candidate": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+      "declared_dependency": true,
+      "production_pin": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+      "candidate_equals_pin": true
+    },
+    "endpoint-policy": {
+      "candidate": "931b6347142e8e66b31136e3ac8159d86eb5b2f7",
+      "declared_dependency": true,
+      "production_pin": "931b6347142e8e66b31136e3ac8159d86eb5b2f7",
+      "candidate_equals_pin": true
+    },
+    "hardware-eligibility": {
+      "candidate": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
+      "declared_dependency": true,
+      "production_pin": "172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
+      "candidate_equals_pin": true
+    },
+    "grant-authority": {
+      "candidate": "cf3a300c6d39092ab64df54f0d1ab3fea3db3c38",
+      "declared_dependency": false
+    }
+  },
+  "registry_profiles": {
+    "production": "6d75cfe08af95992dddffab13ae3019aa9c41350",
+    "policy-r3": "04759a50c748444ff97136ea95c1e1289eac3a1a",
+    "core-r3": "34e4a8d22212d38d6ab100c1ad7fb2b19f56cb68"
+  },
+  "artifacts": {
+    "final-producers": {
+      "install_mode": "exact-sha-non-editable-wheel",
+      "source": "candidate-tree",
+      "environment": "fresh-disposable"
+    }
+  },
+  "environments": {
+    "gating": {
+      "platform": "ubuntu-ci",
+      "interpreters": [
+        "3.11",
+        "3.12"
+      ],
+      "isolation": "python-I-empty-cwd",
+      "checks": [
+        "pip-check",
+        "no-pythonpath",
+        "imports-from-site-packages"
+      ]
+    },
+    "auxiliary": {
+      "platform": "macos",
+      "gating": false
+    }
+  },
+  "required_capabilities": [
+    "seam-positive-modules-collected"
+  ],
+  "disabled_capabilities": [
+    "t3-implementation",
+    "t4-production-foreign-provider-transport",
+    "t5-continuation",
+    "remote-autonomous-activation",
+    "production-pin-promotion"
+  ],
+  "source_contracts": {
+    "source-introspection-tests": {
+      "input": "same-sha-read-only-source-tree",
+      "bound_by": "build-provenance-and-digest",
+      "test_count": 4
+    }
+  },
+  "contract_ids": [
+    "M1-Q-MANIFEST-1",
+    "M1-Q-INSTALL-1",
+    "M1-Q-DELIVERY-1",
+    "M1-Q-ACCOUNTING-1",
+    "M1-Q-COMPOSITION-1",
+    "COLLAB-HANDOFF-1",
+    "INTERACTION-RISK-ASSESSMENT-1"
+  ]
+}

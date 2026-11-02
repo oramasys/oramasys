@@ -18,6 +18,11 @@ on:
       - "scripts/qualification_approval.py"
   workflow_dispatch:
     inputs:
+      packet:
+        description: Legacy frozen qualification or additive effect candidate
+        type: choice
+        options: [legacy, effect]
+        default: legacy
       freeze_record:
         description: Approved immutable freeze JSON for the exact candidate inputs
         required: false
@@ -34,7 +39,14 @@ permissions:
   issues: read
 
 jobs:
+  effect-candidate:
+    if: github.event_name == 'workflow_dispatch' && inputs.packet == 'effect'
+    uses: ./.github/workflows/final-producers-effect.yml
+    with:
+      rehearsal: ${{ inputs.rehearsal }}
+      freeze_record: ${{ inputs.freeze_record }}
   freeze-gate:
+    if: inputs.packet != 'effect'
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.freeze.outputs.mode }}

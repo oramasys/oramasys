@@ -39,12 +39,12 @@ from orama.graph.grant_verifier import (
     AdjustmentGrantRefused,
     AdjustmentGrantVerifier,
     RevocationObservation,
+    revocation_observation_fresh,
 )
 
 _log = logging.getLogger(__name__)
 
 VERIFY_PATH: Final = "/grants/verify"
-REVOCATION_MAX_AGE: Final = timedelta(seconds=60)
 MAX_BODY_BYTES: Final = 65_536
 _BODY_LIMIT: Final = MAX_BODY_BYTES + 64
 _STATUS: Final[dict[str, int]] = DENY_STATUS
@@ -61,22 +61,30 @@ class _Denied(Exception):
         self.code = code
 
 
-def _verify_only(verifier: AdjustmentGrantVerifier, wire: bytes, now: datetime) -> None:
+def _verify_only(
+    verifier: AdjustmentGrantVerifier, wire: bytes, now_of: Callable[[], datetime]
+) -> None:
     """Verify the grant and its revocation freshness; raise ``_Denied`` for anything else.
 
-    This function only reads: it calls ``verify`` and ``revocation`` and discards the facts.
+    This function only reads: it calls ``verify`` and ``revocation`` and discards the facts. The
+    order is verify, then fetch the observation by grant id, then freshness; ``now`` is read only
+    after the observation is fetched, so time spent in the verifier or the fetch cannot make an old
+    reading look fresh. The
+    freshness rule is ``revocation_observation_fresh`` (stale if older than 60 s, more than 5 s in
+    the future, or naive).
     """
     try:
         verified = verifier.verify(wire)
         grant_id = verified.grant_id
+        observation = verifier.revocation(grant_id)
+        now = now_of()
         if verified.expires_at <= now:
             raise AdjustmentGrantRefused("grant.expired")
-        observation = verifier.revocation(grant_id)
         if not isinstance(observation, RevocationObservation) or observation.grant_id != grant_id:
             raise _Denied(DENY_VERIFIER_UNAVAILABLE)
         if observation.revoked:
             raise AdjustmentGrantRefused("grant.revoked")
-        if abs(now - observation.observed_at) > REVOCATION_MAX_AGE:
+        if not revocation_observation_fresh(now, observation.observed_at):
             raise AdjustmentGrantRefused("revocation.stale")
     except _Denied:
         raise
@@ -196,7 +204,7 @@ def install_verify_route(
             return await asyncio.to_thread(deny, correlation_id, DENY_UNAUTHORIZED_CALLER)
         try:
             wire = _parse_grant(await _read_bounded_body(request))
-            await asyncio.to_thread(_verify_only, grant_verifier, wire, now_of())
+            await asyncio.to_thread(_verify_only, grant_verifier, wire, now_of)
         except _Denied as denied:
             return await asyncio.to_thread(deny, correlation_id, denied.code)
         return JSONResponse({"status": "verified", "correlation_id": correlation_id})

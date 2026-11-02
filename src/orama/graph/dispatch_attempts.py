@@ -231,6 +231,10 @@ class VerifiedDispatchGrant:
             raise ValueError("second_approval_ref must be empty or a canonical identifier")
 
 
+# Every statement is ``IF NOT EXISTS``, so ``SqliteAttemptStore.__init__`` applies the whole tuple to a
+# database created before a table or trigger existed: that is the migration path for the immutability
+# triggers (effect_grant_bindings append-only, reservation consumer fixed once set, no send after a
+# terminal refusal). ``__init__`` runs the tuple on every open, new or existing.
 _SCHEMA: Final = (
     "CREATE TABLE IF NOT EXISTS effect_grant_bindings ("
     " attempt_id TEXT PRIMARY KEY, grant_wire BLOB NOT NULL, context TEXT NOT NULL)",
@@ -265,6 +269,25 @@ _SCHEMA: Final = (
     " outcome_evidence TEXT,"
     " send_started INTEGER NOT NULL DEFAULT 0 CHECK (send_started IN (0, 1)))",
     *PROPOSAL_SCHEMA,
+    "CREATE TRIGGER IF NOT EXISTS effect_grant_bindings_no_update BEFORE UPDATE ON effect_grant_bindings"
+    " BEGIN SELECT RAISE(ABORT, 'effect_grant_bindings is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS effect_grant_bindings_no_delete BEFORE DELETE ON effect_grant_bindings"
+    " BEGIN SELECT RAISE(ABORT, 'effect_grant_bindings is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS reservations_consumer_immutable"
+    " BEFORE UPDATE OF consumed_attempt_id ON reservations"
+    " WHEN OLD.consumed_attempt_id IS NOT NULL AND NEW.consumed_attempt_id IS NOT OLD.consumed_attempt_id"
+    " BEGIN SELECT RAISE(ABORT, 'a consumed reservation cannot change its attempt'); END",
+    # BEFORE INSERT guards: ``INSERT OR REPLACE`` / ``REPLACE INTO`` / ``ON CONFLICT DO UPDATE`` remove or
+    # change the conflicting row without firing the DELETE/UPDATE triggers above (``recursive_triggers``
+    # is off), but they still fire BEFORE INSERT triggers, so these hold whatever the pragma says. No
+    # code path replaces these rows: every write is a plain INSERT or a NULL-to-value UPDATE.
+    "CREATE TRIGGER IF NOT EXISTS effect_grant_bindings_no_replace BEFORE INSERT ON effect_grant_bindings"
+    " WHEN EXISTS (SELECT 1 FROM effect_grant_bindings WHERE attempt_id = NEW.attempt_id)"
+    " BEGIN SELECT RAISE(ABORT, 'effect_grant_bindings is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS reservations_no_replace_consumed BEFORE INSERT ON reservations"
+    " WHEN EXISTS (SELECT 1 FROM reservations WHERE consumed_attempt_id IS NOT NULL AND"
+    " (reservation_id = NEW.reservation_id OR consumed_attempt_id = NEW.consumed_attempt_id))"
+    " BEGIN SELECT RAISE(ABORT, 'a consumed reservation cannot be replaced'); END",
     *FENCING_SCHEMA,
     *RECEIPT_SCHEMA,
     *APPROVAL_SCHEMA,
@@ -1559,10 +1582,17 @@ class SqliteAttemptStore:
         authorization; a different issuer is refused outright (``send_authority_issuer_mismatch``,
         not terminal) before anything else in this transaction, so the send can never start on
         revocation facts looked up under the wrong issuer.
+
+        A revocation, cascade or divergence fact found here (before or inside the shared recheck)
+        writes the terminal ``final_boundary`` refusal row in this same transaction while the send
+        has not started; the transaction commits with no send marker, consumed approval or envelope,
+        and the refusal is raised afterwards (``FinalBoundaryRefused`` terminal, or the sentinel
+        ``OutcomeRefused`` from the recheck). The sender answers both from the stored record.
         """
         _require_aware(now)
         _require_text("issuer_id", issuer_id)
         clock_refusal: str | None = None
+        revoked_refusal: str | None = None
         with self._immediate() as db:
             recorded = db.execute(
                 "SELECT issuer_id FROM send_authority WHERE attempt_id = ?", (binding.attempt_id,)
@@ -1582,14 +1612,19 @@ class SqliteAttemptStore:
                 db, issuer_id, attempt.grant_id, attempt.second_approval_ref
             )
             if revoked is not None:
-                raise FinalBoundaryRefused(revoked, terminal=True)
-            clock_refusal = self._begin_send_in(db, binding.attempt_id, True, at)
-            if clock_refusal is None:
+                if not _refuse_revoked_in(db, binding.attempt_id, revoked, at):
+                    raise FinalBoundaryRefused(revoked, terminal=True)
+                revoked_refusal = revoked
+            else:
+                clock_refusal = self._begin_send_in(db, binding.attempt_id, True, at)
+            if revoked_refusal is None and clock_refusal is None:
                 effect_approvals.consume_approval(db, binding, at)
                 if envelope_digest is not None:
                     effect_receipts.record_send_envelope(db, binding.attempt_id, envelope_digest, at)
                 if authority_check is not None:
                     authority_check()
+        if revoked_refusal is not None:
+            raise FinalBoundaryRefused(revoked_refusal, terminal=True)
         if clock_refusal is not None:
             raise OutcomeRefused(clock_refusal)
 
@@ -1829,6 +1864,26 @@ def _check_bound_lease(
         raise OutcomeRefused(LEASE_STALE)
 
 
+def _refuse_revoked_in(db: sqlite3.Connection, attempt_id: str, reason: str, now: datetime) -> bool:
+    """Write the terminal ``final_boundary`` refusal for a revocation fact in the caller's transaction.
+
+    ``reason`` is the fact (``grant_revoked``, ``issuer_revoked``, ``cascade_listed`` ...) and the
+    public code is the one the effect-path table gives it (``deny.revoked_grant``). The row is
+    written only while ``send_started`` is still 0, so a refusal is never recorded over a started
+    send; the caller must commit the transaction and then raise. Returns False, writing nothing,
+    when the send already started or the attempt has no outbox row.
+    """
+    started = db.execute(
+        "SELECT send_started FROM outbox WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if started is None or started[0]:
+        return False
+    effect_fencing.record_refusal(
+        db, attempt_id, "final_boundary", None, reason, now, public_effect_denial_code(reason)
+    )
+    return True
+
+
 def _recheck_send_authority(
     db: sqlite3.Connection,
     attempt_id: str,
@@ -1844,6 +1899,11 @@ def _recheck_send_authority(
     that authority expired, an acknowledged revocation or issuer divergence applies, the issuer's
     anchor is quarantined, or (for an effect-grant-bound attempt) the consumer lease epoch is not
     the bound one (``_check_bound_lease``). It does not depend on any caller-supplied callback.
+
+    A revocation, cascade or issuer-divergence fact is answered like the clock latch: while the send
+    has not started, the terminal refusal row is written in this same transaction and the fact's
+    reason is returned as a sentinel (the caller commits, then raises); a replay answers from the
+    row with the same ``receipt_ref``.
     """
     _require_aware(now)
     attempt = _load_attempt(db, attempt_id)
@@ -1863,6 +1923,9 @@ def _recheck_send_authority(
         db, authority[0], attempt.grant_id, attempt.second_approval_ref
     )
     if fact is not None or _diverged(db, authority[0]):
+        reason = fact or "issuer_revoked"
+        if _refuse_revoked_in(db, attempt_id, reason, now):
+            return reason  # sentinel: the caller commits the refusal row, then raises
         raise OutcomeRefused("send_authority_revoked")
     dispatch_anchor.assert_not_quarantined(db, authority[0])
     _check_bound_lease(db, attempt_id, lease_epoch_of)

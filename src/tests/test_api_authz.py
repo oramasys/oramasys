@@ -117,8 +117,9 @@ async def test_run_with_valid_bearer_refuses_without_admission_runner(monkeypatc
             headers={"Authorization": f"Bearer {strong_token}"},
         )
     assert resp.status_code == 503
-    assert resp.json()["detail"]["code"] == "run_unavailable"
-    assert isinstance(resp.json()["detail"]["correlation_id"], str)
+    assert resp.json()["error"]["code"] == "deny.verifier_unavailable"
+    assert isinstance(resp.json()["error"]["correlation_id"], str)
+    assert "detail" not in resp.json()
 
 
 async def test_valid_bearer_binds_control_plane_capability_to_runner(monkeypatch, strong_token) -> None:
@@ -151,7 +152,8 @@ async def test_insecure_dev_does_not_invent_capability_for_runner(monkeypatch) -
         transport=ASGITransport(app=create_app(runner=factory)), base_url="http://127.0.0.1"
     ) as client:
         resp = await client.post("/run", json=_RUN_PAYLOAD)
-    assert resp.status_code == 503
+    assert resp.status_code == 401  # no authenticated context: deny.unauthorized_caller
+    assert resp.json()["error"]["code"] == "deny.unauthorized_caller"
     assert factory.principals == []
 
 

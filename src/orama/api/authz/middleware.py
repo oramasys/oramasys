@@ -4,8 +4,15 @@ from __future__ import annotations
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
+from orama.api.public_errors import (
+    DENY_STATUS,
+    DENY_UNAUTHORIZED_CALLER,
+    SERVING_NOT_READY,
+    error_response,
+    new_correlation_id,
+)
 from orama.api.authz.manifest import capability_for, requires_auth
 from orama.api.authz.tokens import (
     auth_enforced,
@@ -56,7 +63,11 @@ class AuthzMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # CORS preflight (if ever added) skips auth; no CORS middleware here.
-        """Authorize the request's capability before the handler runs; refuse otherwise."""
+        """Authorize the request's capability before the handler runs; refuse with the public envelope.
+
+        A missing token configuration is ``503 serving.not_ready``; a missing or wrong bearer is
+        ``401 deny.unauthorized_caller`` (a route's auth-failure hook may add the audit ``receipt_ref``).
+        """
         if request.method.upper() == "OPTIONS":
             return await call_next(request)
 
@@ -69,19 +80,15 @@ class AuthzMiddleware(BaseHTTPMiddleware):
 
         configured = get_control_plane_token()
         if configured is None:
-            return JSONResponse(
-                {"detail": "Control plane token not configured"},
-                status_code=503,
-            )
+            return error_response(503, SERVING_NOT_READY, new_correlation_id())
 
         presented = extract_bearer(request.headers.get("authorization"))
         if presented is None or not token_matches(presented, (configured,)):
             routed = await _route_auth_failure(request)
             if routed is not None:
                 return routed
-            return JSONResponse(
-                {"detail": "Unauthorized"},
-                status_code=401,
+            return error_response(
+                DENY_STATUS[DENY_UNAUTHORIZED_CALLER], DENY_UNAUTHORIZED_CALLER, new_correlation_id()
             )
 
         setattr(

@@ -16,10 +16,13 @@ _RUN_PAYLOAD = {
 
 
 class _RefusingRunner:
+    """Runner stub whose invocation is always refused at admission."""
     def __init__(self, reason: str) -> None:
+        """Remember the refusal reason to raise on invoke."""
         self.reason = reason
 
     async def invoke(self, graph: object, state: object) -> object:
+        """Refuse admission with the configured reason."""
         raise AdmissionRefused(self.reason)
 
 
@@ -35,12 +38,13 @@ async def test_public_503_redacts_internal_reason(monkeypatch) -> None:
         assert response.status_code == 503
         body = response.json()
         assert reason not in response.text
-        assert body["detail"]["code"] == "run_unavailable"
-        assert isinstance(body["detail"]["correlation_id"], str)
-        assert body["detail"]["correlation_id"]
+        assert body["error"]["code"] == "deny.verifier_unavailable"
+        assert isinstance(body["error"]["correlation_id"], str)
+        assert body["error"]["correlation_id"]
+        assert "detail" not in body
         bodies.append(body)
 
-    assert [set(body["detail"]) for body in bodies] == [{"code", "correlation_id"}] * 2
+    assert [set(body["error"]) for body in bodies] == [{"code", "correlation_id"}] * 2
 
 
 async def test_refusal_reason_is_logged_with_the_public_correlation_id(monkeypatch, caplog) -> None:
@@ -53,7 +57,7 @@ async def test_refusal_reason_is_logged_with_the_public_correlation_id(monkeypat
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
             response = await client.post("/run", json=_RUN_PAYLOAD)
 
-    correlation_id = response.json()["detail"]["correlation_id"]
+    correlation_id = response.json()["error"]["correlation_id"]
     record = next(r for r in caplog.records if r.name == "orama.api.server")
     assert record.correlation_id == correlation_id
     assert record.reason == "admission.stop_requested"

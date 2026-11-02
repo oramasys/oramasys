@@ -57,6 +57,7 @@ class World:
     """One issuer, one ledger, and the environment that composes them."""
 
     def __init__(self, root: Path) -> None:
+        """Create the seed directory layout under the given root."""
         self.root = root
         seeds = root / "seeds"
         seeds.mkdir(mode=0o700)
@@ -128,6 +129,7 @@ async def test_a_grant_issued_by_phylax_is_spent_through_the_read_only_verifier(
     grant, attempt = world.grant_for_new_hold()
 
     def forbidden(*_a: object, **_k: object) -> bytes:
+        """Fail the test if anything tries to read a signing seed."""
         raise AssertionError("the serving process read a signing seed")
 
     monkeypatch.setattr(FileSeedProvider, "load_seed", forbidden)
@@ -163,8 +165,8 @@ async def test_a_revocation_after_open_is_refused_and_readiness_does_not_change(
         response = await request(
             app, "POST", "/adjustments", json={"grant": second.to_wire().decode()}, headers=AUTH
         )
-        assert response.status_code == 503  # verification refusals are 503, never a 409 conflict
-        assert response.json()["detail"]["code"] == "grant.revoked"
+        assert response.status_code == 403  # a verification refusal: deny.revoked_grant, never a 409
+        assert response.json()["error"]["code"] == "deny.revoked_grant"
         assert world.ledger.hold_state(RUN, first_attempt) == "released"
         assert world.ledger.hold_state(RUN, second_attempt) == "unknown"
         assert (await request(app, "GET", "/health")).json()["grants"] == "ready"
@@ -179,6 +181,7 @@ async def test_missing_verifier_state_is_unavailable_and_never_opens_the_ledger(
     constructed: list[object] = []
 
     def spy(path: Path) -> StepLedger:
+        """Fail the test if a ledger is constructed for an unavailable verifier."""
         constructed.append(path)
         raise AssertionError("an unavailable verifier constructed a ledger")
 
@@ -188,7 +191,7 @@ async def test_missing_verifier_state_is_unavailable_and_never_opens_the_ledger(
     assert (await request(app, "GET", "/health")).json()["grants"] == "unavailable"
     response = await request(app, "POST", "/adjustments", json={"grant": "{}"}, headers=AUTH)
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "adjustments_unavailable"
+    assert response.json()["error"]["code"] == "deny.verifier_unavailable"
     assert constructed == []
     assert list(empty.iterdir()) == []
 
@@ -203,10 +206,12 @@ async def test_shutdown_closes_the_verifier_and_the_ledger_exactly_once(
     opened: dict[str, object] = {}
 
     def recording_opener(environ: dict[str, str]):  # type: ignore[no-untyped-def]
+        """Open the real verifier while recording it for later assertions."""
         verifier, close = real_open(environ)
         opened["verifier"] = verifier
 
         def counted() -> None:
+            """Record that the verifier was closed, then close it."""
             closes.append("verifier")
             close()
 
@@ -215,6 +220,7 @@ async def test_shutdown_closes_the_verifier_and_the_ledger_exactly_once(
     ledgers: list[StepLedger] = []
 
     def tracking_ledger(path: Path) -> StepLedger:
+        """Construct a real ledger and remember it so the test can inspect it."""
         ledgers.append(StepLedger(path))
         return ledgers[-1]
 
@@ -243,6 +249,7 @@ async def test_a_missing_phylax_is_logged_as_not_installed_not_as_a_mystery(
 ) -> None:
     """The unavailable state names its cause class so a rollout can tell why it is off."""
     def absent(_environ: dict[str, str]):  # type: ignore[no-untyped-def]
+        """Simulate an environment where the phylax package is not installed."""
         raise ModuleNotFoundError("No module named 'phylax'", name="phylax")
 
     with caplog.at_level("WARNING", logger="orama.serve"):

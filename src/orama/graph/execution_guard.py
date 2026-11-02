@@ -51,6 +51,7 @@ from orama.graph.grant_verifier import (
     AdjustmentReceipt,
     RevocationObservation,
     VerifiedGrant,
+    revocation_observation_fresh,
 )
 
 try:  # The seam exists only in Core revisions that include R4 T1.
@@ -174,7 +175,7 @@ class StepLedger:
     SCHEMA_VERSION = 2
     SQLITE_MAX_INT = 2**63 - 1
     LEGACY_COST_BASIS = "legacy_step_only"
-    REVOCATION_MAX_AGE_SECONDS = 60.0  # ratified staleness bound (design 8.1)
+    # Revocation freshness (design 8.1): ``grant_verifier.revocation_observation_fresh`` is the one rule.
 
     def __init__(self, path: Path | str) -> None:
         """Open the durable ledger (WAL, synchronous FULL) at the given path."""
@@ -1582,7 +1583,14 @@ class StepLedger:
             # The consumption clock is sampled only now that the write lock is
             # held: time spent waiting for it must not let an expiring grant or
             # an ageing revocation observation pass on a stale reading.
-            current_time = (now or (clock or (lambda: datetime.now(UTC)))()).astimezone(UTC)
+            sampled = now or (clock or (lambda: datetime.now(UTC)))()
+            # The raw sample goes to the shared freshness predicate unconverted:
+            # converting a naive clock would silently make it aware (local time)
+            # and defeat the "naive is never fresh" rule. Only after it passes
+            # is the instant normalised to UTC for the remaining comparisons
+            # and for storage; an aware non-UTC clock keeps its exact instant.
+            observation_fresh = revocation_observation_fresh(sampled, revocation_obs.observed_at)
+            current_time = sampled.astimezone(UTC) if observation_fresh else sampled
 
             # A concurrent identical consumer may have won between the read above
             # and this write lock; an exact match gets the recorded receipt.
@@ -1600,8 +1608,7 @@ class StepLedger:
                     raise AdjustmentGrantRefused("grant.digest_conflict")
                 return AdjustmentReceipt.from_json(str(row[3]))
 
-            staleness = (current_time - revocation_obs.observed_at.astimezone(UTC)).total_seconds()
-            if abs(staleness) > self.REVOCATION_MAX_AGE_SECONDS:
+            if not observation_fresh:
                 raise AdjustmentGrantRefused("revocation.stale")
             if current_time >= verified.expires_at.astimezone(UTC):
                 raise AdjustmentGrantRefused("grant.expired")

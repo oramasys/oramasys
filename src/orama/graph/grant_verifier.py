@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol, TypeAlias
 
 GrantKind: TypeAlias = Literal["settle", "release"]
@@ -147,6 +147,29 @@ class RevocationObservation:
             raise ValueError("revoked must be a boolean; a missing answer is not 'not revoked'")
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
             raise ValueError("observed_at must be an aware UTC datetime")
+
+
+REVOCATION_MAX_AGE: timedelta = timedelta(seconds=60)
+"""Oldest a revocation observation may be and still count as fresh; exactly this age is fresh."""
+REVOCATION_MAX_FUTURE_SKEW: timedelta = timedelta(seconds=5)
+"""How far in the future an observation's stamp may be (clock skew) before it is stale."""
+
+
+def revocation_observation_fresh(now: datetime, observed_at: datetime) -> bool:
+    """Return True when a revocation observation is fresh at ``now`` (the one shared rule).
+
+    Stale means older than ``REVOCATION_MAX_AGE`` (a 60 s old observation is still fresh), more than
+    ``REVOCATION_MAX_FUTURE_SKEW`` ahead of ``now``, or without a timezone (a naive stamp cannot be
+    placed in time, so it never counts as fresh).
+    """
+    if (
+        not isinstance(now, datetime) or not isinstance(observed_at, datetime)
+        or now.tzinfo is None or observed_at.tzinfo is None
+        or now.utcoffset() is None or observed_at.utcoffset() is None
+    ):
+        return False
+    age = now.astimezone(UTC) - observed_at.astimezone(UTC)
+    return -REVOCATION_MAX_FUTURE_SKEW <= age <= REVOCATION_MAX_AGE
 
 
 class AdjustmentGrantVerifier(Protocol):
