@@ -25,6 +25,8 @@ for name in SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN CONSUMER_WHEEL CONSUME
             PHYLAX_PIN_FILE ORAMASYS_CHECKOUT; do
   printf -v "$name" '%s' "$(abspath "${!name}")"
 done
+# An interpreter given as a path (contains '/') is resolved too; a bare name stays on PATH.
+case "$PYTHON" in */*) PYTHON="$(abspath "$PYTHON")" ;; esac
 scripts="$ORAMASYS_CHECKOUT/scripts"
 scratch="$(mktemp -d)"; trap 'rm -rf "$scratch"' EXIT
 stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -32,7 +34,7 @@ echo "evidence-started: $stamp"
 echo "euid: $(id -u)  host: $(hostname)"
 echo "paths (reviewer must compare these with the service configuration):"
 for name in SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN CONSUMER_WHEEL CONSUMER_PROVENANCE \
-            PHYLAX_PIN_FILE ORAMASYS_CHECKOUT; do echo "  $name=${!name}"; done
+            PHYLAX_PIN_FILE ORAMASYS_CHECKOUT PYTHON; do echo "  $name=${!name}"; done
 
 run_check() {  # name, command...
   local name="$1"; shift

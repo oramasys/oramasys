@@ -186,7 +186,7 @@ def test_read_verified_refuses_missing_unpublished_forged_and_swapped_records(lo
     forged = json.loads(good[object_name(2)])
     forged["signature"] = "sig-forged"
     medium.objects[object_name(2)] = canonical_bytes(forged)
-    with pytest.raises(WitnessRefused) as bad_sig:
+    with pytest.raises(WitnessUnavailable) as bad_sig:
         read_verified(log, medium, Verifier())
     assert bad_sig.value.code == "witness.signature"
     medium.objects = dict(good)
@@ -252,3 +252,59 @@ def test_constructor_and_vocabulary_guards(tmp_path) -> None:
         for a in (n.names if isinstance(n, ast.Import) else [n])
     }
     assert not imported & {"nacl", "cryptography", "hmac", "socket", "urllib", "requests"}
+
+
+def test_reopening_a_log_as_another_consumer_is_refused(log) -> None:
+    """A log file is bound to the consumer that created it."""
+    rec(log, "a1", "started")
+    with pytest.raises(ValueError):
+        SqliteWitnessLog(log.path, consumer_id="consumer-2", retention_owner="ops-archive", signer=Signer())
+    again = SqliteWitnessLog(log.path, consumer_id="consumer-1", retention_owner="ops-archive", signer=Signer())
+    assert again.head() == 1
+
+
+def test_a_pre_owner_log_is_bound_to_its_first_witness(log) -> None:
+    """An older file without the owner row is adopted only by the consumer of its first witness."""
+    rec(log, "a1", "started")
+    with closing(sqlite3.connect(log.path)) as db:
+        db.execute("DROP TRIGGER witness_log_owner_immutable")
+        db.execute("DROP TABLE witness_log_owner")
+        db.commit()
+    with pytest.raises(ValueError):
+        SqliteWitnessLog(log.path, consumer_id="consumer-2", retention_owner="ops-archive", signer=Signer())
+    SqliteWitnessLog(log.path, consumer_id="consumer-1", retention_owner="ops-archive", signer=Signer())
+
+
+def test_forged_identity_and_oversize_reads_are_unavailable_with_their_code(log, monkeypatch) -> None:
+    """Every read failure is WitnessUnavailable, keeping the specific refusal code."""
+    medium = Medium()
+    rec(log, "a1", "started")
+    publish_pending(log, medium, Verifier())
+    good = medium.objects[object_name(1)]
+    tampered = json.loads(good)
+    tampered["outcome"] = "aborted"
+    medium.objects[object_name(1)] = canonical_bytes(tampered)
+    with pytest.raises(WitnessUnavailable) as identity:
+        read_verified(log, medium, Verifier())
+    assert identity.value.code == "witness.identity"
+    medium.objects[object_name(1)] = good
+    monkeypatch.setattr(execution_witness, "MAX_WITNESS_BYTES", 10)
+    with pytest.raises(WitnessUnavailable) as oversize:
+        read_verified(log, medium, Verifier())
+    assert oversize.value.code == "witness.malformed"
+
+
+def test_recorded_at_is_signed_in_utc_and_naive_times_are_refused(log) -> None:
+    """An aware time is converted to UTC; a naive time is never signed."""
+    from datetime import timedelta, timezone
+
+    plus_two = NOW.astimezone(timezone(timedelta(hours=2)))
+    wire = log.record(
+        run_id="run-1", attempt_id="tz", grant_id="g1", permit_id="permit-tz", ledger_store_id="ledger-1",
+        outcome="started", revocation_version=4, recorded_at=plus_two)
+    assert wire["recorded_at"] == NOW.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    with pytest.raises(WitnessRefused) as naive:
+        log.record(
+            run_id="run-1", attempt_id="naive", grant_id="g1", permit_id="permit-n", ledger_store_id="ledger-1",
+            outcome="started", revocation_version=4, recorded_at=NOW.replace(tzinfo=None))
+    assert naive.value.code == "witness.malformed"

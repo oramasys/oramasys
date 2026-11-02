@@ -67,3 +67,20 @@ def test_runbook_preserves_the_script_exit_status() -> None:
     """The documented pipeline enables pipefail so tee cannot mask a failure."""
     runbook = (SCRIPT.parents[1] / "docs" / "serving-activation-runbook.md").read_text(encoding="utf-8")
     assert "set -o pipefail" in runbook
+
+
+def test_relative_interpreter_path_is_resolved_but_bare_names_stay_on_path(tmp_path) -> None:
+    """PYTHON=./bin/py runs from the invoking directory; PYTHON=python3 is looked up on PATH."""
+    (tmp_path / "scripts").mkdir()
+    for name in ("qualify_serving_identity", "verify_installed_identity", "verify_phylax_pin"):
+        (tmp_path / "scripts" / f"{name}.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+    (tmp_path / "bin").mkdir()
+    py = tmp_path / "bin" / "py"
+    py.write_text('#!/bin/sh\nexec python3 "$@"\n', encoding="utf-8")
+    py.chmod(0o755)
+    for interpreter, expect in (("bin/py", f"PYTHON={tmp_path.resolve()}/bin/py"), ("python3", "PYTHON=python3")):
+        env = dict.fromkeys(NAMES, "x") | {"ORAMASYS_CHECKOUT": ".", "PYTHON": interpreter}
+        done = subprocess.run(["bash", str(SCRIPT)], env={"PATH": os.environ["PATH"], **env}, cwd=tmp_path,
+                              capture_output=True, text=True, check=False)
+        assert done.returncode == 0, done.stdout
+        assert expect in done.stdout

@@ -27,7 +27,7 @@ import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import closing
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Protocol
 
@@ -74,6 +74,12 @@ BEFORE UPDATE OF sequence, witness_id, attempt_id, outcome, wire ON execution_wi
 BEGIN SELECT RAISE(ABORT, 'execution witnesses are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS execution_witnesses_no_delete BEFORE DELETE ON execution_witnesses
 BEGIN SELECT RAISE(ABORT, 'execution witnesses are append-only'); END;
+CREATE TABLE IF NOT EXISTS witness_log_owner (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    consumer_id TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS witness_log_owner_immutable BEFORE UPDATE ON witness_log_owner
+BEGIN SELECT RAISE(ABORT, 'witness log owner is immutable'); END;
 """
 
 
@@ -199,6 +205,32 @@ class SqliteWitnessLog:
         with closing(self._connect()) as db:
             db.execute("PRAGMA journal_mode = WAL")
             db.executescript(_SCHEMA)
+            self._bind_consumer(db)
+
+    def _bind_consumer(self, db: sqlite3.Connection) -> None:
+        """Bind the file to one consumer on first open; refuse any other consumer afterwards.
+
+        A log created before the owner row existed is bound to the consumer named in its first
+        witness, so an older file cannot be adopted by a different consumer either.
+        """
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute("SELECT consumer_id FROM witness_log_owner WHERE singleton = 1").fetchone()
+            if row is None:
+                first = db.execute(
+                    "SELECT wire FROM execution_witnesses ORDER BY sequence LIMIT 1").fetchone()
+                owner = self._consumer_id if first is None else str(_load(first["wire"])["consumer_id"])
+                db.execute("INSERT INTO witness_log_owner(singleton, consumer_id) VALUES(1, ?)", (owner,))
+            else:
+                owner = row["consumer_id"]
+            if owner != self._consumer_id:
+                db.execute("ROLLBACK")
+                raise ValueError("witness log belongs to a different consumer")
+            db.execute("COMMIT")
+        except BaseException:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
 
     def _connect(self) -> sqlite3.Connection:
         """Open one configured connection."""
@@ -214,8 +246,12 @@ class SqliteWitnessLog:
         """Append one signed witness, or return the identical one already recorded for the pair.
 
         Idempotent per ``(attempt_id, outcome)``: a retry after a crash returns the existing record
-        and never forks the chain.
+        and never forks the chain. ``recorded_at`` must be timezone-aware; it is converted to UTC
+        before signing (a naive time is refused rather than signed as an uncertain instant).
         """
+        if not isinstance(recorded_at, datetime) or recorded_at.utcoffset() is None:
+            raise WitnessRefused("witness.malformed")
+        stamp = recorded_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -237,7 +273,7 @@ class SqliteWitnessLog:
                     "run_id": run_id, "attempt_id": attempt_id, "grant_id": grant_id,
                     "permit_id": permit_id, "ledger_store_id": ledger_store_id, "outcome": outcome,
                     "revocation_version": revocation_version,
-                    "recorded_at": recorded_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    "recorded_at": stamp,
                     "retention_owner": self._owner, "signer_key_id": key_id,
                 }
                 validate_body(body)
@@ -331,9 +367,15 @@ def read_verified(
             raise WitnessUnavailable("witness.unavailable")
         try:
             wire = validate_wire(json.loads(raw.decode("utf-8")), verifier)
+            canonical = wire_bytes(wire)
+        except WitnessUnavailable:
+            raise
+        except WitnessRefused as error:
+            # Forged, mis-identified or oversize records are unavailable; the code is preserved.
+            raise WitnessUnavailable(error.code) from error
         except (UnicodeDecodeError, ValueError) as error:
             raise WitnessUnavailable("witness.malformed") from error
-        if wire_bytes(wire) != raw:
+        if canonical != raw:
             raise WitnessUnavailable("witness.malformed")
         if wire != expected:
             raise WitnessUnavailable("witness.readback_mismatch")
