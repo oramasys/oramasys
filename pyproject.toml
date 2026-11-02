@@ -13,6 +13,7 @@ dependencies = [
     "perpetua-core @ git+https://github.com/oramasys/perpetua-core.git@6d75cfe08af95992dddffab13ae3019aa9c41350",
     "oramasys-agate @ git+https://github.com/oramasys/agate.git@172bfc3ebf00d507856e70d0f6a0e7dbd577ffbc",
     "fastapi>=0.110",
+    "PyYAML>=6",
     "pydantic>=2,<3",
     "uvicorn[standard]>=0.29",
     # Optional AuthProviders (feature-flagged): OIDC/OAuth clients + JWT verify.

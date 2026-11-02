@@ -19,3 +19,6 @@ build/
 .pytest_cache/
 .claude/hooks/.logs/
 .coverage
+
+# local deployment profile (copy config/serving-profile.example.yml)
+config/serving-profile.yml

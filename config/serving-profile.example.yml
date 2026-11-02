@@ -1,0 +1,83 @@
+# Example deployment profile. Copy to config/serving-profile.yml (gitignored)
+# and edit; the same file goes on every node, each node picks its own entry.
+# ORAMA_NODE_ID names this host (falls back to the hostname). ORAMA_NODE_ROLE
+# can only LOWER a role. The profile alone never enables serving.
+#
+# ACTIVE: Mac primary, Windows clients (the operator's installation).
+version: 1
+installation: example
+nodes:
+  - id: mac-studio
+    os: macos
+    role: primary-server
+    serves: [verify]
+    endpoint: mac-studio.local:8443
+    identity:
+      server_account: _orama-serve
+      signer_account: _orama-signer
+      expected_principal: null   # fill in the uid after the account exists
+    state_root: /Library/Application Support/Oramasys
+    public_state: local
+  - id: win-node
+    os: windows
+    role: client
+  - id: win-5080
+    os: windows
+    role: client
+
+# ALTERNATIVE B: Windows only. Replace the nodes above with:
+#@alt-start windows-only
+# version: 1
+# installation: example
+# nodes:
+#   - id: win-node
+#     os: windows
+#     role: primary-server
+#     serves: [verify]
+#     endpoint: win-node.local:8443
+#     identity:
+#       server_account: 'NT SERVICE\OramaServe'
+#       signer_account: orama-signer
+#       expected_principal: null
+#     state_root: 'C:\ProgramData\Oramasys'
+#     public_state: local
+#@alt-end
+
+# ALTERNATIVE C: Linux only.
+#@alt-start linux-only
+# version: 1
+# installation: example
+# nodes:
+#   - id: lnx-1
+#     os: linux
+#     role: primary-server
+#     serves: [verify]
+#     endpoint: lnx-1.local:8443
+#     identity:
+#       server_account: orama-serve
+#       signer_account: orama-signer
+#       expected_principal: null
+#     state_root: /var/lib/orama
+#     public_state: local
+#@alt-end
+
+# ALTERNATIVE D: Windows primary, Mac client.
+#@alt-start windows-primary-mac-client
+# version: 1
+# installation: example
+# nodes:
+#   - id: win-node
+#     os: windows
+#     role: primary-server
+#     serves: [verify]
+#     endpoint: win-node.local:8443
+#     identity:
+#       server_account: 'NT SERVICE\OramaServe'
+#       signer_account: orama-signer
+#       expected_principal: null
+#     state_root: 'C:\ProgramData\Oramasys'
+#     public_state: local
+#   - id: mac-studio
+#     os: macos
+#     role: client
+#@alt-end
