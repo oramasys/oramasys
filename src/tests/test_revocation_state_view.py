@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-if os.environ.get("ORAMA_REQUIRE_NACL") == "1":
+if os.environ.get("ORAMA_CI_NACL_REQUIRED") == "1":
     # CI installs PyNaCl for this test-only Ed25519ph adapter and must never silently skip the module.
     import nacl.bindings as nacl_bindings
     import nacl.exceptions as nacl_exceptions
