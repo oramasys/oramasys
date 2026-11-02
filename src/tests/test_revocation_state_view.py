@@ -11,6 +11,7 @@ import base64
 import hashlib
 import inspect
 import json
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,8 +19,13 @@ from typing import Any
 
 import pytest
 
-nacl_bindings = pytest.importorskip("nacl.bindings")
-nacl_exceptions = pytest.importorskip("nacl.exceptions")
+if os.environ.get("ORAMA_REQUIRE_NACL") == "1":
+    # CI installs PyNaCl for this test-only Ed25519ph adapter and must never silently skip the module.
+    import nacl.bindings as nacl_bindings
+    import nacl.exceptions as nacl_exceptions
+else:
+    nacl_bindings = pytest.importorskip("nacl.bindings")
+    nacl_exceptions = pytest.importorskip("nacl.exceptions")
 
 from orama.graph import dispatch_revocations, revocation_state_view
 from orama.graph.revocation_state_view import (
