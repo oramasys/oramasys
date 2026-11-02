@@ -448,8 +448,9 @@ _SERVER_STEPS = {
 }
 _SERVER_COMMON = [
     "Record the numeric uid/SID of the server account as identity.expected_principal in the profile.",
+    "Run the R4 serving-identity check as the serving user: scripts/qualify_serving_identity.py --expected-uid <serving uid> --seed-file <seed file> --issuer-db <issuer db> --public-state <public verifier state dir>.",
     "Obtain a D6 approval record under docs/v2/activation/ for this node.",
-    "Only after approval, the operator sets the serving master switch and starts the service.",
+    "Follow docs/serving-activation-runbook.md and fill docs/templates/serving-activation-receipt.md; ORAMA_GRANT_SERVING stays unset until the operator ratifies the receipt.",
 ]
 
 
