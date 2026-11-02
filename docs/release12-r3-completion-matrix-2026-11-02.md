@@ -2,6 +2,35 @@
 
 Status: software-only candidate; no serving, issuance, production repin or activation.
 
+## Contribution provenance envelope
+
+```json
+{
+  "author": {"agent_id": "codex-reviewer", "work_ref": "3546e10; 6f4c296; 971e635f7cc45040d1aed1b5fb5216cf6381464b"},
+  "actor": {"agent_id": "codex-reviewer", "instance_id": null, "identity_verified": false},
+  "endorsement": {"status": "none", "evidence_refs": []},
+  "takeover": {
+    "previous_author": "Windows contributors; agent identities not independently established",
+    "work_ref": "1be852b26d761090541c1a01534c276a4dafd8cf; 57be69f5316b21db5bfa9625efeb4e78d292d7b2",
+    "operation": "Integrate existing no-replace and profile contributions through regular merges 2f6c93c and 46cd15f; preserve their history and union regression coverage"
+  }
+}
+```
+
+| Execution lane | Runtime agent ID | Bounded contribution |
+| --- | --- | --- |
+| Primary | `codex-reviewer` (self-reported; session ID unavailable) | Public approval composition, send-window trust recheck, profile repairs, integration, final suite execution and publication |
+| Hegel | `01a19c16-dccf-7a81-9071-ca9874dd11f3` | Retained-store audit, race reproduction and same-session bounded review |
+| Ptolemy | `01a19c19-02ae-7371-bcab-403d8f6567c8` | Authenticated feed composition and regressions |
+| Meitner | `01a19c16-dc95-7932-b0ad-1bc866d27c95` | Companion Phylax producer audit and regressions |
+| Agy CLI attempt | No returned agent/session ID | No substantive review returned; no endorsement or completion credit |
+
+Lane IDs identify runtime executions, not independently authenticated humans or
+independent R6 approval. Final aggregate tests were executed by the primary
+actor; a lane's earlier test receipt is historical, not silently upgraded to
+the final tree. Existing Git authorship remains unchanged. Later board and
+handoff records must retain author, actor, endorsement and takeover separately.
+
 ## Outcome and ownership
 
 The common purpose of the recovery bundle and both completion plans is one
@@ -24,7 +53,7 @@ vocabulary and frozen wire encodings are unchanged.
 | Oramasys main | `4a3be3f7bf3b2ca365993f960e705990c60102ca` | Merged revocation view, witnesses, T4 transport and compatibility façade |
 | Existing draft #90 | `beb43afa5d64ad832bdf8b163c0fda10839f20ad` | Retained wires and composition regressions; extended, not duplicated |
 | Phylax main | `36f67b9579089759110b06ca6ab7b9e1da259184` | Merged operator assertions, publication and retained checkpoints |
-| Phylax test candidate | `97443e749977d20d7fc88a19b5e5a9422413927f` | Reviewed repair tree used by the separate source-level R3 CI lane; not a production pin |
+| Phylax historical test candidate | `97443e749977d20d7fc88a19b5e5a9422413927f` | Earlier repair tree; superseded for source-level CI by the integration successor below, never a production pin |
 | Historical handoff branch | `0ef905d2dea56093e3d4348c6b2d27ce078a17df` | Reference documents only; whole-tree replay would remove newer main behavior |
 | Witness branch | `fdc11ee29dffbca925c144f5810e24110ffccd91` | Its behavior is already merged; preserve main's fixes |
 | Activation-runbook branch | `1ea66930e040e36465ef4816403406113d9fd535` | Historical proposal; not activation authority |
@@ -85,12 +114,51 @@ substitution, restart and mismatched artifacts before using it for qualification
 
 ## Publication and follow-up
 
-Reuse Oramasys draft #90, with one non-force push after local verification.
-Publish at most one Phylax review branch if its audit yields a real delta.
+Original November 2 publication intent: reuse Oramasys draft #90 and publish
+at most one Phylax review branch. The integration successor below supersedes
+these targets after #90 merged: reuse existing #91 and #30 instead.
 No PR is merged by this round. A test-only producer checkout is not a production
 repin or R7 generation. See the [original synthesis handoff](release12-r3-synthesis-handoff-2026-11-02.md)
 for the historical candidate receipt; its earlier test counts are not this
 round's final verification evidence.
+
+### 2026-11-03 integration successor
+
+The input table above records the November 2 comparison, not current remote
+publication. PR #90 subsequently merged as
+`21e883dc4ac91a5a5764eb09430ab4dbc64423e1`, including Windows' `1be852b`
+no-replace repair. Merge `2f6c93c` preserves that contribution and unions its
+raw-connection upsert/migration tests with this round's broader evidence tests.
+
+To keep one review branch per affected repository, the consumer integrates
+the complementary H09 deployment profile from existing PR #91 (regular merge
+`46cd15f`); Phylax integrates the platform primitives from existing PR #30
+(regular merge `c4893ce441f622a72ed8cc338175e4098680c658`). No author history
+was rebased or force-pushed. The separate R3 source-test CI lane selects this
+combined Phylax candidate, not the earlier `97443e7` snapshot. Production pins
+and accepted generations remain unchanged.
+
+The exact send-window key-removal regression and the optional-hook descriptor
+regression both failed before their repairs. The final driver prepares a
+store-free public-trust callback and combines it with, never substitutes it for,
+the mandatory grant callback in the send-marker transaction. Static inspection
+distinguishes an absent legacy hook from a declared property that fails while
+resolving; both explicit malformed values and descriptor failures refuse.
+
+The platform primitive is available but its existing callers are deliberately
+not ported before the Windows handoff's requested R6 review. Publication of
+these candidates allows that review; it does not claim it has occurred.
+
+### Final local verification and source-test pin
+
+Primary `codex-reviewer` ran the final integrated consumer on Python 3.12:
+**2,891 passed, 3 skipped**, **93.34%** coverage. The final Python 3.11 focused
+composition/profile/process-crash selection passed **242 tests**. Companion
+Phylax on Python 3.12 passed **985 tests with 1 Windows-only skip**, **92.63%**
+coverage. These supersede earlier intermediate counts, not host qualification.
+The source-only R3 CI lane selects producer commit
+`7cac74e240de5830cef82c3d46921d00c21786df`; production dependency pins are unchanged.
+Pending remote CI and independent R6 remain separate from local test success.
 
 ## Adapter limits that must survive handoff
 
