@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from orama.graph.dispatch_attempts import SqliteAttemptStore
+from orama.graph.final_boundary import RevocationUnavailable
 from phylax import dispatch_wire as wire
 from phylax.dispatch_retention import verify_chain
 from phylax.revocation_publication import (
@@ -50,12 +51,15 @@ class _IssuerKeys:
 
 
 class RevocationFeedAdapter:
-    """Explicit bounded full-feed refresh and fail-closed RevocationLookup.
+    """Explicit bounded full-feed refresh and retryable-unavailable RevocationLookup.
 
     ``approval_ref_for(grant_id, issuer_id)`` must be a quick trusted read, not an
     approval-consumption callback or an attempt-store call. None means undeclared;
     only the trusted callback can assert the empty single-approval reference.
-    All verification/IO errors propagate from refresh; revoked always denies on errors.
+    All verification/IO errors propagate from ``refresh``. ``revoked`` returns True only for a
+    confirmed revocation or undeclared approval; a transient refresh or trusted-read failure raises
+    ``RevocationUnavailable`` so the final boundary can deny this call without terminally burning
+    an otherwise authorized attempt.
     """
 
     def __init__(
@@ -241,26 +245,42 @@ class RevocationFeedAdapter:
             self._ready = True
 
     def revoked(self, grant_id: str, issuer_id: str) -> bool:
-        """Return True for revocations, undeclared approvals, unavailable state or errors."""
+        """Return a confirmed decision or raise ``RevocationUnavailable`` for an unsafe read."""
         try:
-            if issuer_id != self._issuer or not self._ready:
+            if issuer_id != self._issuer:
                 return True
+            if not self._ready:
+                raise RevocationUnavailable("revocation feed has not completed a fresh refresh")
             wire.validate_identifier("grant_id", grant_id)
             now = self._observe_time()
+            unavailable: str | None = None
+            decision: bool | None = None
             with self._transaction() as db:
                 self._check_time(db, now)
                 cached = self._cached(db, now=now)
                 if cached is None or not self._ready:
-                    return True
-                approval = self._approval(grant_id, issuer_id) if self._approval else None
-                if approval is not None and not isinstance(approval, str):
-                    return True
-                if approval:
-                    wire.validate_identifier("approval_id", approval)
-                final = self._final_time(db, now, cached[0])
-                if final is None:
-                    return True
-                lookup = CombinedRevocationLookup(cached[0], clock=lambda: final, max_age_seconds=self._max_age)
-                return lookup.reason(grant_id, approval) is not None
+                    unavailable = "revocation feed is unavailable during refresh"
+                else:
+                    approval = self._approval(grant_id, issuer_id) if self._approval else None
+                    if approval is not None and not isinstance(approval, str):
+                        unavailable = "trusted approval reference is unavailable"
+                    else:
+                        if approval:
+                            wire.validate_identifier("approval_id", approval)
+                        final = self._final_time(db, now, cached[0])
+                        if final is None:
+                            unavailable = "revocation feed became stale during lookup"
+                        else:
+                            lookup = CombinedRevocationLookup(
+                                cached[0], clock=lambda: final, max_age_seconds=self._max_age,
+                            )
+                            decision = lookup.reason(grant_id, approval) is not None
+            if unavailable is not None:
+                raise RevocationUnavailable(unavailable)
+            if decision is None:
+                raise RevocationUnavailable("revocation feed returned no decision")
+            return decision
+        except RevocationUnavailable:
+            raise
         except Exception:
-            return True
+            raise RevocationUnavailable("revocation feed lookup failed") from None

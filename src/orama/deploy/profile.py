@@ -88,7 +88,7 @@ def _norm_account(value: str) -> str:
     return value.strip().replace("/", "\\").split("\\")[-1].replace(" ", "").casefold()
 
 
-_SID_RE = re.compile(r"^S-1-\d+(-\d+)+$", re.IGNORECASE)
+_SID_RE = re.compile(r"S-1-(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*))+", re.IGNORECASE)
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$ \\-]*$")
 _DECIMAL_RE = re.compile(r"^[1-9][0-9]*$")
 _FORBIDDEN_RIDS = {"500", "512"}
@@ -446,7 +446,7 @@ def serving_permitted(
     flag = _grant_flag(env)
     if effective.role not in SERVER_ROLES or not flag:
         return False
-    return bool(approval_matcher(effective))
+    return approval_matcher(effective) is True
 
 
 def check_startup(effective: EffectiveNode, env: Mapping[str, str]) -> None:

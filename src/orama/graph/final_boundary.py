@@ -30,6 +30,10 @@ TERMINAL_REASONS: Final[frozenset[str]] = frozenset({
 })
 
 
+class RevocationUnavailable(Exception):
+    """A revocation source cannot currently prove a lookup result is fresh."""
+
+
 class FinalBoundaryRefused(OutcomeRefused):
     """The final boundary refused before dispatch; ``reason`` is a stable code.
 
@@ -93,7 +97,7 @@ class RevocationLookup(Protocol):
     """Injected view of acknowledged issuer revocations (same shape as the store's port)."""
 
     def revoked(self, *, grant_id: str, issuer_id: str) -> bool:
-        """Return True if an acknowledged event revokes the grant, its approval chain or issuer."""
+        """Return True for a confirmed revocation or raise ``RevocationUnavailable`` to retry."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +251,8 @@ def _verify_revocation_and_approval(
         raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True)
     try:
         revoked = revocations.revoked(grant_id=stored.grant_id, issuer_id=issuer_id)
+    except RevocationUnavailable:
+        raise FinalBoundaryRefused("approval_verifier_unavailable") from None
     except Exception:  # noqa: BLE001 - an unavailable revocation view is a deny
         raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
     if revoked is not False:

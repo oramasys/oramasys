@@ -372,6 +372,14 @@ def test_serving_permitted_needs_all_three(monkeypatch, tmp_path):
     assert prof.serving_permitted(client, on, approved) is False
 
 
+def test_serving_permitted_requires_the_literal_true_approval(monkeypatch, tmp_path):
+    """A truthy matcher result cannot activate serving."""
+    _env(monkeypatch, tmp_path, BASE)
+    effective = prof.load_effective()
+    enabled = {"ORAMA_GRANT_SERVING": "enabled"}
+    assert prof.serving_permitted(effective, enabled, lambda _: 1) is False
+
+
 def _alternatives() -> dict[str, str]:
     """Extract the commented alternative profiles from the example file."""
     out, cur, name = {}, None, None
@@ -546,7 +554,7 @@ def test_missing_pyyaml_is_clear_error(monkeypatch, tmp_path, capsys):
     "principal",
     ["00", "-1", "+0", "0x0", "0.0", "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-512",
      "S-1-5-80-0", "S-1-5-", "s-1-5-18", "ro\u200bot", "r\u00f6ot", "root ", "",
-     "S-1-5-21-1-2-3-500 "],
+     "S-1-5-21-1-2-3-500 ", "S-1-5-018", "S-1-5-21-1-2-3-0500", "S-1-5-21-１"],
 )
 def test_principal_strictness(monkeypatch, tmp_path, principal):
     """Check: malformed or privileged principals are refused."""

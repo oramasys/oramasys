@@ -92,11 +92,17 @@ def resign(raw: bytes, **changes: Any) -> bytes:
     return wire.canonical_bytes(doc)
 
 
+def unavailable(lookup: Any, grant_id: str = "safe", issuer_id: str = ISSUER) -> None:
+    """Assert that a lookup denies safely without claiming a revocation was confirmed."""
+    with pytest.raises(MODULE.RevocationUnavailable):
+        lookup.revoked(grant_id, issuer_id)
+
+
 def test_explicit_refresh_restart_and_existing_store_ack(world: World) -> None:
     """Require explicit refresh on restart while reusing existing store facts."""
     producer, store, _, _, adapter, signed = world
     a = adapter()
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     producer.append_revocation("grant", "bad", signer=Signer())
     assert a.refresh(*signed()) is None
     assert store.acked_through(ISSUER) == 1
@@ -104,7 +110,7 @@ def test_explicit_refresh_restart_and_existing_store_ack(world: World) -> None:
     assert a.revoked("safe", ISSUER) is False
     assert a.revoked(grant_id="bad", issuer_id=ISSUER) is True
     restarted = adapter()
-    assert restarted.revoked("safe", ISSUER) is True
+    unavailable(restarted)
     restarted.refresh(*signed())
     assert restarted.revoked("safe", ISSUER) is False
 
@@ -137,7 +143,7 @@ def test_verify_everything_before_ingestion(world: World, damage: str) -> None:
     with pytest.raises(Exception):
         a.refresh(raw, events)
     assert store.acked_through(ISSUER) == 0
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
 
 
 @pytest.mark.parametrize("kind", ["head_rollback", "same_head_fork", "extension_fork", "time_rollback"])
@@ -173,7 +179,7 @@ def test_durable_antirollback_after_restart(world: World, kind: str) -> None:
     with pytest.raises(Exception):
         a.refresh(*candidate)
     assert store.acked_through(ISSUER) == 2
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
 
 
 def test_stale_reread_restart_and_clock_rollback(world: World) -> None:
@@ -184,13 +190,13 @@ def test_stale_reread_restart_and_clock_rollback(world: World) -> None:
     a.refresh(*original)
     assert a.revoked("safe", ISSUER) is False
     time[0] += timedelta(seconds=61)
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     with pytest.raises(Exception):
         adapter().refresh(*original)
     time[0] = NOW
     with pytest.raises(Exception):
         adapter().refresh(*original)
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
 
 
 def test_issuer_scope_and_trust_rechecked(world: World) -> None:
@@ -209,7 +215,7 @@ def test_issuer_scope_and_trust_rechecked(world: World) -> None:
     assert a.revoked("safe", "issuer-2") is True
     assert a.revoked("safe", ISSUER) is False
     keys.pop((ISSUER, "key-1"))
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
 
 
 @pytest.mark.parametrize("approval,expected", [(None, True), ("revoked-approval", True), ("other", False), ("", False)])
@@ -268,8 +274,8 @@ def test_ingestion_failure_never_publishes_freshness(
     with pytest.raises(OSError):
         a.refresh(*signed())
     assert store.acked_through(ISSUER) == int(after_ack)
-    assert a.revoked("safe", ISSUER) is True
-    assert adapter().revoked("safe", ISSUER) is True
+    unavailable(a)
+    unavailable(adapter())
     monkeypatch.setattr(store, "ingest_events", original)
     a.refresh(*signed())
     assert a.revoked("safe", ISSUER) is False
@@ -286,7 +292,7 @@ def test_cache_commit_failure_leaves_only_ack_ahead(world: World) -> None:
     with pytest.raises(sqlite3.DatabaseError):
         a.refresh(*signed())
     assert store.acked_through(ISSUER) == 1
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     with sqlite3.connect(a.cache_path) as db:
         assert db.execute("SELECT COUNT(*) FROM verified_snapshot").fetchone()[0] == 0
         db.execute("DROP TRIGGER fail_cache")
@@ -310,7 +316,7 @@ def test_bounds_and_cache_tamper_fail_closed(world: World) -> None:
     a.refresh(*signed())
     with sqlite3.connect(a.cache_path) as db:
         db.execute("UPDATE verified_snapshot SET raw_state = ?", (b"{}",))
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     with pytest.raises(Exception):
         adapter().refresh(*signed())
 
@@ -368,9 +374,9 @@ def test_read_lock_contention_and_serialized_refreshes(
         # Competing refresh cannot publish its old head over an in-flight newer one.
         with pytest.raises(sqlite3.OperationalError):
             second.refresh(*initial)
-        assert first.revoked("safe", ISSUER) is True
+        unavailable(first)
         with store._lock:
-            assert reader.revoked("safe", ISSUER) is True
+            unavailable(reader)
     finally:
         release.set()
         thread.join(3)
@@ -423,7 +429,7 @@ a.refresh(wire.canonical_bytes(document), events)
     assert store.acked_through(ISSUER) == 1
     assert store.authority_facts(ISSUER)["revocations"] == [(1, "grant", "bad")]
     restarted = adapter()
-    assert restarted.revoked("safe", ISSUER) is True
+    unavailable(restarted)
     with pytest.raises(ValueError):
         restarted.refresh(*initial)
     restarted.refresh(raw, events)
@@ -442,12 +448,12 @@ def test_callback_error_and_missing_ack_are_unavailable(
 
     a = adapter(approval_ref_for=broken)
     a.refresh(*signed())
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     producer.append_revocation("grant", "bad", signer=Signer())
     monkeypatch.setattr(store, "ingest_events", lambda *args: None)
     with pytest.raises(ValueError):
         a.refresh(*signed())
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     assert store.acked_through(ISSUER) == 0
 
 
@@ -457,7 +463,7 @@ def test_malformed_trusted_approval_reference_denies(world: World, ref: str) -> 
     _, _, _, _, adapter, signed = world
     a = adapter(approval_ref_for=lambda *_: ref)
     a.refresh(*signed())
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
 
 
 @pytest.mark.parametrize("seconds", [-1, 61])
@@ -477,7 +483,7 @@ def test_refresh_rechecks_clock_after_ingestion(
     monkeypatch.setattr(store, "ingest_events", move_clock)
     with pytest.raises(ValueError):
         a.refresh(*signed())
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     with sqlite3.connect(a.cache_path) as db:
         assert db.execute("SELECT COUNT(*) FROM verified_snapshot").fetchone()[0] == 0
     if seconds > 0:
@@ -500,7 +506,7 @@ def test_lookup_rechecks_clock_after_trusted_callback(world: World, seconds: int
     a = adapter(approval_ref_for=move_clock)
     original = signed()
     a.refresh(*original)
-    assert a.revoked("safe", ISSUER) is True
+    unavailable(a)
     if seconds > 0:
         time[0] = NOW
         with pytest.raises(ValueError):
