@@ -217,6 +217,11 @@ class RevocationFeedAdapter:
             raw = bytes(raw_state)
             chain, feed = self._copy_feed(events)
             with self._transaction() as db:
+                locked_now = self._clock()
+                wire.timestamp(locked_now)
+                if locked_now < now:
+                    raise ValueError("clock rollback during refresh")
+                now = locked_now
                 self._check_time(db, now)
                 state = self._verify(raw, chain, now)
                 previous = self._cached(db)

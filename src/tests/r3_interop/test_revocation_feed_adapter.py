@@ -122,6 +122,35 @@ def test_observation_samples_clock_after_acquiring_the_write_lock(
     assert lookup._observe_time() == NOW + timedelta(seconds=1)
 
 
+@pytest.mark.parametrize("concurrent_observation", [True, False])
+def test_refresh_resamples_clock_after_copy_before_cache_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch, concurrent_observation: bool,
+) -> None:
+    """A later writer is accepted, while a real within-refresh rollback is refused."""
+    _, _, time, _, adapter, signed = world
+    lookup, observer = adapter(), adapter()
+    raw, events = signed()
+    copy_feed = lookup._copy_feed
+
+    def interleaved_copy(value: Any) -> tuple[list[dict[str, Any]], bytes]:
+        """Move time after the first observation and optionally record it elsewhere."""
+        result = copy_feed(value)
+        time[0] += timedelta(seconds=1 if concurrent_observation else -1)
+        if concurrent_observation:
+            observer._observe_time()
+        monkeypatch.setattr(lookup, "_copy_feed", copy_feed)
+        return result
+
+    monkeypatch.setattr(lookup, "_copy_feed", interleaved_copy)
+    if concurrent_observation:
+        lookup.refresh(raw, events)
+        assert lookup.revoked("safe", ISSUER) is False
+    else:
+        with pytest.raises(ValueError, match="clock rollback"):
+            lookup.refresh(raw, events)
+        unavailable(lookup)
+
+
 def test_explicit_refresh_restart_and_existing_store_ack(world: World) -> None:
     """Require explicit refresh on restart while reusing existing store facts."""
     producer, store, _, _, adapter, signed = world
