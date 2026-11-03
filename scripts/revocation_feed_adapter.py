@@ -9,6 +9,7 @@ before cache freshness: interruption can leave denials ahead, never freshness ah
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -30,6 +31,8 @@ from phylax.revocation_publication import (
     verify_state,
     verify_state_against_chain,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 class _IssuerKeys:
@@ -282,5 +285,6 @@ class RevocationFeedAdapter:
             return decision
         except RevocationUnavailable:
             raise
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - fail closed on any unsafe read
+            _LOG.warning("revocation lookup failed closed: %s", type(error).__name__)
             raise RevocationUnavailable("revocation feed lookup failed") from None

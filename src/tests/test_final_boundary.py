@@ -256,6 +256,15 @@ def test_temporary_revocation_feed_unavailability_is_retryable(h: Harness) -> No
     untouched(h)
 
 
+def test_retryable_approval_unavailability_does_not_burn_the_attempt(h: Harness) -> None:
+    """A later approval recheck can report feed unavailability without terminal refusal."""
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        run(h, approvals=Approvals(RevocationUnavailable("refresh in progress")))
+    assert excinfo.value.reason == "approval_verifier_unavailable" and not excinfo.value.terminal
+    assert h.store.terminal_refusal(ATTEMPT) is None
+    run(h)
+
+
 def test_a_revoked_grant_refuses_future_dispatch(h: Harness) -> None:
     """A revocation seen by the injected port refuses before the approval verifier is asked."""
     h.revocations.revoked_grants.add(GRANT)

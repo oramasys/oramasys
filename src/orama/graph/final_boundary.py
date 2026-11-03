@@ -261,6 +261,8 @@ def _verify_revocation_and_approval(
         raise FinalBoundaryRefused("approval_verifier_missing", terminal=True)
     try:
         verified = approval_verifier.verify(binding)
+    except RevocationUnavailable:
+        raise FinalBoundaryRefused("approval_verifier_unavailable") from None
     except Exception:  # noqa: BLE001 - an unavailable verifier refuses; it never degrades to later
         raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
     if verified is not True:

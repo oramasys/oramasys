@@ -19,6 +19,7 @@ from orama.graph.effect_grant_composition import TrustedEffectGrantComposer
 from orama.graph.final_boundary import (
     FinalBoundaryBinding,
     RevocationLookup,
+    RevocationUnavailable,
     check_store_facts,
 )
 
@@ -110,6 +111,8 @@ class RetainedApprovalVerifier:
             return self._revocations.revoked(
                 grant_id=retained.grant_id, issuer_id=retained.issuer_id,
             ) is False
+        except RevocationUnavailable:
+            raise
         except Exception:
             # A broken reader/verifier never becomes permission or leaks provider errors.
             return False
@@ -137,6 +140,8 @@ class RetainedApprovalVerifier:
                 return self._revocations.revoked(
                     grant_id=retained.grant_id, issuer_id=retained.issuer_id,
                 ) is False
+            except RevocationUnavailable:
+                raise
             except Exception:
                 return False
 

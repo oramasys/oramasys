@@ -13,7 +13,7 @@ import pytest
 
 from tests.test_dispatch_attempts import ATTEMPT, GRANT, ISSUER, KEY, NOW, VECTORS
 from tests.test_effect_grant_composition import bound_harness, final_binding
-from orama.graph.final_boundary import FinalBoundaryRefused
+from orama.graph.final_boundary import FinalBoundaryRefused, RevocationUnavailable
 from orama.graph.sealed_inert_driver import SealedInertDriver
 
 
@@ -45,6 +45,33 @@ def test_retained_chain_verifies_under_only_the_expected_issuer(tmp_path: Path) 
         assert b.h.store.outbox_row(ATTEMPT)["send_started"] == 0
         b.h.revocations.revoked_grants.add(GRANT)
         assert verifier.verify(final_binding()) is False
+    finally:
+        b.h.store.close()
+
+
+def test_retained_approval_propagates_retryable_revocation_unavailability(tmp_path: Path) -> None:
+    """The retained verifier preserves a typed feed outage through both rechecks."""
+    class RefreshingFeed:
+        """Model a source that cannot safely answer while a refresh is in progress."""
+
+        def revoked(self, *, grant_id: str, issuer_id: str) -> bool:
+            """Refuse to collapse temporary unavailability into a revocation."""
+            raise RevocationUnavailable("refresh in progress")
+
+    module = load_adapter()
+    b = bound_harness(tmp_path)
+    try:
+        verifier = module.RetainedApprovalVerifier(
+            b.h.store,
+            signatures=module.IssuerDispatchVerifier(
+                ISSUER, lambda issuer, key: bytes.fromhex(VECTORS["public_key"]),
+            ),
+            composer=b.composer, revocations=RefreshingFeed(), clock=lambda: NOW,
+        )
+        with pytest.raises(RevocationUnavailable):
+            verifier.verify(final_binding())
+        with pytest.raises(RevocationUnavailable):
+            verifier.prepare_recheck(final_binding())()
     finally:
         b.h.store.close()
 

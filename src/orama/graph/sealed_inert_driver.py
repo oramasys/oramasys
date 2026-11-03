@@ -30,6 +30,7 @@ from orama.graph.final_boundary import (
     FinalBoundaryBinding,
     FinalBoundaryRefused,
     RevocationLookup,
+    RevocationUnavailable,
     authorize_final_boundary,
     record_boundary_refusal,
 )
@@ -161,6 +162,8 @@ class SealedInertDriver:
             recheck = prepare(binding)
             if not callable(recheck) or authority_check is None:
                 raise ValueError("transactional approval and grant checks are both required")
+        except RevocationUnavailable:
+            raise FinalBoundaryRefused("approval_verifier_unavailable") from None
         except Exception:
             raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
 
@@ -169,6 +172,8 @@ class SealedInertDriver:
             authority_check()
             try:
                 verified = recheck()
+            except RevocationUnavailable:
+                raise FinalBoundaryRefused("approval_verifier_unavailable") from None
             except Exception:
                 raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
             if verified is not True:

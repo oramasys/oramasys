@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import sqlite3
 import subprocess
 import sys
@@ -319,6 +320,22 @@ def test_bounds_and_cache_tamper_fail_closed(world: World) -> None:
     unavailable(a)
     with pytest.raises(Exception):
         adapter().refresh(*signed())
+
+
+def test_lookup_logs_only_the_failure_class_for_an_unsafe_cache(
+    world: World, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Operators can distinguish cache failures without logging grant-bearing error text."""
+    _, _, _, _, adapter, signed = world
+    a = adapter()
+    a.refresh(*signed())
+    with sqlite3.connect(a.cache_path) as db:
+        db.execute("UPDATE verified_snapshot SET raw_state = ?", (b"not-json secret-grant-id",))
+    with caplog.at_level(logging.WARNING, logger=MODULE.__name__):
+        unavailable(a)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("PublicationRefused" in message for message in messages)
+    assert all("secret-grant-id" not in message for message in messages)
 
 
 def test_lookup_is_safe_inside_attempt_store_lock(world: World) -> None:
