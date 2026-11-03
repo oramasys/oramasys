@@ -1,8 +1,9 @@
 """Opt-in, loader-bound public topology snapshot; not deployment qualification.
 
-This captures only the profile loader's result. It does not observe other loaders,
-startup checks, installed artifacts, policy, filesystem identity, or approval.
-The calling process must actually use ``effective`` for the observation to apply.
+This captures only the profile loader's result at return time. The returned
+effective object is mutable, and the projection is not bound to later use or
+ongoing runtime configuration. It does not observe other loaders, startup checks,
+installed artifacts, policy, filesystem identity, or approval.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ class PublicProjection:
 
 @dataclass(frozen=True)
 class LoadedIdentity:
-    """Projection plus the loader result; the latter may contain private values."""
+    """Historical projection plus a mutable result that may hold private values."""
 
     projection: PublicProjection
     effective: profile.EffectiveNode | None = field(repr=False)
@@ -40,7 +41,9 @@ def load_with_identity(env: Mapping[str, str] | None = None) -> LoadedIdentity:
 
     A profile refusal returns a fixed classification without exception text. The
     existing ``load_effective`` API and its exception behavior are unchanged.
-    Neither this snapshot nor a successful load authorizes serving or proves R5.
+    This projection records return-time values only, not later consumption or
+    runtime state. Neither a snapshot nor a successful load authorizes serving
+    or proves R5.
     """
     source_env = os.environ if env is None else env
     captured_env = {
@@ -54,7 +57,7 @@ def load_with_identity(env: Mapping[str, str] | None = None) -> LoadedIdentity:
         # Parsing may fail before the override is examined; don't claim an effect.
         override_result = "unknown" if (captured_env.get(profile.ENV_NODE_ROLE) or "").strip() else "absent"
         return LoadedIdentity(
-            PublicProjection(1, "refused", "refused", None, None, None, override_result, "profile-invalid"),
+            PublicProjection(1, "refused", "refused", None, None, None, override_result, "load-refused"),
             None,
         )
 
