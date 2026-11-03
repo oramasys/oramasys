@@ -70,3 +70,24 @@ src/tests/test_revocation_state_view.py
 No item above is completed merely by this PR. `ORAMA_GRANT_SERVING` stays unset
 and no real sender, issuer secret, grant issuance, production repin, or effect
 activation is introduced here.
+
+## Successor completion round, 2026-11-02
+
+The sections above preserve the original `beb43afa` candidate receipt. They do
+not describe the final expanded candidate. The
+[path-level completion matrix](release12-r3-completion-matrix-2026-11-02.md)
+now reconciles the recovery bundle, historical branches and current mains.
+
+The successor adds public-only inert approval verification and explicit durable
+authenticated-feed composition outside `src/orama`, without wiring them into
+startup. Retained signed wires now also resist `INSERT OR REPLACE` and refuse
+inconsistent committed authorization rows. Phylax has a companion review delta
+for registry/nonce clock races, durable ceremony claims and publication shape
+and genesis checks; the weaker recovered snapshot implementation is not revived.
+
+The original remaining-work items 1 and 2 now have candidate software and
+regressions, not production completion. Deployment transport and trust mapping,
+Windows locking/durability, R4/R5 host evidence, independent R6, new-generation
+R7 and separate R8 authority remain open. The first-round `186 passed` above is
+historical; final verification and publication receipts belong to the successor
+handoff. No accepted generation or production pin is changed.

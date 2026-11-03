@@ -1,0 +1,290 @@
+"""Caller-fed authenticated revocation catch-up; no transport or serving activation.
+
+Each instance starts unavailable and needs an explicit successful ``refresh``. Keep its
+dedicated cache with the same attempt store across restarts; neither database may be
+restored independently to an older backup. The cache is not an effect/approval authority.
+Refreshes serialize across processes with BEGIN IMMEDIATE. Store acknowledgements commit
+before cache freshness: interruption can leave denials ahead, never freshness ahead.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from orama.graph.dispatch_attempts import SqliteAttemptStore
+from orama.graph.final_boundary import RevocationUnavailable
+from phylax import dispatch_wire as wire
+from phylax.dispatch_retention import verify_chain
+from phylax.revocation_publication import (
+    DEFAULT_MAX_STATE_AGE_SECONDS,
+    MAX_STATE_BYTES,
+    CombinedRevocationLookup,
+    PublicationRefused,
+    VerifiedState,
+    verify_state,
+    verify_state_against_chain,
+)
+
+_LOG = logging.getLogger(__name__)
+
+
+class _IssuerKeys:
+    """Bind producer verification primitives to one trusted issuer namespace."""
+
+    def __init__(self, issuer_id: str, public_key_for: Callable[[str, str], bytes | None]) -> None:
+        """Retain only the caller's scoped resolver, never keys from input."""
+        self.issuer_id, self._public_key_for = issuer_id, public_key_for
+
+    def public_key(self, key_id: str) -> bytes | None:
+        """Resolve a correctly sized public key in the configured issuer scope."""
+        key = self._public_key_for(self.issuer_id, key_id)
+        return key if isinstance(key, bytes) and len(key) == 32 else None
+
+    def verify_event(self, key_id: str, digest: str, signature: str) -> bool:
+        """Verify the producer event domain for the existing store ingestion API."""
+        key = self.public_key(key_id)
+        return key is not None and wire.verify_event(key, digest, signature)
+
+
+class RevocationFeedAdapter:
+    """Explicit bounded full-feed refresh and retryable-unavailable RevocationLookup.
+
+    ``approval_ref_for(grant_id, issuer_id)`` must be a quick trusted read, not an
+    approval-consumption callback or an attempt-store call. None means undeclared;
+    only the trusted callback can assert the empty single-approval reference.
+    All verification/IO errors propagate from ``refresh``. ``revoked`` returns True only for a
+    confirmed revocation or undeclared approval; a transient refresh or trusted-read failure raises
+    ``RevocationUnavailable`` so the final boundary can deny this call without terminally burning
+    an otherwise authorized attempt.
+    """
+
+    def __init__(
+        self, cache_path: str | Path, *, store: SqliteAttemptStore, issuer_id: str,
+        public_key_for: Callable[[str, str], bytes | None], clock: Callable[[], datetime],
+        approval_ref_for: Callable[[str, str], str | None] | None = None,
+        max_events: int = 4096, max_feed_bytes: int = 8 * 1024 * 1024,
+        max_age_seconds: int = DEFAULT_MAX_STATE_AGE_SECONDS,
+    ) -> None:
+        """Open the dedicated durable cache without refreshing or activating it."""
+        wire.validate_identifier("issuer_id", issuer_id)
+        if not callable(public_key_for) or not callable(clock):
+            raise ValueError("trusted issuer resolver and clock required")
+        if approval_ref_for is not None and not callable(approval_ref_for):
+            raise ValueError("approval reference must be a trusted callback")
+        for limit in (max_events, max_feed_bytes, max_age_seconds):
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError("limits must be positive integers")
+        if max_age_seconds > DEFAULT_MAX_STATE_AGE_SECONDS:
+            raise ValueError("state age exceeds producer ceiling")
+        if str(cache_path) == ":memory:" or "mode=memory" in str(cache_path):
+            raise ValueError("cache requires a durable dedicated file")
+        self.cache_path = Path(cache_path)
+        self._store, self._issuer, self._clock = store, issuer_id, clock
+        self._keys = _IssuerKeys(issuer_id, public_key_for)
+        self._approval = approval_ref_for
+        self._max_events, self._max_bytes, self._max_age = max_events, max_feed_bytes, max_age_seconds
+        self._ready = False
+        self._refresh_lock = threading.Lock()
+        with closing(self._connect()) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS verified_snapshot ("
+                       "issuer_id TEXT PRIMARY KEY, raw_state BLOB NOT NULL, feed BLOB NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS observed_clock ("
+                       "singleton INTEGER PRIMARY KEY CHECK(singleton=1), at TEXT NOT NULL)")
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open a fully synchronous connection with a bounded lock wait."""
+        # A lookup may run with the store lock held. Bound cache lock waits so a
+        # simultaneous refresh (cache -> store) fails closed instead of deadlocking.
+        db = sqlite3.connect(self.cache_path, timeout=0.1, isolation_level=None)
+        db.execute("PRAGMA synchronous=FULL")
+        return db
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize cache writers and always roll back interrupted work."""
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                yield db
+                db.execute("COMMIT")
+            except BaseException:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+                raise
+
+    def _observe_time(self) -> datetime:
+        """Durably observe time even when subsequent verification refuses stale input."""
+        now = self._clock()
+        stamp = wire.timestamp(now)
+        with self._transaction() as db:
+            self._check_time(db, now)
+            db.execute("INSERT INTO observed_clock VALUES (1, ?) "
+                       "ON CONFLICT(singleton) DO UPDATE SET at=excluded.at", (stamp,))
+        return now
+
+    @staticmethod
+    def _check_time(db: sqlite3.Connection, now: datetime) -> None:
+        """Reject a clock reading below the durable observation high-water mark."""
+        row = db.execute("SELECT at FROM observed_clock WHERE singleton=1").fetchone()
+        if row and now < wire.parse_timestamp(row[0]):
+            raise ValueError("clock rollback")
+
+    def _copy_feed(self, events: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], bytes]:
+        """Bound and detach caller-owned events using the producer canonical encoder."""
+        if not isinstance(events, Sequence) or len(events) > self._max_events:
+            raise ValueError("complete feed exceeds event bound")
+        chunks, size = [], 2
+        if size > self._max_bytes:
+            raise ValueError("complete feed exceeds byte bound")
+        for event in events:
+            chunk = wire.canonical_bytes(event)
+            if len(chunk) > wire.MAX_WIRE_BYTES:
+                raise ValueError("event exceeds wire bound")
+            size += len(chunk) + bool(chunks)
+            if size > self._max_bytes:
+                raise ValueError("complete feed exceeds byte bound")
+            chunks.append(chunk)
+        raw = b"[" + b",".join(chunks) + b"]"
+        return json.loads(raw), raw
+
+    def _verify(self, raw: bytes, events: list[dict[str, Any]], now: datetime) -> VerifiedState:
+        """Verify issuer signature, freshness, complete head and replayed summary."""
+        state = verify_state(raw, resolver=self._keys, issuer_id=self._issuer,
+                             now=now, max_age_seconds=self._max_age)
+        # Explicit genesis checks also support the producer's original R3 main API.
+        if state.head_version != len(events) or (events and events[0].get("version") != 1):
+            raise ValueError("feed must be complete from genesis")
+        tip = verify_chain(events, previous_digest=wire.GENESIS_EVENT_DIGEST, resolver=self._keys)
+        if tip != state.head_event_digest:
+            raise ValueError("state head mismatch")
+        verify_state_against_chain(state, events, resolver=self._keys)
+        return state
+
+    def _cached(
+        self, db: sqlite3.Connection, *, now: datetime | None = None,
+    ) -> tuple[VerifiedState, list[dict[str, Any]]] | None:
+        """Reverify cached bytes, historically only when comparing antirollback state."""
+        row = db.execute("SELECT raw_state, feed FROM verified_snapshot WHERE issuer_id=?",
+                         (self._issuer,)).fetchone()
+        if row is None:
+            return None
+        raw, feed = row
+        if len(raw) > MAX_STATE_BYTES or len(feed) > self._max_bytes:
+            raise ValueError("cache exceeds bounds")
+        events, canonical = self._copy_feed(json.loads(feed))
+        if canonical != feed:
+            raise ValueError("noncanonical cached feed")
+        # Historical signature verification is ONLY for antirollback comparison.
+        # Every allow lookup and new refresh separately verifies with current time.
+        at = now if now is not None else wire.parse_timestamp(json.loads(raw)["body"]["generated_at"])
+        return self._verify(raw, events, at), events
+
+    def _final_time(
+        self, db: sqlite3.Connection, started: datetime, state: VerifiedState,
+    ) -> datetime | None:
+        """Recheck time after verification and retain forward observations on refusal."""
+        now = self._clock()
+        stamp = wire.timestamp(now)
+        if now < started:
+            return None
+        self._check_time(db, now)
+        db.execute("UPDATE observed_clock SET at=? WHERE singleton=1", (stamp,))
+        try:
+            CombinedRevocationLookup(state, clock=lambda: now, max_age_seconds=self._max_age).reason("", None)
+        except PublicationRefused:
+            return None
+        return now
+
+    def refresh(self, raw_state: bytes, events: Sequence[Mapping[str, object]]) -> None:
+        """Verify a complete signed snapshot, catch up store acks, then publish freshness.
+
+        Call outside any attempt-store transaction. Replays use ingest_events' existing
+        ack/digest authority, not a second cursor. Failed refresh makes this instance
+        unavailable until another complete successful refresh.
+        """
+        with self._refresh_lock:
+            self._ready = False
+            now = self._observe_time()
+            if not isinstance(raw_state, (bytes, bytearray)) or len(raw_state) > MAX_STATE_BYTES:
+                raise ValueError("state exceeds byte bound or is not bytes")
+            raw = bytes(raw_state)
+            chain, feed = self._copy_feed(events)
+            with self._transaction() as db:
+                self._check_time(db, now)
+                state = self._verify(raw, chain, now)
+                previous = self._cached(db)
+                if previous:
+                    old, _ = previous
+                    if state.head_version < old.head_version or state.generated_at < old.generated_at:
+                        raise ValueError("state rollback")
+                    prefix = chain[old.head_version - 1]["event_digest"] if old.head_version else wire.GENESIS_EVENT_DIGEST
+                    if prefix != old.head_event_digest:
+                        raise ValueError("state fork")
+                if self._store.is_diverged(self._issuer):
+                    raise ValueError("attempt store diverged")
+                if self._store.acked_through(self._issuer) > state.head_version:
+                    raise ValueError("snapshot behind acknowledged events")
+                self._store.ingest_events(self._issuer, chain, self._keys)
+                if (self._store.acked_through(self._issuer) != state.head_version
+                        or self._store.is_diverged(self._issuer)):
+                    raise ValueError("event acknowledgement incomplete")
+                fresh = self._final_time(db, now, state) is not None
+                if fresh:
+                    # This commit must be last. On failure existing store denials survive.
+                    db.execute("INSERT INTO verified_snapshot VALUES (?, ?, ?) "
+                               "ON CONFLICT(issuer_id) DO UPDATE SET "
+                               "raw_state=excluded.raw_state, feed=excluded.feed",
+                               (self._issuer, raw, feed))
+            if not fresh:
+                # Commit the clock observation, but never an expired snapshot.
+                raise ValueError("state expired or clock regressed during refresh")
+            self._ready = True
+
+    def revoked(self, grant_id: str, issuer_id: str) -> bool:
+        """Return a confirmed decision or raise ``RevocationUnavailable`` for an unsafe read."""
+        try:
+            if issuer_id != self._issuer:
+                return True
+            if not self._ready:
+                raise RevocationUnavailable("revocation feed has not completed a fresh refresh")
+            wire.validate_identifier("grant_id", grant_id)
+            now = self._observe_time()
+            unavailable: str | None = None
+            decision: bool | None = None
+            with self._transaction() as db:
+                self._check_time(db, now)
+                cached = self._cached(db, now=now)
+                if cached is None or not self._ready:
+                    unavailable = "revocation feed is unavailable during refresh"
+                else:
+                    approval = self._approval(grant_id, issuer_id) if self._approval else None
+                    if approval is not None and not isinstance(approval, str):
+                        unavailable = "trusted approval reference is unavailable"
+                    else:
+                        if approval:
+                            wire.validate_identifier("approval_id", approval)
+                        final = self._final_time(db, now, cached[0])
+                        if final is None:
+                            unavailable = "revocation feed became stale during lookup"
+                        else:
+                            lookup = CombinedRevocationLookup(
+                                cached[0], clock=lambda: final, max_age_seconds=self._max_age,
+                            )
+                            decision = lookup.reason(grant_id, approval) is not None
+            if unavailable is not None:
+                raise RevocationUnavailable(unavailable)
+            if decision is None:
+                raise RevocationUnavailable("revocation feed returned no decision")
+            return decision
+        except RevocationUnavailable:
+            raise
+        except Exception as error:  # noqa: BLE001 - fail closed on any unsafe read
+            _LOG.warning("revocation lookup failed closed: %s", type(error).__name__)
+            raise RevocationUnavailable("revocation feed lookup failed") from None

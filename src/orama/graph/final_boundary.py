@@ -30,6 +30,10 @@ TERMINAL_REASONS: Final[frozenset[str]] = frozenset({
 })
 
 
+class RevocationUnavailable(Exception):
+    """A revocation source cannot currently prove a lookup result is fresh."""
+
+
 class FinalBoundaryRefused(OutcomeRefused):
     """The final boundary refused before dispatch; ``reason`` is a stable code.
 
@@ -76,11 +80,24 @@ class ApprovalVerifier(Protocol):
         """Return True only if the approval for exactly this binding is valid and unrevoked."""
 
 
+class TransactionalApprovalVerifier(ApprovalVerifier, Protocol):
+    """Optional public-trust extension for adapters whose keys can change before send."""
+
+    def prepare_recheck(self, binding: FinalBoundaryBinding) -> Callable[[], bool]:
+        """Snapshot before locking; return a bounded, store-free local send-time check.
+
+        The sealed driver combines this with the existing grant-authority check
+        inside the send-marker transaction. It never replaces that grant check.
+        No callback may access the attempt store, perform network work or issue
+        authority. Exact settled receipt replay does not reauthorize anything.
+        """
+
+
 class RevocationLookup(Protocol):
     """Injected view of acknowledged issuer revocations (same shape as the store's port)."""
 
     def revoked(self, *, grant_id: str, issuer_id: str) -> bool:
-        """Return True if an acknowledged event revokes the grant, its approval chain or issuer."""
+        """Return True for a confirmed revocation or raise ``RevocationUnavailable`` to retry."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +251,8 @@ def _verify_revocation_and_approval(
         raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True)
     try:
         revoked = revocations.revoked(grant_id=stored.grant_id, issuer_id=issuer_id)
+    except RevocationUnavailable:
+        raise FinalBoundaryRefused("approval_verifier_unavailable") from None
     except Exception:  # noqa: BLE001 - an unavailable revocation view is a deny
         raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
     if revoked is not False:
@@ -242,6 +261,8 @@ def _verify_revocation_and_approval(
         raise FinalBoundaryRefused("approval_verifier_missing", terminal=True)
     try:
         verified = approval_verifier.verify(binding)
+    except RevocationUnavailable:
+        raise FinalBoundaryRefused("approval_verifier_unavailable") from None
     except Exception:  # noqa: BLE001 - an unavailable verifier refuses; it never degrades to later
         raise FinalBoundaryRefused("approval_verifier_unavailable", terminal=True) from None
     if verified is not True:

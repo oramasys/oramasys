@@ -11,6 +11,7 @@ from orama.graph.final_boundary import (
     TERMINAL_REASONS,
     FinalBoundaryBinding,
     FinalBoundaryRefused,
+    RevocationUnavailable,
     authorize_final_boundary,
 )
 from orama.graph.inert_effect_driver import InertEffectDriver
@@ -228,6 +229,40 @@ def test_an_unavailable_revocation_view_refuses(h: Harness, view) -> None:
     assert excinfo.value.reason == "approval_verifier_unavailable" and excinfo.value.terminal
     assert approvals.seen == []
     assert h.store.terminal_refusal(ATTEMPT).reason == "approval_verifier_unavailable"
+
+
+def test_temporary_revocation_feed_unavailability_is_retryable(h: Harness) -> None:
+    """A caller-fed feed outage denies this call without burning the authorized attempt."""
+    class FlakyFeed:
+        """Fail once before returning a current, unrevoked lookup result."""
+
+        def __init__(self) -> None:
+            """Start with one unavailable lookup."""
+            self.available = False
+
+        def revoked(self, *, grant_id: str, issuer_id: str) -> bool:
+            """Raise only while a transient refresh outage remains."""
+            if not self.available:
+                raise RevocationUnavailable("refresh in progress")
+            return False
+
+    feed = FlakyFeed()
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        run(h, revocations=feed)
+    assert excinfo.value.reason == "approval_verifier_unavailable" and not excinfo.value.terminal
+    assert h.store.terminal_refusal(ATTEMPT) is None
+    feed.available = True
+    run(h, revocations=feed)
+    untouched(h)
+
+
+def test_retryable_approval_unavailability_does_not_burn_the_attempt(h: Harness) -> None:
+    """A later approval recheck can report feed unavailability without terminal refusal."""
+    with pytest.raises(FinalBoundaryRefused) as excinfo:
+        run(h, approvals=Approvals(RevocationUnavailable("refresh in progress")))
+    assert excinfo.value.reason == "approval_verifier_unavailable" and not excinfo.value.terminal
+    assert h.store.terminal_refusal(ATTEMPT) is None
+    run(h)
 
 
 def test_a_revoked_grant_refuses_future_dispatch(h: Harness) -> None:

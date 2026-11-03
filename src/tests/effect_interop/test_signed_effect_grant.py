@@ -1,9 +1,12 @@
 """Real signed effect authority through issuer admission and consumer dispatch."""
 from datetime import UTC, datetime, timedelta
+import importlib.util
+from pathlib import Path
+import sys
 import pytest
 
 
-def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
+def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path: Path) -> None:
     """A real v2 signature is verified before Oramasys persists an attempt."""
     from phylax import effect_grant as phylax
     from phylax.adjustment_grant import RotatingIssuerKeyring
@@ -72,17 +75,6 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     from orama.graph.dispatch_attempts import ExpectedBinding
     from orama.graph.effect_proposals import EffectScope
     public = authority_store.key("issuer-1").public_key
-    class Signatures:
-        """Verify actual producer signatures using one trusted public key."""
-        def verify_permit(self, key_id, body, signature):
-            """Verify the permit domain under the explicitly trusted issuer key."""
-            return key_id == "issuer-1" and wire.verify_permit(public, body, signature)
-        def verify_finalization(self, key_id, body, signature):
-            """Verify the finalization domain under the explicitly trusted issuer key."""
-            return key_id == "issuer-1" and wire.verify_finalization(public, body, signature)
-        def verify_event(self, key_id, digest, signature):
-            """Verify the event domain under the explicitly trusted issuer key."""
-            return key_id == "issuer-1" and wire.verify_event(public, digest, signature)
     scope = EffectScope("principal-1", "graph-1", "c" * 64, "a" * 64, "d" * 64, "inert://simulation")
     store.propose("proposal-1", scope, now)
     store.reserve("reservation-1", "proposal-1", scope, now + timedelta(minutes=1), now)
@@ -93,7 +85,16 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
     permit = json.loads(issuer.admit(request, grants=lookup, signer=signer, now=now))
     fin_request = dict(permit_id=permit["permit_id"], permit_digest=permit["payload_digest"], attempt_id="attempt-1", reservation_id="reservation-1", ledger_store_id="ledger-1", authority_epoch=1, consumer_acked_through=0, requested_at=wire.timestamp(now))
     finalization, envelope = issuer.finalize(fin_request, grants=lookup, signer=signer, now=now)
-    signatures = Signatures()
+    # Compose the actual public approval adapter without importing Phylax in src/orama.
+    adapter_path = Path(__file__).parents[3] / "scripts/public_dispatch_approval.py"
+    spec = importlib.util.spec_from_file_location("real_public_dispatch_approval", adapter_path)
+    assert spec is not None and spec.loader is not None
+    adapter = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = adapter
+    spec.loader.exec_module(adapter)
+    signatures = adapter.IssuerDispatchVerifier(
+        "issuer-1", lambda issuer_id, key_id: public if issuer_id == key_id == "issuer-1" else None,
+    )
     store.ingest_events("issuer-1", envelope["events"], signatures)
     store.authorize_dispatch("attempt-1", permit, json.loads(finalization), now, verifier=signatures, gates=FakeGates(), revocations=FakeRevocations(), issuer_id="issuer-1", expected=ExpectedBinding("a" * 64, "d" * 64, 1, 1, "ledger-1"), scope=scope)
     stored = store.attempt_binding("attempt-1")
@@ -104,6 +105,14 @@ def test_phylax_signed_effect_grant_reaches_only_its_bound_attempt(tmp_path):
             epoch=stored.epoch, expires_at=stored.expires_at,
         ),
         approver=Operator(), now=now,
+    )
+    driver = SealedInertDriver(
+        store, effects_allowed=lambda: True,
+        approval_verifier=adapter.RetainedApprovalVerifier(
+            store, signatures=signatures, composer=composer,
+            revocations=FakeRevocations(), clock=lambda: now,
+        ),
+        revocations=FakeRevocations(), issuer_id="issuer-1", clock=lambda: now,
     )
     receipt = composer.send(driver, "attempt-1", authenticated_principal="principal-1")
     assert receipt.outcome == "confirmed"
