@@ -77,8 +77,9 @@ def test_declared_hook_descriptor_failure_does_not_degrade_to_legacy(tmp_path: P
 
 
 def test_retryable_transactional_recheck_does_not_burn_the_attempt(tmp_path: Path) -> None:
-    """A feed outage during the send-time approval check remains retryable."""
+    """A feed outage leaves the attempt usable once the feed recovers."""
     b = bound_harness(tmp_path)
+    unavailable = True
 
     class FeedRefreshingApproval(Approvals):
         """Pass preflight, then report a retryable feed refresh at the send boundary."""
@@ -86,18 +87,27 @@ def test_retryable_transactional_recheck_does_not_burn_the_attempt(tmp_path: Pat
         def prepare_recheck(self, binding: FinalBoundaryBinding) -> Callable[[], bool]:
             """Return a callback that models a feed becoming temporarily unavailable."""
             def recheck() -> bool:
-                """Report the typed retryable revocation-read failure."""
-                raise RevocationUnavailable("refresh in progress")
+                """Report a transient outage until the trusted feed recovers."""
+                if unavailable:
+                    raise RevocationUnavailable("refresh in progress")
+                return True
 
             return recheck
 
     try:
+        driver = sealed(b, approvals=FeedRefreshingApproval())
         with pytest.raises(FinalBoundaryRefused) as caught:
-            b.composer.send(sealed(b, approvals=FeedRefreshingApproval()), ATTEMPT,
+            b.composer.send(driver, ATTEMPT,
                             authenticated_principal="principal-1")
         assert caught.value.reason == "approval_verifier_unavailable" and not caught.value.terminal
         assert b.h.store.terminal_refusal(ATTEMPT) is None
         assert b.h.store.outbox_row(ATTEMPT)["send_started"] == 0
         assert b.h.store.approval_state(ATTEMPT) == "granted"
+        unavailable = False
+        receipt = b.composer.send(driver, ATTEMPT, authenticated_principal="principal-1")
+        assert receipt.outcome == "confirmed"
+        assert b.h.store.outbox_row(ATTEMPT)["send_started"] == 1
+        assert b.h.store.approval_state(ATTEMPT) == "consumed"
+        assert b.composer.send(driver, ATTEMPT, authenticated_principal="principal-1") == receipt
     finally:
         b.h.store.close()
