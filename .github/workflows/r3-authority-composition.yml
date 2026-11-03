@@ -55,3 +55,4 @@ jobs:
           src/tests/test_dispatch_attempts.py
           src/tests/test_serve_with_effect_grants.py
           src/tests/test_inert_effect_process_crashes.py
+          src/tests/test_loaded_deployment_identity.py

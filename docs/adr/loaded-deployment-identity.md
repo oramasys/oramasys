@@ -37,8 +37,8 @@ Canonical JSON is proposed: UTF-8, sorted keys, compact separators, no non-finit
 | `role` | `primary-server`, `secondary-server`, `client`, `off`, or null on refusal | Effective role after override |
 | `serving_applicability` | `applicable`, `not-applicable`, or null on refusal | Topology applicability only, never authorization |
 | `public_state` | `local`, `signed-publication`, or null when no selected node or refused | Effective profile setting |
-| `role_override` | `absent`, `same`, `downgraded`, `ignored`, or `invalid` | Classified effect; invalid implies refusal |
-| `refusal` | null or fixed code `profile-invalid`, `os-mismatch`, `role-override-invalid`, `startup-refused`, `capture-failed` | Coarse outcome only; no exception text |
+| `role_override` | `absent`, `same`, `downgraded`, `ignored`, `unknown`, or `invalid` | Classified effect; unknown means refusal occurred before evaluation could be established |
+| `refusal` | null or fixed code `load-refused`; future reviewed integrations may distinguish `profile-invalid`, `os-mismatch`, `role-override-invalid`, `startup-refused`, `capture-failed` | Coarse outcome only; no exception text; the initial wrapper cannot distinguish existing ProfileError origins |
 
 Public output excludes node/installation names, hostnames, OS/account identifiers, endpoints, paths, principal/SID, environment values, raw YAML, notes, credentials, raw profile/policy hashes and hashes or commitments of low-entropy secrets. The public projection contains no generation identifier by default: even a random identifier can correlate deployments. A digest of these canonical *public bytes* may be used as a projection fingerprint; it establishes equality of projections only, not equality of private configuration or authenticity. The coarse refused codes require mapping at their origin, never parsing exception messages. `startup-refused` applies only when the same process actually performs that check; a loader result alone cannot claim it. No public record implies current approval, successful startup, policy completeness or permission to serve.
 
@@ -67,10 +67,26 @@ If the eventual claim includes filesystem identity, specify and test per support
 - Exercise bounded reads and replacement before, during and after capture; symlink/parent replacement and unsupported platform cases must either preserve a truthful handle-bound claim or explicitly refuse the requested filesystem proof. No later path read may change the captured values.
 - Exercise malformed and duplicate YAML, invalid UTF-8, oversize input, OS mismatch, invalid override, missing/unreadable profile, no matching node, downgrade, equal role and ignored promotion. Assert successful fallbacks, classified refusals, and existing fail-closed behavior separately.
 - Change environment values before and after capture, mutate all returned and input objects, restart and reload. Each generation reflects only values consumed in its own operation; prior evidence remains immutable, and no stale capture represents the new process.
-- Put recognizable secrets in every possible raw input, diagnostics, paths, account names, endpoint, policy and environment. Inspect serialized public bytes, errors and logs for raw values, low-entropy hashes and arbitrary fields; reject unknown keys and schema versions. Verify deterministic canonical public encoding and fingerprint without treating it as private identity.
+- Put recognizable secrets in every possible raw input, diagnostics, paths, account names, endpoint, policy and environment. Inspect the new capture/publication pipeline's public bytes, errors and logs for raw values, low-entropy hashes and arbitrary fields; reject unknown keys and schema versions. Existing profile CLI diagnostics are a separate surface and must not be forwarded into evidence. Verify deterministic canonical public encoding and fingerprint without treating it as private identity.
 - Mismatch consumer wheel/provenance, producer or Phylax pin, interpreter/import origin, policy revision, service identity and generation linkage individually; each yields an explicit failed or incomplete qualification. Verify no secret is included in private evidence by default and access/retention match the chosen host's controls.
 - Run supported platform-specific tests on the actual OS/filesystem, then collect installed evidence outside the checkout as the actual service identity, with `ORAMA_GRANT_SERVING` unset. Review complete evidence and independent R4/R6 requirements separately. Test results or a public projection alone do not close R5.
 
 ## Unresolved deployment and review decisions
 
 The operator must identify the host/OS/filesystem, service manager and actual service identity; exact installed artifact set and source/pin expectations; service entrypoint and complete configuration/policy loader chain; policy inputs and secret classification; public-state topology; publication/transport owner; private storage, integrity, key management and retention; reload lifecycle and process-to-verifier binding; and whether filesystem identity is required. Choose supported platform proof and its failure behavior, capture failure's effect on startup, exact public release approval and any authenticated binding format during design review. These are not inferred here. Review this design before implementation; preserve existing production pins and accepted generation bytes, keep live effects disabled, and leave R5 open pending actual deployment evidence.
+
+## Initial software subset after same-session design review
+
+`orama.deploy.identity.load_with_identity` snapshots the three relevant profile environment
+inputs and invokes the existing loader once. Its frozen `projection` observes safe topology
+fields at the instant loading returns; it does not bind future service consumption. The returned
+`effective` object preserves the existing mutable API: later mutation can change operational
+configuration and requires a separate new observation/binding. Serialize only `projection`;
+the enclosing result's `effective` field is private and may contain identifying configuration.
+
+This subset adds no collector, public endpoint, private evidence assembler, canonical wire
+parser, signature, startup integration, policy capture, filesystem proof or R5 completion.
+The dataclass is an in-process observation, not a validator for caller-supplied evidence.
+Existing loader exceptions become the generic `load-refused` without their messages.
+The larger capture/consumption, schema-ingestion and host-binding requirements above remain
+design work. Same-session Terra review is not independent R6 evidence.
