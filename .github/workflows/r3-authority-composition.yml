@@ -10,11 +10,17 @@ permissions:
 
 jobs:
   r3-composition:
+    name: r3-composition (${{ matrix.python-version }}, ${{ matrix.producer.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        producer:
+          - name: merged
+            ref: a7211df7d58695f35f5afee9b6b50af6a3f96139
+          - name: commit-time-repair
+            ref: b2edfe9584f4e013105cab3d87fda174e13079f6
     env:
       ORAMA_R3_INTEROP_REQUIRED: "1"
       ORAMA_EFFECT_INTEROP_REQUIRED: "1"
@@ -27,7 +33,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           repository: oramasys/phylax
-          ref: 7cac74e240de5830cef82c3d46921d00c21786df
+          ref: ${{ matrix.producer.ref }}
           path: phylax-r3
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -49,3 +55,4 @@ jobs:
           src/tests/test_dispatch_attempts.py
           src/tests/test_serve_with_effect_grants.py
           src/tests/test_inert_effect_process_crashes.py
+          src/tests/test_loaded_deployment_identity.py

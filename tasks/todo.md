@@ -50,3 +50,24 @@ items are not silently converted into software tasks.
 - [ ] Publish exactly once to existing #91 and #30; remote receipts follow publication.
 - [ ] Windows independent R6 review at published heads, then reviewed platform call-site port.
 - [ ] Actual R4/R5 qualification, operator R7 generation and separate R8 activation.
+
+### Approved next slice — 2026-11-04 (Manila), executed 2026-11-03 UTC
+
+The preceding unchecked publication entries are historical. #91 and Phylax #30
+are merged; this successor reuses draft #92 and adds producer draft #31 for a
+reproduced defect, with no production pin or generation promotion.
+
+- [x] Audit exact merged heads, open overlapping work and current CI; record
+  inaccessible branch-protection data and skipped checks separately.
+- [x] Test merged Phylax main on both Python versions with mandatory interop.
+- [x] Repair refresh's second-lock clock race and exercise successful retry/replay.
+- [x] Repair operator-assertion validity rechecks under the nonce write lock;
+  test both merged and repaired producer candidates in the consumer workflow.
+- [x] Review loaded-identity design and implement an opt-in, return-time public
+  profile projection with explicit limits; no deployment evidence is fabricated.
+- [x] Use fresh Terra review lanes; preserve the distinction from independent R6.
+- [x] Prepare the [final qualification receipt](../docs/release12-postmerge-qualification-2026-11-04.md)
+  for #92/#31; final publication and remote-byte readback are reported in the PR.
+- [ ] Trust-aware snapshot cache and target-workload contention qualification.
+- [ ] Deployment configuration/policy chain, actual R4/R5 host evidence, independent
+  R6 endorsement, operator R7 generation and separate R8 activation.

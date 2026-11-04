@@ -121,9 +121,9 @@ class RevocationFeedAdapter:
 
     def _observe_time(self) -> datetime:
         """Durably observe time even when subsequent verification refuses stale input."""
-        now = self._clock()
-        stamp = wire.timestamp(now)
         with self._transaction() as db:
+            now = self._clock()
+            stamp = wire.timestamp(now)
             self._check_time(db, now)
             db.execute("INSERT INTO observed_clock VALUES (1, ?) "
                        "ON CONFLICT(singleton) DO UPDATE SET at=excluded.at", (stamp,))
@@ -217,6 +217,11 @@ class RevocationFeedAdapter:
             raw = bytes(raw_state)
             chain, feed = self._copy_feed(events)
             with self._transaction() as db:
+                locked_now = self._clock()
+                wire.timestamp(locked_now)
+                if locked_now < now:
+                    raise ValueError("clock rollback during refresh")
+                now = locked_now
                 self._check_time(db, now)
                 state = self._verify(raw, chain, now)
                 previous = self._cached(db)
@@ -259,6 +264,10 @@ class RevocationFeedAdapter:
             unavailable: str | None = None
             decision: bool | None = None
             with self._transaction() as db:
+                locked_now = self._clock()
+                if locked_now < now:
+                    raise ValueError("clock rollback during lookup")
+                now = locked_now
                 self._check_time(db, now)
                 cached = self._cached(db, now=now)
                 if cached is None or not self._ready:
