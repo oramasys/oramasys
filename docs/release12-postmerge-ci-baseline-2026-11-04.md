@@ -2,7 +2,7 @@
 
 Observed 2026-11-03 22:14 UTC (2026-11-04 in Asia/Manila, the plan's date). Consumer main `98b7568fa4bedbf59be788b62d2c7333f10535f4`; producer main `a7211df7d58695f35f5afee9b6b50af6a3f96139`. These are merged baseline evidence only: any later producer fix produces a distinct candidate and is not covered by these checks or by the earlier green PR #92 cells.
 
-Consumer [PR #92](https://github.com/oramasys/oramasys/pull/92), head `9ca04b3fd7176a83403dffe8ec158c84ae794949`, already changes the R3 checkout from the old source-test candidate to merged producer `a7211df7d58695f35f5afee9b6b50af6a3f96139`. It is the sole open consumer PR and overlaps the workflow and revocation tests; no producer PR was open at observation. Its 19 Actions checks passed; CodeRabbit was skipped. The two exact R3 cells are:
+Consumer [PR #92](https://github.com/oramasys/oramasys/pull/92), head `9ca04b3fd7176a83403dffe8ec158c84ae794949`, already changes the R3 checkout from the old source-test candidate to merged producer `a7211df7d58695f35f5afee9b6b50af6a3f96139`. It is the sole open consumer PR and overlaps the workflow and revocation tests; no producer PR was open at observation. Its 19 Actions checks passed; CodeRabbit was skipped. The two exact R3 cells are below. Both ran on the pull_request event and the workflow checks out without `ref`, so they tested the synthetic merge commit `576454759cc044677a8f031a7d4f8915e69dbb61` (`refs/pull/92/merge`, logged as "Merge 9ca04b3fd7176a83403dffe8ec158c84ae794949 into 98b7568fa4bedbf59be788b62d2c7333f10535f4"), not the PR head alone; the base SHA at that time was `98b7568fa4bedbf59be788b62d2c7333f10535f4` and the head SHA is retained above:
 
 | Check | Result | URL |
 | --- | --- | --- |

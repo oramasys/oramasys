@@ -8,7 +8,7 @@ import pytest
 
 from orama.graph.final_boundary import FinalBoundaryBinding, FinalBoundaryRefused, RevocationUnavailable
 from tests.test_dispatch_attempts import ATTEMPT
-from tests.test_effect_grant_composition import bound_harness, sealed
+from tests.test_effect_grant_composition import Simulation, bound_harness, sealed
 from tests.test_final_boundary import Approvals
 
 
@@ -95,7 +95,8 @@ def test_retryable_transactional_recheck_does_not_burn_the_attempt(tmp_path: Pat
             return recheck
 
     try:
-        driver = sealed(b, approvals=FeedRefreshingApproval())
+        sim = Simulation()
+        driver = sealed(b, approvals=FeedRefreshingApproval(), sim=sim)
         with pytest.raises(FinalBoundaryRefused) as caught:
             b.composer.send(driver, ATTEMPT,
                             authenticated_principal="principal-1")
@@ -109,5 +110,6 @@ def test_retryable_transactional_recheck_does_not_burn_the_attempt(tmp_path: Pat
         assert b.h.store.outbox_row(ATTEMPT)["send_started"] == 1
         assert b.h.store.approval_state(ATTEMPT) == "consumed"
         assert b.composer.send(driver, ATTEMPT, authenticated_principal="principal-1") == receipt
+        assert sim.calls == 1
     finally:
         b.h.store.close()
