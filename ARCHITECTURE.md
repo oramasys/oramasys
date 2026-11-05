@@ -25,12 +25,14 @@ flowchart TB
     A --> P[Phylax: security, grants, and provenance decisions]
     A --> H[Agate: hardware placement decisions]
     A --> K[Knowledge and memory satellites]
+    A -.-> OC[Orchestrator Controller: planned]
     G --> E[Evidence and audit receipts]
     E --> O
 ```
 
 The arrow from Oramasys to Core is one way: application composition may import
-the kernel; the kernel must not import Oramasys or a satellite. A satellite
+the kernel (pinned by commit in `pyproject.toml`); the kernel must not import
+Oramasys or a satellite. Dashed edges are planned, not wired. A satellite
 returns a decision through its declared contract rather than donating its
 policy implementation to the application.
 
@@ -68,7 +70,7 @@ shared mutable cache, or a collection of undocumented integrations.
 | Endpoint identity, admission, egress, and peer verification | Telos | Ask for semantic authorization; do not add raw network clients. |
 | Grant verification, provenance, audit redaction, and admission | Phylax | Consume decisions; remain fail-closed when a required verifier is absent. |
 | Hardware placement and local capability | Agate | Request placement; do not infer hardware policy locally. |
-| Coordination records: claims, handoffs, leases, acknowledgements | v2: the Orchestrator Controller, a boot module inside oramasys that starts before any Orchestrator (no separate satellite repository). v1, as it works today: Perpetua-Tools serves it, until a parity migration | Compose. The top Orchestrator is a client of the controller, not its host; authority comes from a Phylax capability, never from spawn order. Events are signals; any effect they request still needs a Phylax decision. |
+| Coordination records: claims, handoffs, leases, acknowledgements | v2 (**planned — design only, no runtime code yet**; see [controller invariants](docs/architecture/orchestrator-controller-invariants.md)): the Orchestrator Controller, a boot module inside oramasys that starts before any Orchestrator (no separate satellite repository). Today, and until a parity migration: Perpetua-Tools serves it for v1 | Compose. The top Orchestrator is a client of the controller, not its host; authority comes from a Phylax capability, never from spawn order. Events are signals; any effect they request still needs a Phylax decision. |
 | Memory, retrieval, and knowledge indexes | Dedicated satellites | Label derived data and preserve source/provenance boundaries. |
 | Human approval and deployment choice | Operator | Keep approval distinct from routing, evaluation, and completion. |
 

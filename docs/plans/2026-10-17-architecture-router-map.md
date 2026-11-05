@@ -10,7 +10,9 @@ decision, the adapter boundary, the offline proof, and the receipt.
 
 - The local workspace proof materializes an extractive CSV and independently
   verifiable receipt without model, retrieval, provider, or durable-memory
-  dependencies.
+  dependencies
+  ([plan](2026-10-16-local-workspace.md), [code](../../src/orama/workspace/),
+  [tests](../../src/tests/test_local_workspace.py)).
 - Oramasys composes application behavior above the dependency-minimal Core
   kernel.
 - Privacy is local by default. Progressive sharing is explicit, visible in
@@ -37,6 +39,8 @@ decision, the adapter boundary, the offline proof, and the receipt.
 ## Acceptance Checks
 
 - Every constellation edge names both its owner and contract.
+  (Not yet met: the System Shape diagram in the root map names owners but
+  not the contract on each edge.)
 - Core retains no upward Oramasys or satellite dependency.
 - Missing required authorization or provenance verification fails closed.
 - The artifact, its privacy profile, and its receipt can be inspected locally.
