@@ -18,16 +18,16 @@ point is covered by the
 
 ```mermaid
 flowchart TB
-    O[Operator and approved control-plane caller] --> A[Oramasys API and application composition]
-    A --> G[Graph and gateway workflows]
-    G --> C[perpetua-core: dependency-minimal primitives]
-    A --> T[Telos: endpoint and transport authority]
-    A --> P[Phylax: security, grants, and provenance decisions]
-    A --> H[Agate: hardware placement decisions]
-    A --> K[Knowledge and memory satellites]
-    A -.-> OC[Orchestrator Controller: planned]
-    G --> E[Evidence and audit receipts]
-    E --> O
+    O[Operator and approved control-plane caller] -->|Oramasys: authenticated request and consent| A[Oramasys API and application composition]
+    A -->|Oramasys: workflow inputs and lifecycle| G[Graph and gateway workflows]
+    G -->|Core: GraphSpec and MiniGraph execution| C[perpetua-core: dependency-minimal primitives]
+    A -->|Telos: endpoint authorization and transport| T[Telos: endpoint and transport authority]
+    A -->|Phylax: compile and admit decisions| P[Phylax: security, grants, and provenance decisions]
+    A -->|Agate: observed evidence and fit assessment| H[Agate: hardware placement decisions]
+    A -.->|Satellite owner: retrieval and provenance contract planned| K[Knowledge and memory satellites]
+    A -.->|Controller: capability-gated claim lifecycle planned| OC[Orchestrator Controller: planned]
+    G -->|Oramasys: bound artifact and verification receipt| E[Evidence and audit receipts]
+    E -->|Operator: inspect evidence and decide separately| O
 ```
 
 The arrow from Oramasys to Core is one way: application composition may import
@@ -35,6 +35,18 @@ the kernel (pinned by commit in `pyproject.toml`); the kernel must not import
 Oramasys or a satellite. Dashed edges are planned, not wired. A satellite
 returns a decision through its declared contract rather than donating its
 policy implementation to the application.
+
+Edge labels name the owner and the exchanged contract, not an assertion that every
+deployment enables it. Contract routes: [API callers](src/orama/api/),
+[application graph composition](src/orama/graph/perpetua_graph.py),
+[Core execution seam](src/orama/graph/admission_runtime.py),
+[Telos authority](docs/architecture/telos-network-authority.md),
+[Phylax and Agate owner adapters](src/orama/graph/adapters.py),
+[controller design](docs/architecture/orchestrator-controller-invariants.md),
+and [offline artifact/receipt contract](docs/plans/2026-10-16-local-workspace.md).
+The knowledge/memory edge is a planned adapter boundary, not a claimed universal
+satellite protocol; define its owner-specific schema before wiring it. Agate fit
+evidence is not authorization, and an evidence receipt is not operator approval.
 
 ## Build a Constellation
 
@@ -76,17 +88,21 @@ shared mutable cache, or a collection of undocumented integrations.
 
 ## Five Graphs, Five Meanings
 
-| Graph | Core question | Required record |
-| --- | --- | --- |
-| Execution | What runs and what transitions next? | Typed graph/state contract with checkpoints. |
-| Coordination | Who owns a claim, handoff, or lease? | Durable event identity, actor, and lifecycle state. |
-| Knowledge | What concepts and sources relate? | Source, time, confidence, and derived-view labeling. |
-| Evidence | Why is a claim supported? | Bound artifacts, tests, source references, or a human decision. |
-| Audit | Who independently checked it and what remains open? | Review scope, authority, limitation, and receipt. |
+| Graph | Shared meaning | Core question | Required record |
+| --- | --- | --- | --- |
+| Execution | State transitions and bounded execution. | What runs and what transitions next? | Typed graph/state contract with checkpoints. |
+| Coordination | Claims, handoffs, leases, and acknowledgements. | Who owns a claim, handoff, or lease? | Durable event identity, actor, and lifecycle state. |
+| Knowledge | Source relationships and derived knowledge. | What concepts and sources relate? | Source, time, confidence, and derived-view labeling. |
+| Evidence | Support for bounded claims. | Why is a claim supported? | Bound artifacts, tests, source references, or a human decision. |
+| Audit | Independent review scope and unresolved limits. | Who independently checked it and what remains open? | Review scope, authority, limitation, and receipt. |
 
 This taxonomy mirrors the one in the v1 architecture map. Its meanings are
 defined there; this table adds only the v2 record shapes, so change both
 documents together.
+
+CI checks only graph names and **Shared meaning** against an immutable v1 revision;
+v2 questions, record shapes and surrounding prose need not match. See the
+[paired-update procedure](docs/plans/2026-10-17-architecture-router-map.md#cross-map-parity).
 
 These graphs may reference each other but must not be collapsed into a mutable
 shared cache. A queue event is not an authorization decision; an index hit is
