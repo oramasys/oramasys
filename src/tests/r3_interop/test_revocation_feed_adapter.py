@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import closing
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -744,3 +745,87 @@ def test_restart_reverifies_and_failed_refresh_drops_reuse(
         restarted.refresh(b"{}", [])
     unavailable(restarted)
     assert restarted._snapshot_memo is None
+
+
+def test_lookup_replays_a_changed_snapshot_outside_the_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full replay after another writer's refresh must not block other cache writers."""
+    producer, _, _, _, adapter, signed = world
+    reader, writer = adapter(), adapter()
+    reader.refresh(*signed())
+    producer.append_revocation("grant", "late", signer=Signer())
+    writer.refresh(*signed())
+    lock_free = lock_probe(reader, monkeypatch)
+    assert reader.revoked("late", ISSUER) is True
+    assert lock_free == [True]
+    # The locked decision reused the outside-lock verification of the same bytes.
+    assert reader.revoked("safe", ISSUER) is False
+    assert lock_free == [True]
+
+
+def lock_probe(lookup: Any, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Record, per full replay, whether another connection could take the cache write lock."""
+    original = lookup._verify
+    lock_free: list[bool] = []
+
+    def probe(*args: Any) -> Any:
+        """Try a zero-wait write lock from a second connection, then replay for real."""
+        with closing(sqlite3.connect(lookup.cache_path, timeout=0, isolation_level=None)) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("ROLLBACK")
+                lock_free.append(True)
+            except sqlite3.OperationalError:
+                lock_free.append(False)
+        return original(*args)
+
+    monkeypatch.setattr(lookup, "_verify", probe)
+    return lock_free
+
+
+def test_refresh_replays_new_input_once_and_outside_the_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh verifies its input before locking and reuses its own previous snapshot record."""
+    producer, _, _, _, adapter, signed = world
+    a = adapter()
+    a.refresh(*signed())
+    producer.append_revocation("grant", "late", signer=Signer())
+    lock_free = lock_probe(a, monkeypatch)
+    a.refresh(*signed())
+    assert lock_free == [True]
+    assert a.revoked("late", ISSUER) is True
+    assert lock_free == [True]
+
+
+def test_refresh_rechecks_trust_after_taking_the_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Key retirement between outside-lock verification and the locked commit is refused."""
+    from contextlib import contextmanager
+
+    producer, store, _, keys, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    a = adapter()
+    raw, events = signed()
+    transaction = a._transaction
+    entered: list[int] = []
+
+    @contextmanager
+    def retire_on_second_lock() -> Iterator[sqlite3.Connection]:
+        """Retire the key just as the refresh's main write transaction begins."""
+        entered.append(1)
+        if len(entered) == 2:
+            keys.pop((ISSUER, "key-1"))
+        with transaction() as database:
+            yield database
+
+    monkeypatch.setattr(a, "_transaction", retire_on_second_lock)
+    with pytest.raises(Exception):
+        a.refresh(raw, events)
+    assert len(entered) >= 2
+    assert store.acked_through(ISSUER) == 0
+    with sqlite3.connect(a.cache_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM verified_snapshot").fetchone()[0] == 0
+    unavailable(a)
