@@ -107,6 +107,19 @@ class Feed:
             return state, (self.feed.events(1, head) if head else [])
 
 
+def refresh_once(feed: Feed, writer: RevocationFeedAdapter, latencies: list[float],
+                 failures: dict[str, int]) -> None:
+    """Record either a completed refresh or a snapshot/refresh failure."""
+    try:
+        snapshot = feed.snapshot()
+        begin = time.perf_counter()
+        writer.refresh(*snapshot)
+        latencies.append(time.perf_counter() - begin)
+    except Exception as error:  # noqa: BLE001 - every failure is an observation
+        name = type(error).__name__
+        failures[name] = failures.get(name, 0) + 1
+
+
 def measure(
     *, events: int, senders: int, sends: int, send_interval: float, refresh_interval: float,
     refresher: str, retries: int,
@@ -153,14 +166,7 @@ def measure(
         def refresh_loop() -> None:
             """Refresh at a fixed cadence until senders finish, recording every outcome."""
             while not stop.wait(refresh_interval):
-                snapshot = feed.snapshot()
-                begin = time.perf_counter()
-                try:
-                    writer.refresh(*snapshot)
-                    refresh_latencies.append(time.perf_counter() - begin)
-                except Exception as error:  # noqa: BLE001 - every failure is an observation
-                    name = type(error).__name__
-                    refresh_failures[name] = refresh_failures.get(name, 0) + 1
+                refresh_once(feed, writer, refresh_latencies, refresh_failures)
 
         def send(driver: SealedInertDriver) -> tuple[float, int, str]:
             """Complete one send, retrying only retryable unavailability."""
