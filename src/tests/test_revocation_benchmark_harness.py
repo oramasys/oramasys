@@ -2,6 +2,7 @@
 from pathlib import Path
 import importlib
 from types import ModuleType
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,3 +49,34 @@ def test_refresh_thread_timeout_is_not_success(benchmark: ModuleType) -> None:
 
     with pytest.raises(RuntimeError, match="refresher did not stop"):
         benchmark.join_refresher(StuckThread())
+
+
+def test_fd_preflight_refuses_before_store_setup(benchmark: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An insufficient soft limit refuses before creating any producer or store."""
+    fake = SimpleNamespace(RLIMIT_NOFILE=7, RLIM_INFINITY=-1, getrlimit=lambda _: (1024, 1024))
+    monkeypatch.setattr(benchmark, "resource", fake, raising=False)
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        """Fail if setup starts before the capacity check."""
+        pytest.fail("setup started before descriptor preflight")
+
+    monkeypatch.setattr(benchmark, "Feed", unexpected)
+    with pytest.raises(RuntimeError, match=r"required.*available"):
+        benchmark.measure(events=256, senders=8, sends=300, send_interval=0,
+                          refresh_interval=15, refresher="separate", retries=0)
+
+
+@pytest.mark.parametrize("limit", [100000, -1])
+def test_fd_preflight_accepts_sufficient_or_infinite_limit(
+    benchmark: ModuleType, monkeypatch: pytest.MonkeyPatch, limit: int,
+) -> None:
+    """A sufficient or unlimited soft limit passes without changing it."""
+    fake = SimpleNamespace(RLIMIT_NOFILE=7, RLIM_INFINITY=-1, getrlimit=lambda _: (limit, limit))
+    monkeypatch.setattr(benchmark, "resource", fake, raising=False)
+    assert benchmark.fd_preflight(8, 300)["status"] == "checked"
+
+
+def test_fd_preflight_reports_unsupported(benchmark: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Platforms without resource explicitly report that capacity was not checked."""
+    monkeypatch.setattr(benchmark, "resource", None, raising=False)
+    assert benchmark.fd_preflight(8, 300)["status"] == "not_checked"

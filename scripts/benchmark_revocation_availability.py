@@ -12,6 +12,12 @@ Run from the repository root with the chosen Phylax source and PyNaCl importable
 
     PYTHONPATH="src:scripts:$PHYLAX_SOURCE/src" python scripts/benchmark_revocation_availability.py
 
+Each cell requires a soft descriptor limit of at least
+``3 * (senders * sends + 3) + 3 * (senders + 2) + 128``. This reserves three
+descriptors per attempt/supporting store and concurrent cache connection, plus
+fixed headroom. The harness does not change limits; platforms without POSIX
+``resource`` report the capacity as not checked, not qualified.
+
 The authorized attempts reuse the test suite's synthetic inert fixtures (fake issuer-port
 signatures, a fixed historical send clock). Each send owns its attempt-store file, so
 attempt-store contention between senders is NOT modelled; the shared resources measured are
@@ -33,6 +39,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
 
 from nacl.bindings import crypto_sign_seed_keypair
 from orama.graph.dispatch_attempts import SqliteAttemptStore
@@ -127,11 +138,27 @@ def join_refresher(thread: threading.Thread) -> None:
         raise RuntimeError("refresher did not stop within 120 seconds")
 
 
+def fd_preflight(senders: int, sends: int) -> dict[str, Any]:
+    """Check the soft descriptor limit without modifying it, or report unsupported."""
+    required = 3 * (senders * sends + 3) + 3 * (senders + 2) + 128
+    if resource is None:
+        return {"status": "not_checked", "required": required, "available": None}
+    soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft != resource.RLIM_INFINITY and soft < required:
+        raise RuntimeError(
+            f"file descriptor capacity insufficient: required {required}, available soft limit {soft}; "
+            "ask the operator to raise the process soft limit before running"
+        )
+    return {"status": "checked", "required": required,
+            "available": "unlimited" if soft == resource.RLIM_INFINITY else soft}
+
+
 def measure(
     *, events: int, senders: int, sends: int, send_interval: float, refresh_interval: float,
     refresher: str, retries: int,
 ) -> dict[str, Any]:
     """Run one workload cell and return its observations."""
+    descriptors = fd_preflight(senders, sends)
     public = crypto_sign_seed_keypair(SEED)[0]
     with tempfile.TemporaryDirectory(prefix="orama-revocation-availability-") as directory:
         root = Path(directory)
@@ -222,6 +249,7 @@ def measure(
         total = len(results)
         first_try_ok = sum(1 for _, tries, outcome in results if outcome == "sent" and tries == 1)
         return {
+            "file_descriptors": descriptors,
             "events": events, "senders": senders, "sends": total, "send_interval_s": send_interval,
             "refresh_interval_s": refresh_interval, "refresher": refresher, "retries": retries,
             "initial_refresh_ms": round(initial_refresh * 1000, 2),
