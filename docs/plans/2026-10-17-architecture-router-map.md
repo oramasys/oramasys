@@ -10,7 +10,9 @@ decision, the adapter boundary, the offline proof, and the receipt.
 
 - The local workspace proof materializes an extractive CSV and independently
   verifiable receipt without model, retrieval, provider, or durable-memory
-  dependencies.
+  dependencies
+  ([plan](2026-10-16-local-workspace.md), [code](../../src/orama/workspace/),
+  [tests](../../src/tests/test_local_workspace.py)).
 - Oramasys composes application behavior above the dependency-minimal Core
   kernel.
 - Privacy is local by default. Progressive sharing is explicit, visible in
@@ -37,6 +39,8 @@ decision, the adapter boundary, the offline proof, and the receipt.
 ## Acceptance Checks
 
 - Every constellation edge names both its owner and contract.
+  The System Shape diagram labels every edge and links the existing contract
+  surfaces; dashed controller and satellite edges remain planned boundaries.
 - Core retains no upward Oramasys or satellite dependency.
 - Missing required authorization or provenance verification fails closed.
 - The artifact, its privacy profile, and its receipt can be inspected locally.
@@ -48,3 +52,39 @@ decision, the adapter boundary, the offline proof, and the receipt.
 Provider serving, durable recovery, configured retrieval, model execution,
 scheduler activation, package promotion, and qualification require their own
 contracts, tests, receipts, independent review, and operator decision.
+
+## Cross-map parity
+
+Both maps preserve their own questions and record details while sharing exactly
+five graph names and **Shared meaning** definitions. The `Architecture map parity`
+workflow checks out legacy Orama at a full immutable SHA and runs its canonical
+`scripts/review/check_architecture_map_parity.py`; this repository does not fork it.
+
+For local review using explicit candidate checkouts:
+
+```bash
+python /path/to/orama-system/scripts/review/check_architecture_map_parity.py /path/to/orama-system/ARCHITECTURE.md ARCHITECTURE.md
+```
+
+For a taxonomy change, prepare both maps and update both workflows' peer `ref`
+values to reviewed counterpart SHAs. Run against that exact pair before publishing
+and recheck both merged revisions. Pinned checks are reproducible compatibility
+evidence, not continuous monitoring of another repository's moving `main`.
+Documentation validation never adds a runtime dependency on legacy services.
+
+## Local versus production kernel evidence
+
+`pyproject.toml` pins Core to `6d75cfe08af95992dddffab13ae3019aa9c41350`.
+The development Makefile supports an editable sibling; neither installation should
+be described as the other. Record the actual imported location, installed metadata,
+and sibling revision when applicable:
+
+```bash
+python -c 'import perpetua_core; print(perpetua_core.__file__)'
+python -m pip show perpetua-core
+git -C /path/to/perpetua-core rev-parse HEAD
+```
+
+Production CI separately performs a clean non-editable install and checks the
+pinned revision from outside the checkout. Local editable results do not replace
+that evidence. This documentation change neither repins Core nor enables serving.

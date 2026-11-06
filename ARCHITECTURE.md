@@ -18,21 +18,35 @@ point is covered by the
 
 ```mermaid
 flowchart TB
-    O[Operator and approved control-plane caller] --> A[Oramasys API and application composition]
-    A --> G[Graph and gateway workflows]
-    G --> C[perpetua-core: dependency-minimal primitives]
-    A --> T[Telos: endpoint and transport authority]
-    A --> P[Phylax: security, grants, and provenance decisions]
-    A --> H[Agate: hardware placement decisions]
-    A --> K[Knowledge and memory satellites]
-    G --> E[Evidence and audit receipts]
-    E --> O
+    O[Operator and approved control-plane caller] -->|Oramasys: authenticated request and consent| A[Oramasys API and application composition]
+    A -->|Oramasys: workflow inputs and lifecycle| G[Graph and gateway workflows]
+    G -->|Core: GraphSpec and MiniGraph execution| C[perpetua-core: dependency-minimal primitives]
+    A -->|Telos: endpoint authorization and transport| T[Telos: endpoint and transport authority]
+    A -->|Phylax: compile and admit decisions| P[Phylax: security, grants, and provenance decisions]
+    A -->|Agate: observed evidence and fit assessment| H[Agate: hardware placement decisions]
+    A -.->|Satellite owner: retrieval and provenance contract planned| K[Knowledge and memory satellites]
+    A -.->|Controller: capability-gated claim lifecycle planned| OC[Orchestrator Controller: planned]
+    G -->|Oramasys: bound artifact and verification receipt| E[Evidence and audit receipts]
+    E -->|Operator: inspect evidence and decide separately| O
 ```
 
 The arrow from Oramasys to Core is one way: application composition may import
-the kernel; the kernel must not import Oramasys or a satellite. A satellite
+the kernel (pinned by commit in `pyproject.toml`); the kernel must not import
+Oramasys or a satellite. Dashed edges are planned, not wired. A satellite
 returns a decision through its declared contract rather than donating its
 policy implementation to the application.
+
+Edge labels name the owner and the exchanged contract, not an assertion that every
+deployment enables it. Contract routes: [API callers](src/orama/api/),
+[application graph composition](src/orama/graph/perpetua_graph.py),
+[Core execution seam](src/orama/graph/admission_runtime.py),
+[Telos authority](docs/architecture/telos-network-authority.md),
+[owner-adapter seams](src/orama/graph/adapters.py),
+[controller design](docs/architecture/orchestrator-controller-invariants.md),
+and [offline artifact/receipt contract](docs/plans/2026-10-16-local-workspace.md).
+The knowledge/memory edge is a planned adapter boundary, not a claimed universal
+satellite protocol; define its owner-specific schema before wiring it. Agate fit
+evidence is not authorization, and an evidence receipt is not operator approval.
 
 ## Build a Constellation
 
@@ -47,7 +61,7 @@ inspectable and removable:
    composition; Telos for endpoints; Phylax for grants/provenance; Agate for
    placement; a dedicated satellite for memory or retrieval; and an operator
    for approval.
-4. Define an adapter contract instead of importing a satellite's policy:
+4. Define an owner contract rather than duplicating a satellite's policy:
    capability discovery, request/response schema, privacy label, failure
    behavior, provenance, and receipt.
 5. Materialize a real local artifact first, independently verify it, and keep
@@ -63,28 +77,39 @@ shared mutable cache, or a collection of undocumented integrations.
 
 | Concern | Authority | Oramasys responsibility |
 | --- | --- | --- |
-| Graph primitives, state reduction, and structural identity | `perpetua-core` | Compose Core contracts without an upward dependency. |
+| Graph primitives, state reduction, and structural identity | `perpetua-core` | Compose Core contracts without an upward dependency. Legacy `policy.py`, `llm.py`, and `gossip.py` modules still exist in Core; their presence does not transfer satellite authority. |
 | Workflow, API, routing, lifecycle, and user-facing state | Oramasys | Own application behavior and explicit orchestration. |
-| Endpoint identity, admission, egress, and peer verification | Telos | Ask for semantic authorization; do not add raw network clients. |
-| Grant verification, provenance, audit redaction, and admission | Phylax | Consume decisions; remain fail-closed when a required verifier is absent. |
-| Hardware placement and local capability | Agate | Request placement; do not infer hardware policy locally. |
-| Coordination records: claims, handoffs, leases, acknowledgements | v2: the Orchestrator Controller, a boot module inside oramasys that starts before any Orchestrator (no separate satellite repository). v1, as it works today: Perpetua-Tools serves it, until a parity migration | Compose. The top Orchestrator is a client of the controller, not its host; authority comes from a Phylax capability, never from spawn order. Events are signals; any effect they request still needs a Phylax decision. |
-| Memory, retrieval, and knowledge indexes | Dedicated satellites | Label derived data and preserve source/provenance boundaries. |
+| Endpoint identity, address admission, egress, and peer verification | Telos | Gateway and discovery import Telos in process; ask for semantic authorization and do not add raw network clients. |
+| Grant verification, provenance, audit redaction, and principal/capability admission | Phylax | Optional grant-serving composition lives in `scripts/`, outside `src/orama`; remain fail-closed when a required verifier is absent. |
+| Hardware placement and local capability | Agate | Graph composition imports Agate in process; fit evidence is not authorization. |
+| Job claims, handoffs and job-claim leases | Planned v2 Orchestrator Controller | The [controller](docs/architecture/orchestrator-controller-invariants.md) is a design-only internal module; a standalone repository remains a gated later option. PT owns v1 coordination. Existing [execution run-lease fencing](src/orama/graph/execution_guard.py) is distinct and already implemented. |
+| Local documentation search | Oramasys | The [knowledge surface](src/orama/knowledge/) provides read-only search and MCP/A2A routes. |
+| Configured memory and retrieval satellites | Dedicated owners | Planned boundaries require explicit contracts; label derived data and preserve provenance. |
+| Design decisions, ownership registry and capability schema | Orama `docs/v2` and `docs/schemas` | These are documentation and CI inputs, not v1 runtime dependencies. |
 | Human approval and deployment choice | Operator | Keep approval distinct from routing, evaluation, and completion. |
+
+The owner adapter definitions in `src/orama/graph/adapters.py` are composition
+seams, not evidence that production imports or wires them. Telos and Agate also
+have direct in-process imports as described above. Phylax grant-serving code is
+an optional script-side composition; this map does not claim it is activated.
 
 ## Five Graphs, Five Meanings
 
-| Graph | Core question | Required record |
-| --- | --- | --- |
-| Execution | What runs and what transitions next? | Typed graph/state contract with checkpoints. |
-| Coordination | Who owns a claim, handoff, or lease? | Durable event identity, actor, and lifecycle state. |
-| Knowledge | What concepts and sources relate? | Source, time, confidence, and derived-view labeling. |
-| Evidence | Why is a claim supported? | Bound artifacts, tests, source references, or a human decision. |
-| Audit | Who independently checked it and what remains open? | Review scope, authority, limitation, and receipt. |
+| Graph | Shared meaning | Core question | Required record |
+| --- | --- | --- | --- |
+| Execution | State transitions and bounded execution. | What runs and what transitions next? | Typed graph/state contract with checkpoints. |
+| Coordination | Claims, handoffs, leases, and acknowledgements. | Who owns a claim, handoff, or lease? | Durable event identity, actor, and lifecycle state. |
+| Knowledge | Source relationships and derived knowledge. | What concepts and sources relate? | Source, time, confidence, and derived-view labeling. |
+| Evidence | Support for bounded claims. | Why is a claim supported? | Bound artifacts, tests, source references, or a human decision. |
+| Audit | Independent review scope and unresolved limits. | Who independently checked it and what remains open? | Review scope, authority, limitation, and receipt. |
 
 This taxonomy mirrors the one in the v1 architecture map. Its meanings are
 defined there; this table adds only the v2 record shapes, so change both
 documents together.
+
+CI checks only graph names and **Shared meaning** against an immutable v1 revision;
+v2 questions, record shapes and surrounding prose need not match. See the
+[paired-update procedure](docs/plans/2026-10-17-architecture-router-map.md#cross-map-parity).
 
 These graphs may reference each other but must not be collapsed into a mutable
 shared cache. A queue event is not an authorization decision; an index hit is
@@ -116,7 +141,7 @@ surfaces. Its documented boundaries are:
 - [Gateway-to-Telos migration](docs/architecture/gateway-telos-endpoint-security-migration.md)
 - [Orchestrator-controller invariants](docs/architecture/orchestrator-controller-invariants.md)
 - [Outbound consumer authority ledger](docs/architecture/outbound-consumer-authority-ledger.md)
-- [M1 compatibility review, before qualification](docs/COMPATIBILITY_REVIEW_2026-10-09.md)
+- [M1 compatibility review](docs/COMPATIBILITY_REVIEW_2026-10-09.md) (historical; its pins predate the current generation)
 
 The local workspace proof of concept implements the first offline child slice:
 selected passages become an extractive CSV and a separately verifiable receipt
@@ -134,17 +159,17 @@ runtime dependency:
 - [Orama system v1 architecture map](https://github.com/diazMelgarejo/orama-system/blob/main/ARCHITECTURE.md)
 - [MiniGraph reconciliation](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/57-minigraph-final-reconciliation.md)
 - [Policy ownership decision](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/loop-graph-compatibility-2026-10-09/ADR-D-LG-1-POLICY-OWNERSHIP.md)
-- [Oramasys mastery standard](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/ORAMASYS-MASTERY-v3.md)
+- [Oramasys mastery methodology](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/references/ORAMASYS-MASTERY-v3.md) (review draft)
 
 The PT loop/graph closure and Phase 0 LLM Wiki remain secondary reference
 matches, not v2 authority:
 
 - [PT loop/graph closure record](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/.agent/memory/working/LOOP_GRAPH_REVISION4_CLOSURE_2026-10-09.md):
-  current qualification, ownership split, evidence rules, and open limits.
+  historical ownership split, evidence rules, and then-open limits; the
+  [later retrospective](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/.agent/memory/working/LOOP_GRAPH_SAGA_RETROSPECTIVE_2026-10-10.md) records the merged outcome.
 - [Phase 0 LLM Wiki graph](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/docs/phase-0-specifications/wiki/README.md)
   and [typed edges](https://github.com/diazMelgarejo/Perpetua-Tools/blob/main/docs/phase-0-specifications/wiki/edges.md):
-  an inspectable graph of files, concepts, decisions, implementation, evidence,
-  handoffs, and security policy.
+  the historical July 2026 STM/mesh-security document graph.
 
 ## Readiness Boundary
 

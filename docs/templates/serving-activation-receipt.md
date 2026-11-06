@@ -9,6 +9,13 @@
 - `ORAMA_GRANT_SERVING` state at qualification (must be unset):
 - Archive medium and retention owner:
 - Registry authority key ceremony reference:
+- R4 actual-identity access-denial evidence reference:
+- R5 installed-set and R5(b) actual loaded configuration/policy evidence references:
+- R6 independent review artifact and exact producer / consumer / configuration revisions:
+- R7 authorized operator decision, immutable generation and paired pin references:
+- R8 canary scope, owner, expiry, monitoring and tested rollback references:
+- Applicable activation approval record, including D6 where required:
+- Actual serving entrypoint and evidence that its dispatch store uses `governed=True`:
 - Independent reviewer (name, date, decision):
 - Independent reviewer signature, or reference to the separately signed review artifact:
 - Operator decision (activate / hold):

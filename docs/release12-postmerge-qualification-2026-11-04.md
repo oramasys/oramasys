@@ -1,5 +1,13 @@
 # Approved next-slice qualification and handoff
 
+> **2026-11-06 readback:** [Oramasys #92](https://github.com/oramasys/oramasys/pull/92)
+> and [Phylax #31](https://github.com/oramasys/phylax/pull/31) have merged. The
+> draft references below describe the publication-time snapshot. Their merges
+> do not close actual-host R4/R5, independent R6, operator R7 or separate R8.
+> R1–R3 have candidate software and source-test evidence in this record; do not
+> infer production qualification merely from their omission in the open-gate list.
+> The [operator runbook](serving-activation-runbook.md) routes the remaining gates.
+
 Plan date: 2026-11-04 Asia/Manila. Execution: 2026-11-03 UTC.
 Status: implemented software candidate and reviewed design subset; R4–R8 remain open.
 

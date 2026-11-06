@@ -17,6 +17,34 @@ It runs `qualify_serving_identity.py`, `verify_installed_identity.py` and `verif
 `python -I` from a scratch directory, prints the resolved input paths (the reviewer compares them with the service configuration), each exit code and output digest, and refuses if the switch is set.
 Exit 0 means evidence was printed, not that activation is approved.
 
+## Required qualification gates before the receipt and activation
+
+The current [qualification handoff](release12-postmerge-qualification-2026-11-04.md)
+records R4–R8 as open at its cutoff. Reconcile newer signed evidence and exact
+producer, consumer, installed-artifact and configuration revisions before treating
+any gate as complete. A successful evidence script alone does not close them:
+
+1. **R4 and R5:** demonstrate access denial under the actual serving identity and
+   verify the installed set. R5(b) also needs a reviewed collector outside the
+   checkout that binds the configuration and policy actually consumed by the
+   service to that installed set and identity; the public topology projection
+   alone is not that receipt.
+2. **R6:** obtain an independent review of the exact producer, consumer and
+   deployment configuration after the host evidence is available.
+3. **R7:** the authorized operator decides whether to create a new immutable
+   generation and paired production/test pins after the preceding gates. Prior
+   approvals for other candidates are not approval of this generation.
+4. **R8:** activation is a separate operator decision with a scoped canary,
+   expiry, monitoring and a tested rollback. Record the applicable approval
+   record, including D6 where the governing activation plan requires it.
+
+Verify the actual serving entrypoint constructs its dispatch store with
+`governed=True`; the underlying store defaults to `False`. Neither a green CI
+run nor a filled template proves that the deployed entrypoint enforces this.
+Keep serving disabled if any required gate is missing or cannot be verified.
+The R3/R4 names in graph compatibility documents describe a different gate
+series (reducers/joins and durable resume), not these Release 1–2 gates.
+
 ## 3. Receipt
 Fill `docs/templates/serving-activation-receipt.md` from `serving-evidence.txt`; the independent reviewer signs
 separately. The operator, not an agent, decides whether to set the switch afterwards.

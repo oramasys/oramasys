@@ -1,5 +1,9 @@
 # Gateway endpoint security → Telos migration
 
+> **2026-11-06:** Pin values in this historical migration record may be stale;
+> use the reviewed immutable dependencies in [`pyproject.toml`](../../pyproject.toml)
+> and the applicable qualification generation for current evidence.
+
 ## Status
 
 The Oramasys Gateway dedicated dialer has been absorbed into `oramasys/telos`.

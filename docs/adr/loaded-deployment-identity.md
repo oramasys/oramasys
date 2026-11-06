@@ -1,6 +1,8 @@
 # Loaded deployment identity
 
-**Status:** proposed design for review; no implementation, host qualification, or activation.
+**Status:** reviewed design with a bounded loader-only implementation; actual
+host qualification, binding to later service consumption, and activation remain open.
+See the [qualification handoff](../release12-postmerge-qualification-2026-11-04.md).
 
 **Baseline:** consumer `9ca04b3fd7176a83403dffe8ec158c84ae794949`.
 
