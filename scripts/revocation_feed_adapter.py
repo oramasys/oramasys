@@ -228,6 +228,10 @@ class RevocationFeedAdapter:
             return state, None
         return state, _SnapshotMemo(raw, feed, after, state)
 
+    def _require_fresh(self, state: VerifiedState, at: datetime) -> None:
+        """Apply the producer freshness rule verify_state applies; raise when stale or future."""
+        CombinedRevocationLookup(state, clock=lambda: at, max_age_seconds=self._max_age).reason("", None)
+
     def _cached(self, db: sqlite3.Connection, *, now: datetime | None = None) -> VerifiedState | None:
         """Return the cached snapshot, reverifying unless exact bytes and trust are unchanged.
 
@@ -247,9 +251,7 @@ class RevocationFeedAdapter:
         if memo is not None and memo.matches(raw, feed) \
                 and self._trust([key_id for key_id, _ in memo.trust]) == memo.trust:
             if now is not None:
-                # Same producer freshness rule verify_state applies; raises when stale.
-                CombinedRevocationLookup(memo.state, clock=lambda: now,
-                                         max_age_seconds=self._max_age).reason("", None)
+                self._require_fresh(memo.state, now)
             return memo.state
         self._snapshot_memo = None
         events, canonical = self._copy_feed(json.loads(feed))
@@ -259,6 +261,34 @@ class RevocationFeedAdapter:
         state, memo = self._verify_and_remember(raw, feed, events, at)
         self._snapshot_memo = memo
         return state
+
+    def _prewarm(self, now: datetime) -> None:
+        """Fully verify a changed cached snapshot before taking the cache write lock.
+
+        Only an optimization: it installs a reuse record bound to the exact bytes and trust it
+        verified, and the locked lookup still rechecks bytes, trust, clock and freshness. Any
+        failure here is ignored so that the locked path makes the fail-closed decision.
+        """
+        try:
+            with closing(self._connect()) as db:
+                row = db.execute("SELECT raw_state, feed FROM verified_snapshot WHERE issuer_id=?",
+                                 (self._issuer,)).fetchone()
+            if row is None or not isinstance(row[0], bytes) or not isinstance(row[1], bytes):
+                return
+            raw, feed = row
+            memo = self._snapshot_memo
+            if memo is not None and memo.matches(raw, feed):
+                return
+            if len(raw) > MAX_STATE_BYTES or len(feed) > self._max_bytes:
+                return
+            events, canonical = self._copy_feed(json.loads(feed))
+            if canonical != feed:
+                return
+            _, memo = self._verify_and_remember(raw, feed, events, now)
+            if memo is not None:
+                self._snapshot_memo = memo
+        except Exception:  # noqa: BLE001 - the locked path decides and fails closed
+            return
 
     def _final_time(
         self, db: sqlite3.Connection, started: datetime, state: VerifiedState,
@@ -285,7 +315,6 @@ class RevocationFeedAdapter:
         """
         with self._refresh_lock:
             self._ready = False
-            self._snapshot_memo = None
             try:
                 self._refresh_locked(raw_state, events)
             except BaseException:
@@ -300,6 +329,9 @@ class RevocationFeedAdapter:
             raise ValueError("state exceeds byte bound or is not bytes")
         raw = bytes(raw_state)
         chain, feed = self._copy_feed(events)
+        # Full replay of the caller's input happens before the cache write lock; trust is
+        # resampled under the lock and any change forces a locked re-verification.
+        state, memo = self._verify_and_remember(raw, feed, chain, now)
         with self._transaction() as db:
             locked_now = self._clock()
             wire.timestamp(locked_now)
@@ -307,7 +339,9 @@ class RevocationFeedAdapter:
                 raise ValueError("clock rollback during refresh")
             now = locked_now
             self._check_time(db, now)
-            state, memo = self._verify_and_remember(raw, feed, chain, now)
+            if memo is None or self._trust([key_id for key_id, _ in memo.trust]) != memo.trust:
+                state, memo = self._verify_and_remember(raw, feed, chain, now)
+            self._require_fresh(state, now)
             old = self._cached(db)
             if old:
                 if state.head_version < old.head_version or state.generated_at < old.generated_at:
@@ -344,6 +378,7 @@ class RevocationFeedAdapter:
             if not self._ready:
                 raise RevocationUnavailable("revocation feed has not completed a fresh refresh")
             wire.validate_identifier("grant_id", grant_id)
+            self._prewarm(self._clock())
             now = self._observe_time()
             unavailable: str | None = None
             decision: bool | None = None
