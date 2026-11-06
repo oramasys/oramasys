@@ -14,15 +14,24 @@ navigation and design guidance, not a runtime-readiness claim.
 
 ```
 bin/            # thin executables (bin/serve → uvicorn orama.api.server:app)
-scripts/        # repo tooling (Telos authority check; reporting/ PR comment+summary)
+scripts/        # repo tooling (Telos authority check; reporting/ PR comment+summary;
+                #   qualification, operator serving-evidence and grant composition scripts)
+config/         # example serving profile
+docs/           # contracts, ADRs, runbooks and dated evidence records
+requirements/   # compatibility pins, generations and qualification records
+tests/oracles/  # isolated framework compatibility oracles
 src/
   orama/        # the package (import orama)
     api/        # FastAPI surface (server.py: app) + authz/ (S-AuthZ)
     auth/       # AuthManager, binding store, optional AuthProviders
+    compat/     # explicit compatibility facades; importing activates nothing
+    deploy/     # serving deployment profile and loaded-identity observation
+    discovery/  # Telos-backed health probes + backend registry I/O
     gateway/    # Gateway Lifecycle orchestration + owner ports (outbound dialer; not docs search)
     graph/      # orchestration graph + perpetua dispatch bridge
     knowledge/  # read-only docs search (HTTP + MCP search_docs + A2A), static /knowledge page
-    providers/  # application-facing provider invocation contracts
+    providers/  # provider invocation contracts, outbound ledger, dark foreign transport
+    workspace/  # offline local-workspace artifact workflow and verifier
   tests/        # test suite (pytest)
 Makefile        # dev-install / test
 LICENSE
@@ -47,7 +56,9 @@ bin/serve                           # run the API
 
 Requires Python ≥ 3.11. `make dev-install`/`make test` still support a sibling
 `../perpetua-core` checkout for fast local iteration. `pyproject.toml` also pins
-Core and Telos by immutable Git commit so clean CI installs are reproducible.
+Core, Telos and Agate by immutable Git commit so clean CI installs are
+reproducible. Phylax is not a base dependency: the opt-in `grant-serving` extra
+pins it for script-side composition outside `src/orama`.
 
 ## Control-plane auth (S-AuthZ)
 
@@ -146,7 +157,9 @@ The caller injects semantic-owner adapters:
 - Phylax verifies pinned artifact provenance and integrity, redacts event
   details, and decides runtime admission;
 - Agate resolves hardware placement;
-- Claude-Desktop-LLM operates Ollama or LM Studio and reports readiness.
+- Claude-Desktop-LLM operates Ollama or LM Studio and reports readiness
+  (injected as `ClaudeProviderPort`; a caller-supplied adapter, not a
+  constellation authority in [ARCHITECTURE.md](ARCHITECTURE.md)).
 
 Requests require explicit operator consent scoped to the artifact id, exact
 version, and `sha256:<64 lowercase hex>` digest. Mutable versions such as
@@ -163,6 +176,9 @@ fallback.
 
 `orama.providers` defines immutable application-facing provider invocation
 contracts. `build_graph(..., provider_invoker=None)` preserves the current
-Phase-2 no-network behavior. A future concrete provider invoker must use Telos
+Phase-2 no-network behavior. A concrete provider invoker must use Telos
 for outbound transport rather than importing a raw HTTP/socket client into
-Oramasys production code.
+Oramasys production code. `orama.providers.foreign_transport.GuardedForeignInvoker`
+is such an invoker: it ships dark (the default configuration refuses every
+call) and dials only through an injected port that must be Telos-backed; see
+[the transport contract](docs/foreign-provider-transport.md).
