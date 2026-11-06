@@ -1,19 +1,26 @@
 """Unit regressions for benchmark workload construction, not C6 measurements."""
 from pathlib import Path
+import importlib
+from types import ModuleType
 
-from benchmark_revocation_availability import Feed
-import benchmark_revocation_availability as benchmark
 import pytest
 
 
-def test_refresh_snapshot_stays_within_configured_feed_size(tmp_path: Path) -> None:
+@pytest.fixture
+def benchmark(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Import the standalone script and its sibling adapter without global path changes."""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
+    return importlib.import_module("benchmark_revocation_availability")
+
+
+def test_refresh_snapshot_stays_within_configured_feed_size(tmp_path: Path, benchmark: ModuleType) -> None:
     """Refreshing a 2-event cell never grows beyond its declared workload."""
-    feed = Feed(tmp_path, 2)
+    feed = benchmark.Feed(tmp_path, 2)
     assert len(feed.snapshot()[1]) == 2
     assert len(feed.snapshot()[1]) == 2
 
 
-def test_snapshot_failure_is_counted() -> None:
+def test_snapshot_failure_is_counted(benchmark: ModuleType) -> None:
     """A snapshot construction failure is reported as a failed refresh."""
     class BrokenFeed:
         """Feed whose snapshot construction fails."""
@@ -27,7 +34,7 @@ def test_snapshot_failure_is_counted() -> None:
     assert failures == {"OSError": 1}
 
 
-def test_refresh_thread_timeout_is_not_success() -> None:
+def test_refresh_thread_timeout_is_not_success(benchmark: ModuleType) -> None:
     """A still-running refresher cannot be reported as a completed cell."""
     class StuckThread:
         """Represent a refresher that does not stop."""
