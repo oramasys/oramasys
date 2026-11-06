@@ -1,5 +1,9 @@
 # Outbound Consumer Authority Ledger
 
+> **2026-11-06:** The earlier absence claim below predates
+> [`GuardedForeignInvoker`](../../src/orama/providers/foreign_transport.py).
+> Its presence does not qualify a real provider deployment or bypass Telos authority.
+
 Status: current static inventory. This document records authority boundaries;
 it is not a runtime dispatch or financial ledger.
 
