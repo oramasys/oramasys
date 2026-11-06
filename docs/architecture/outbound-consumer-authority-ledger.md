@@ -12,7 +12,8 @@
 > The standalone `JsonlOutboundLedger` has an async `record` and requires an adapter
 > for graph use; it cannot be injected directly. `JsonlOutboundLedger`
 > (`src/orama/providers/outbound_ledger.py`) is append-only and coordinates writers
-> within one process only. Neither is wired into a default serving path, and no
+> only within one instance. Separate instances writing the same path require external
+> coordination, even within one process. Neither is wired into a default serving path, and no
 > owner-defined persistence and retention authority has been recorded.
 
 Status: current static inventory. This document records authority boundaries;
