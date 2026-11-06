@@ -1,6 +1,7 @@
 # Orchestrator Controller Invariants (module home)
 
-> **Status:** v2.1 design; no runtime code exists yet
+> **Status:** partial implementation: claim store, expiry, ports, outbox; not reviewed, not deployed
+> ([claim contract](orchestrator-controller-claim-contract.md))
 > **Module (definitive home):** `src/orama/orchestrator_controller/`
 > **Normative spec:** [`68-orchestrator-controller-satellite.md`](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/68-orchestrator-controller-satellite.md)
 

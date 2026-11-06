@@ -106,7 +106,7 @@ def test_lineage_is_allowlisted() -> None:
     ok = request(lineage={"on_behalf_of": "agent-z", "takeover": True})
     assert ok.lineage_dict() == {"on_behalf_of": "agent-z", "takeover": True}
     assert _refused(raw(lineage={"workspace": "x"})).status == 400
-    assert _refused(raw(lineage={"prior_agent": "/home/agent"})).status == 400
+    assert _refused(raw(lineage={"prior_agent": "/opt/agent"})).status == 400
     assert _refused(raw(lineage="agent-z")).status == 400
 
 

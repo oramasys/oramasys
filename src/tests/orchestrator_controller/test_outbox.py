@@ -108,7 +108,7 @@ def test_outbox_row_and_audit_row_share_the_event(store) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["/home/x", "~/x", "C:\\x", "x\\y", "10.0.0.7", "box:8080", "fe80::1", "localhost",
+    ["/opt/x", "~/x", "C:\\x", "x\\y", "10.0.0.7", "box:8080", "fe80::1", "localhost",
      "build.local", "nas.lan", "svc.internal", "router.home"],
 )
 def test_ic22_topology_fragments_are_detected(value) -> None:

@@ -1,9 +1,9 @@
 # Orchestrator Controller Claim Contract (v2, executable)
 
-> **Status:** contract for register row C2 (v2 claim contract part); the
-> implementation in `src/orama/orchestrator_controller/` follows in later commits.
-> Not reviewed, not deployed, not activated. C3d (security review, legacy-job
-> disposition, rollback and operational runbook acceptance) is **not closed**.
+> **Status:** partial implementation of register rows C2 (v2 claim contract part),
+> C2a, C3, C3a, C3b and C3c in `src/orama/orchestrator_controller/`. Not reviewed,
+> not deployed, not activated; no serving path composes it. C3d (security review,
+> legacy-job disposition, rollback and operational runbook acceptance) is **not closed**.
 > **Normative design:** [doc 68](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/68-orchestrator-controller-satellite.md)
 > §1–§4, §8–§11 and invariants IC-1 … IC-29; claim kind mapping in
 > [doc 69 §7](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/69-agent-envelope-standard.md).
@@ -99,7 +99,7 @@ The claim kind panel is the doc 68 §4.2 request. Unknown fields are refused
 | --- | --- |
 | `schema_version` | exactly `"1"` |
 | `operation` | `claim`, `renew`, `complete`, `release`, `fail` |
-| `task_id`, `principal`, `idempotency_key` | opaque identifiers: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` |
+| `task_id`, `principal`, `idempotency_key` | opaque identifiers: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` that do not look like topology (§8 scan) |
 | `expected_task_version` | integer ≥ 1 |
 | `source_ref` | opaque reviewed ref, 1–200 chars, no leading `/` or `~`, no `\`, no `..` |
 | `expected_base_sha` | 7–40 lowercase hex (doc 69 §6) |
@@ -221,10 +221,12 @@ row (IC-25).
 The task mutation, its audit row and its outbox row commit in one transaction.
 Outbox payloads are built from an allowlist (`event_id`, `kind`, `task_id`,
 `task_version`, `state`, `lease_id`, `disposition`, `failure_class`,
-`occurred_at`, `lineage`) and then scanned for topology fragments (absolute or
+`occurred_at` as integer microseconds, `lineage`) and then scanned for topology fragments (absolute or
 home paths, backslashes, IPv4/IPv6 literals, `localhost`, `.local`/`.lan`/
-`.internal`/`.home` hosts, `host:port`); a match aborts the transaction. Each row
-carries the payload digest and the allowlist digest (IC-23 partial).
+`.internal`/`.home` hosts, `host:port`); a match aborts the transaction. The same
+scan rejects topology-shaped identifiers at intake, so in practice the outbox scan is
+defense in depth. Each row carries the payload digest and the allowlist digest; the
+publisher refuses a row whose digests no longer match (IC-23 partial).
 
 `OutboxPublisher.publish_pending` reads pending rows in sequence order, hands
 each to an `EventSink`, and marks it published only after the sink returns.
@@ -248,7 +250,7 @@ Tests live under `src/tests/orchestrator_controller/`.
 | IC-7 | Partial: claim envelope required fields carry no default. Common-header Tier U validator is owned by Core — not in this slice. | `test_envelope.py` |
 | IC-8 | Partial: unknown fields refused; Tier C header declaration is Core's — not in this slice. | `test_envelope.py` |
 | IC-9 | Not in this slice: the author/actor `lineage` requirement is a Core header validator. The controller persists supplied lineage in audit and outbox. | `test_conformance.py::test_lineage_*` |
-| IC-10 | Covered: a handoff successor needs its own capability; lineage grants nothing. | `test_conformance.py::test_ic10_*` |
+| IC-10 | Covered: a handoff successor needs its own capability; lineage grants nothing. | `test_ports.py::test_ic10_*` |
 | IC-11 | Covered: one transaction decides a claim; ten-worker races in threads and processes. | `test_store.py`, `test_conformance.py::test_ten_worker_*` |
 | IC-12 | Covered: claim scope is principal + operation + key; no workflow table exists. | `test_store.py::test_ic12_*` |
 | IC-13 | Covered: same request replays; changed content refused. | `test_store.py` |
@@ -259,7 +261,7 @@ Tests live under `src/tests/orchestrator_controller/`.
 | IC-18 | Covered: no client operation expires a lease; recovery needs the maintenance owner; clock high-water rule. | `test_expiry.py` |
 | IC-19 | Partial: source line required and mismatch refused. The worker-side fresh-worktree base proof is outside the controller. | `test_store.py`, `test_conformance.py` |
 | IC-20 | Not in this slice: legacy-job disposition is owner-held under C3d. | — |
-| IC-21 | Covered: allowlisted payloads; proof and token absent from audit and outbox. | `test_outbox.py`, `test_conformance.py` |
+| IC-21 | Covered: allowlisted payloads; proof and token absent from audit and outbox. | `test_outbox.py::test_ic21_*`, `test_ports.py::test_ic25_*` |
 | IC-22 | Covered for controller-emitted envelopes, receipts and events (topology scan). Published-document scans are repository hygiene, not this module. | `test_outbox.py::test_ic22_*` |
 | IC-23 | Partial: payload and allowlist digests on outbox rows; card-level tamper evidence is Core's header. | `test_outbox.py` |
 | IC-24 | Covered: vocabulary in §7; no generic success. | `test_ports.py`, `test_store.py` |
@@ -273,14 +275,14 @@ Tests live under `src/tests/orchestrator_controller/`.
 
 | Criterion | Evidence |
 | --- | --- |
-| Concurrent claims produce exactly one active lease | ten-worker thread and process races |
+| Concurrent claims produce exactly one active lease | `test_conformance.py::test_ten_worker_*` (one controller, ten connections, ten processes) |
 | Same idempotency request replays; changed reuse rejected | `test_store.py` |
 | Stale source line, lease, capability or version cannot mutate | `test_store.py`, `test_ports.py`, `test_expiry.py` |
 | Restart preserves pending outbox; no unexpired lease reissued | `test_outbox.py`, `test_conformance.py::test_ic17_*` |
 | Gossip replay cannot create, renew, complete or release | `test_outbox.py::test_ic5_*` |
 | Unauthorized, revoked, expired fail closed and are audited without proof | `test_ports.py` |
 | Event egress is redacted; topology scans clean | `test_outbox.py` |
-| Testable without v1 runtime repositories | `test_conformance.py::test_ic26_*` |
+| Testable without v1 runtime repositories | `test_conformance.py::test_section10_*`, `test_ic26_*` |
 
 ## 10. Rollback (draft, C3d not closed)
 
