@@ -1001,7 +1001,7 @@ def test_once_raising_key_resolver_refuses_current_operation(
 
     monkeypatch.setattr(lookup._keys, "_public_key_for", raises_once)
     if operation == "refresh":
-        with pytest.raises((OSError, MODULE.RevocationUnavailable)):
+        with pytest.raises(MODULE.RevocationUnavailable):
             lookup.refresh(*snapshot)
     else:
         unavailable(lookup)
