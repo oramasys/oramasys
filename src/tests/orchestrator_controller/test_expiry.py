@@ -351,6 +351,19 @@ def test_sweep_once_requires_a_started_worker(store) -> None:
         worker.sweep_once()
 
 
+def test_worker_records_runtime_error_from_sweep(store, monkeypatch) -> None:
+    """A runtime failure in the store leaves a failed, not phantom-running worker."""
+    def fail(*args: object, **kwargs: object) -> None:
+        """Simulate a store runtime failure after ownership acquisition."""
+        raise RuntimeError("store failed")
+
+    monkeypatch.setattr(store, "recover_expired", fail)
+    worker = ExpiryWorker(store, interval=0.01, batch_limit=10, owner_ttl=OWNER_TTL)
+    worker.start()
+    assert _wait_for(lambda: worker.status().state == "failed")
+    assert worker.stop().last_error_code == "RuntimeError"
+
+
 def test_clean_restart_resumes_recovery(tmp_path, clock) -> None:
     """After stop and reopen, a fresh worker recovers what expired while it was down."""
     store = open_store(tmp_path, clock)

@@ -24,6 +24,10 @@ from orama.orchestrator_controller.store import MAX_SWEEP_LIMIT, ControllerStore
 WorkerState = Literal["stopped", "running", "stopping", "fenced", "failed"]
 
 
+class _NotRunning(RuntimeError):
+    """The worker is not running when a sweep is requested."""
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerStatus:
     """A snapshot of the worker for operators: state, ownership and counters."""
@@ -128,7 +132,7 @@ class ExpiryWorker:
         """
         with self._state_lock:
             if self._epoch is None or self._state != "running":
-                raise RuntimeError("expiry worker is not running")
+                raise _NotRunning("expiry worker is not running")
             epoch = self._epoch
         receipts = self._store.recover_expired(
             self._owner_id, epoch, limit=self._batch_limit, owner_ttl=self._owner_ttl
@@ -149,7 +153,7 @@ class ExpiryWorker:
                     if refusal.code == "worker.fenced":
                         self._state = "fenced"
                         return
-            except RuntimeError:
+            except _NotRunning:
                 return
             except Exception as error:  # noqa: BLE001 - record and stop; never sweep blindly
                 with self._state_lock:
