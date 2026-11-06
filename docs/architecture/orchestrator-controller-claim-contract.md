@@ -315,7 +315,9 @@ read or written, so v1 coordination is unaffected by rollback.
 
 Missing for C3d: accepted security review, legacy-job disposition, accepted
 rollback and runbook, Telos/Phylax contract review, and real adapters composed
-outside `src/orama`.
+outside `src/orama`. The operator performs the C3d review and accepts the exact
+final SHA. A fresh interactive operator `gh auth login` is authentication evidence,
+not an independent review or acceptance by itself.
 
 ## 12. Out of this slice
 
