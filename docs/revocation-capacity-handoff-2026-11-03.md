@@ -1,5 +1,10 @@
 # Revocation capacity and merged-producer follow-up
 
+> **2026-11-06:** Next-gate items 1 and 2 have an implementation and container-only
+> measurements in the [availability budget proposal](revocation-availability-budget-proposal-2026-11-06.md).
+> The workload and budget there are proposed, not approved; target-filesystem measurement
+> remains owner-held. The body below is preserved as written.
+
 ## Sources and implementation
 
 Consumer baseline: [98b7568](https://github.com/oramasys/oramasys/commit/98b7568fa4bedbf59be788b62d2c7333f10535f4), merging #91.
