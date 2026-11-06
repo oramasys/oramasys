@@ -25,7 +25,7 @@ flowchart TB
     A -->|Phylax: compile and admit decisions| P[Phylax: security, grants, and provenance decisions]
     A -->|Agate: observed evidence and fit assessment| H[Agate: hardware placement decisions]
     A -.->|Satellite owner: retrieval and provenance contract planned| K[Knowledge and memory satellites]
-    A -.->|Controller: capability-gated claim lifecycle planned| OC[Orchestrator Controller: planned]
+    A -.->|Controller: capability-gated claim lifecycle, not wired| OC[Orchestrator Controller: partial, unreviewed]
     G -->|Oramasys: bound artifact and verification receipt| E[Evidence and audit receipts]
     E -->|Operator: inspect evidence and decide separately| O
 ```
@@ -82,7 +82,7 @@ shared mutable cache, or a collection of undocumented integrations.
 | Endpoint identity, address admission, egress, and peer verification | Telos | Gateway and discovery import Telos in process; ask for semantic authorization and do not add raw network clients. |
 | Grant verification, provenance, audit redaction, and principal/capability admission | Phylax | Optional grant-serving composition lives in `scripts/`, outside `src/orama`; remain fail-closed when a required verifier is absent. |
 | Hardware placement and local capability | Agate | Graph composition imports Agate in process; fit evidence is not authorization. |
-| Job claims, handoffs and job-claim leases | Planned v2 Orchestrator Controller | The [controller](docs/architecture/orchestrator-controller-invariants.md) is a design-only internal module; a standalone repository remains a later option only through [doc 68 §9](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/68-orchestrator-controller-satellite.md#9-repository-admission-and-delivery-gates). PT owns v1 coordination. Existing [execution run-lease fencing](src/orama/graph/execution_guard.py) is distinct and already implemented. |
+| Job claims, handoffs and job-claim leases | v2 Orchestrator Controller (partial implementation; not reviewed, wired or deployed) | The [controller](docs/architecture/orchestrator-controller-invariants.md) is an internal module: [`src/orama/orchestrator_controller/`](src/orama/orchestrator_controller/) implements the claim store, fenced expiry worker, fail-closed Telos/Phylax ports and transactional outbox under the [claim contract](docs/architecture/orchestrator-controller-claim-contract.md). Completion still requires the doc 68 §9 security review (C3d); nothing composes it into serving; a standalone repository remains a later option only through [doc 68 §9](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/68-orchestrator-controller-satellite.md#9-repository-admission-and-delivery-gates). PT owns v1 coordination. Existing [execution run-lease fencing](src/orama/graph/execution_guard.py) is distinct and already implemented. |
 | Local documentation search | Oramasys | The [knowledge surface](src/orama/knowledge/) provides read-only search and MCP/A2A routes. |
 | Configured memory and retrieval satellites | Dedicated owners | Planned boundaries require explicit contracts; label derived data and preserve provenance. |
 | Design decisions, ownership registry and capability schema | Orama `docs/v2` and `docs/schemas` | These are documentation and CI inputs, not v1 runtime dependencies. |
