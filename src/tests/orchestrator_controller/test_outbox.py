@@ -145,6 +145,7 @@ def test_egress_scan_failure_aborts_the_transition(store, monkeypatch) -> None:
     before = table_snapshot(store, *ALL_TABLES)
 
     def refuse(_payload) -> None:
+        """Stand in for a scan that finds a topology fragment."""
         raise EgressRefused("forced")
 
     monkeypatch.setattr(outbox_module, "assert_egress_safe", refuse)
@@ -225,6 +226,7 @@ def test_crash_between_send_and_mark_redelivers_the_same_event(tmp_path, clock, 
     sink = RecordingSink()
 
     def lost_mark(_event_id: str) -> bool:
+        """Simulate a process that dies after sending but before marking."""
         raise RuntimeError("process died before mark")
 
     monkeypatch.setattr(store, "mark_published", lost_mark)

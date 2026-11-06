@@ -302,6 +302,7 @@ def test_failure_inside_the_transaction_commits_nothing(store, monkeypatch) -> N
     before = table_snapshot(store, *ALL_TABLES)
 
     def explode(*_args, **_kwargs):
+        """Simulate a fault while the outbox row is built."""
         raise RuntimeError("outbox fault")
 
     monkeypatch.setattr(store_module, "build_redacted_payload", explode)
