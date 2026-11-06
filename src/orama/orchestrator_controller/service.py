@@ -107,7 +107,8 @@ class ControllerService:
         expires = decision.expires_at
         if not isinstance(expires, datetime) or expires.tzinfo is None or expires.utcoffset() is None:
             raise ClaimRefused("capability.unverifiable")
-        if now >= expires:
+        post_verify_now = self._clock()
+        if post_verify_now >= expires:
             raise ClaimRefused("capability.expired")
         if (
             request.operation not in decision.operations
@@ -115,7 +116,7 @@ class ControllerService:
             or decision.audience != self._audience
         ):
             raise ClaimRefused("capability.insufficient")
-        return Admission(principal_id=request.principal)
+        return Admission(principal_id=request.principal, expires_at=expires)
 
 
 def _hints(body: object) -> tuple[str, str | None]:

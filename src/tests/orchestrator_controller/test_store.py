@@ -158,6 +158,28 @@ def test_admission_must_match_the_request_principal(store) -> None:
     assert (caught.value.code, caught.value.status) == ("capability.principal_mismatch", 403)
 
 
+def test_admission_expired_at_lock_time_is_refused_and_preserves_clock_highwater(store, clock) -> None:
+    """If capability expiry elapses before or during store lock, claim is refused and clock highwater is kept."""
+    expiry = clock.now + timedelta(seconds=5)
+    admission = Admission(principal_id="agent-a", expires_at=expiry)
+
+    # Store clock advances past expiry before lock/transaction time
+    clock.now = expiry + timedelta(seconds=1)
+
+    with pytest.raises(ClaimRefused) as caught:
+        store.apply_admitted(request(), admission)
+    assert (caught.value.code, caught.value.status) == ("capability.expired", 401)
+
+    # Task remains unclaimed
+    assert store.task("task-1").state == "pending"
+    # Idempotency table remains empty
+    assert _count(store, "idempotency") == 0
+    # Clock highwater mark was committed and preserved
+    with store._lock:
+        row = store._db.execute("SELECT value FROM controller_meta WHERE key = 'clock_highwater'").fetchone()
+    assert row is not None and int(row[0]) == store_module.to_micros(clock.now)
+
+
 # --- idempotency -----------------------------------------------------------------------------
 
 

@@ -70,6 +70,7 @@ class Admission:
     """What the service proved about a request before handing it to the store."""
 
     principal_id: str
+    expires_at: datetime | None = None
     policy_version: str = POLICY_VERSION
 
 
@@ -356,6 +357,8 @@ class ControllerStore:
 
         def body(db: sqlite3.Connection, now: int) -> ClaimReceipt:
             """Decide and apply the transition inside the open transaction."""
+            if admission.expires_at is not None and now >= to_micros(admission.expires_at):
+                raise ClaimRefused("capability.expired")
             stored = db.execute(
                 "SELECT request_digest, receipt_json FROM idempotency"
                 " WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",

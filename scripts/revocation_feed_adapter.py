@@ -226,7 +226,7 @@ class RevocationFeedAdapter:
         state = self._verify(raw, events, at)
         after = self._trust(key_ids)
         if before is None or before != after:
-            return state, None
+            raise RevocationUnavailable("unstable or untrusted key trust during verification")
         return state, _SnapshotMemo(raw, feed, after, state)
 
     def _require_fresh(self, state: VerifiedState, at: datetime) -> None:

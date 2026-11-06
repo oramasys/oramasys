@@ -870,3 +870,53 @@ def test_concurrent_lookups_replay_a_changed_snapshot_once(
         thread.join(10)
     assert replays == [1]
     assert answers == [True] * 4
+
+
+@pytest.mark.parametrize("change", ["retired", "replaced"])
+def test_key_retirement_or_replacement_during_lookup_verification_fails_closed(
+    world: World, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """O2: Trust retiring or replacing while _verify runs must fail closed and never return allow."""
+    _, _, _, keys, adapter, signed = world
+    a = adapter()
+    a.refresh(*signed())
+    assert a.revoked("safe", ISSUER) is False
+
+    a._snapshot_memo = None
+    original_verify = a._verify
+
+    def verify_and_change_trust(raw: bytes, events: list[dict[str, Any]], now: datetime) -> Any:
+        state = original_verify(raw, events, now)
+        if change == "retired":
+            keys.pop((ISSUER, "key-1"))
+        else:
+            keys[(ISSUER, "key-1")] = crypto_sign_seed_keypair(b"9" * 32)[0]
+        return state
+
+    monkeypatch.setattr(a, "_verify", verify_and_change_trust)
+    unavailable(a)
+
+
+@pytest.mark.parametrize("change", ["retired", "replaced"])
+def test_key_retirement_or_replacement_during_refresh_verification_fails_closed(
+    world: World, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """O2: Trust retiring or replacing while refresh verifies must fail closed."""
+    _, store, _, keys, adapter, signed = world
+    a = adapter()
+    raw, events = signed()
+    original_verify = a._verify
+
+    def verify_and_change_trust(raw_bytes: bytes, evts: list[dict[str, Any]], now: datetime) -> Any:
+        state = original_verify(raw_bytes, evts, now)
+        if change == "retired":
+            keys.pop((ISSUER, "key-1"))
+        else:
+            keys[(ISSUER, "key-1")] = crypto_sign_seed_keypair(b"9" * 32)[0]
+        return state
+
+    monkeypatch.setattr(a, "_verify", verify_and_change_trust)
+    with pytest.raises(MODULE.RevocationUnavailable):
+        a.refresh(raw, events)
+    unavailable(a)
+    assert store.acked_through(ISSUER) == 0
