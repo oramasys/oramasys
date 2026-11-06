@@ -829,3 +829,44 @@ def test_refresh_rechecks_trust_after_taking_the_cache_write_lock(
     with sqlite3.connect(a.cache_path) as db:
         assert db.execute("SELECT COUNT(*) FROM verified_snapshot").fetchone()[0] == 0
     unavailable(a)
+
+
+def test_concurrent_lookups_replay_a_changed_snapshot_once(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threads that find the same changed snapshot share one full replay, not one each."""
+    import time as wall
+
+    producer, _, _, _, adapter, signed = world
+    reader, writer = adapter(), adapter()
+    reader.refresh(*signed())
+    producer.append_revocation("grant", "late", signer=Signer())
+    writer.refresh(*signed())
+    original = reader._verify
+    replays: list[int] = []
+
+    def slow(*args: Any) -> Any:
+        """Widen the replay window so concurrent lookups overlap it."""
+        replays.append(1)
+        wall.sleep(0.2)
+        return original(*args)
+
+    monkeypatch.setattr(reader, "_verify", slow)
+    start = threading.Barrier(4)
+    answers: list[bool | str] = []
+
+    def lookup() -> None:
+        """Start together, then record the decision or the unavailability."""
+        start.wait()
+        try:
+            answers.append(reader.revoked("late", ISSUER))
+        except MODULE.RevocationUnavailable:
+            answers.append("unavailable")
+
+    threads = [threading.Thread(target=lookup) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert replays == [1]
+    assert answers == [True] * 4
