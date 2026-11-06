@@ -10,7 +10,7 @@ import pytest
 @pytest.fixture
 def benchmark(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Import the standalone script and its sibling adapter without global path changes."""
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "scripts"))
     return importlib.import_module("benchmark_revocation_availability")
 
 
