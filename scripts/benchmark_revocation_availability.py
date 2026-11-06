@@ -2,9 +2,9 @@
 
 Each send is a full ``SealedInertDriver.send``: envelope check, final boundary (including the
 real ``RevocationFeedAdapter`` lookup over a real signed synthetic feed), transactional send
-start, in-process inert simulation and receipt settlement. A background refresher keeps the
-signed state fresh and appends one synthetic revocation per refresh, so cached bytes change and
-serving lookups must reverify. Every send attempt is counted; a retryable
+start, in-process inert simulation and receipt settlement. A background refresher re-signs a
+fixed-size synthetic feed, so cached state bytes change and serving lookups must reverify.
+New revocations during the measured window are not modelled. Every send attempt is counted; a retryable
 ``approval_verifier_unavailable`` refusal is retried up to ``--retries`` times because it does
 not burn the attempt.
 
@@ -98,14 +98,9 @@ class Feed:
             self.producer.append_revocation("grant", f"synthetic-{index}", signer=self.signer)
         self.lock = threading.Lock()
 
-    def snapshot(self, append: bool) -> tuple[bytes, list[dict[str, Any]]]:
-        """Optionally append one revocation, then sign the complete feed at the current time."""
+    def snapshot(self) -> tuple[bytes, list[dict[str, Any]]]:
+        """Sign the fixed-size complete feed at the current time."""
         with self.lock:
-            # Stay within the adapter's default 4096-event bound; every refresh still changes the
-            # signed state bytes (new generated_at), so serving lookups must reverify regardless.
-            if append and self.producer.current_counter() < 4096:
-                head = self.producer.current_counter()
-                self.producer.append_revocation("grant", f"refresh-{head + 1}", signer=self.signer)
             head = self.producer.current_counter()
             state = build_state(self.feed, issuer_id=ISSUER, head_version=head,
                                 signer=self.signer, now=datetime.now(UTC))
@@ -147,7 +142,7 @@ def measure(
         genuine = envelope()
         # Refresh only after slow fixture setup so the measured window starts fresh.
         started = time.perf_counter()
-        serving.refresh(*feed.snapshot(append=False))
+        serving.refresh(*feed.snapshot())
         initial_refresh = time.perf_counter() - started
         writer = serving if refresher == "same" else make_adapter()
 
@@ -158,7 +153,7 @@ def measure(
         def refresh_loop() -> None:
             """Refresh at a fixed cadence until senders finish, recording every outcome."""
             while not stop.wait(refresh_interval):
-                snapshot = feed.snapshot(append=True)
+                snapshot = feed.snapshot()
                 begin = time.perf_counter()
                 try:
                     writer.refresh(*snapshot)
