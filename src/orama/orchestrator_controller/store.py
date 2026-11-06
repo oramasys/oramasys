@@ -36,7 +36,7 @@ from orama.orchestrator_controller.envelope import (
     validate_source_ref,
 )
 from orama.orchestrator_controller.migrations import apply_migrations
-from orama.orchestrator_controller.outbox import ALLOWLIST_DIGEST, build_redacted_payload
+from orama.orchestrator_controller.outbox import ALLOWLIST_DIGEST, OutboxEvent, build_redacted_payload
 from orama.orchestrator_controller.refusals import ClaimRefused
 
 Clock = Callable[[], datetime]
@@ -617,13 +617,47 @@ class ControllerStore:
         )
         if event is None:
             return
-        fields = dict(event, event_id=event_id, occurred_at=from_micros(now).isoformat(), lineage=lineage)
+        fields = dict(event, event_id=event_id, occurred_at=now, lineage=lineage)
         payload, payload_digest = build_redacted_payload(fields)
         db.execute(
             "INSERT INTO outbox (event_id, kind, redacted_payload, payload_digest, allowlist_digest,"
             " created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (event_id, str(event["kind"]), payload, payload_digest, ALLOWLIST_DIGEST, now),
         )
+
+    def pending_outbox(self, limit: int) -> tuple[OutboxEvent, ...]:
+        """Return up to ``limit`` unpublished events in sequence order, integrity-checked."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT event_id, sequence, kind, redacted_payload, payload_digest, allowlist_digest"
+                " FROM outbox WHERE published_at IS NULL ORDER BY sequence LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(OutboxEvent.from_row(str(r[0]), int(r[1]), str(r[2]), str(r[3]), str(r[4]), str(r[5]))
+                     for r in rows)
+
+    def record_delivery_attempt(self, event_id: str) -> None:
+        """Count one delivery attempt for ``event_id``; this touches only the outbox row."""
+        with self._tx() as db:
+            db.execute(
+                "UPDATE outbox SET delivery_attempts = delivery_attempts + 1"
+                " WHERE event_id = ? AND published_at IS NULL",
+                (event_id,),
+            )
+
+    def mark_published(self, event_id: str) -> bool:
+        """Mark ``event_id`` delivered once; return whether this call marked it.
+
+        Re-marking, out-of-order marks and unknown ids are harmless: only
+        ``outbox.published_at`` can change, never claim state (IC-5).
+        """
+        with self._tx() as db:
+            now = self._now(db)
+            cursor = db.execute(
+                "UPDATE outbox SET published_at = ? WHERE event_id = ? AND published_at IS NULL",
+                (now, event_id),
+            )
+            return cursor.rowcount == 1
 
     def record_refusal(self, operation: str, principal_hint: str | None, code: str) -> None:
         """Audit a refused request without proof material (IC-25).

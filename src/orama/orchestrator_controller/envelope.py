@@ -33,6 +33,20 @@ _SOURCE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}")
 _BASE_SHA = re.compile(r"[0-9a-f]{7,40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{16,128}")
+_TOPOLOGY = re.compile(
+    r"""
+    ^[/~]                                         # absolute or home-relative path
+    | \\                                        # any backslash (Windows path)
+    | /(?:home|Users|root|tmp|var|private)/       # embedded POSIX path segments
+    | ^[A-Za-z]:                                  # drive letter
+    | (?<![0-9.])[0-9]{1,3}(?:\.[0-9]{1,3}){3}(?![0-9.])  # IPv4 literal
+    | ::                                          # IPv6 literal
+    | [A-Za-z0-9-]:[0-9]{1,5}(?![0-9])            # host:port
+    | (?:^|[^A-Za-z0-9])localhost(?:$|[^A-Za-z0-9])
+    | \.(?:local|lan|internal|home|localdomain)(?:$|[^A-Za-z0-9-])  # local host suffixes
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 _REQUIRED = (
     "schema_version",
@@ -57,13 +71,23 @@ _OPTIONAL = (
 _ALLOWED = frozenset(_REQUIRED + _OPTIONAL)
 
 
+def contains_topology(text: str) -> bool:
+    """Return whether ``text`` looks like a local path, IP literal, port or local hostname.
+
+    This is a defense-in-depth scan (IC-22), not a proof: an arbitrary bare hostname cannot
+    be distinguished from an opaque label.
+    """
+    return _TOPOLOGY.search(text) is not None
+
+
 def validate_opaque_id(value: object, name: str) -> str:
     """Return ``value`` when it is an opaque identifier; raise ``ValueError`` otherwise.
 
     Opaque identifiers have no path separators, colons, whitespace or leading punctuation,
-    so a local path, ``host:port`` or home-relative fragment cannot pass (IC-22).
+    and must not look like topology (IP literal, ``localhost``, local host suffix), so a
+    local path, ``host:port`` or hostname fragment cannot enter the store (IC-22).
     """
-    if not isinstance(value, str) or _OPAQUE_ID.fullmatch(value) is None:
+    if not isinstance(value, str) or _OPAQUE_ID.fullmatch(value) is None or contains_topology(value):
         raise ValueError(f"{name} must be an opaque identifier")
     return value
 
