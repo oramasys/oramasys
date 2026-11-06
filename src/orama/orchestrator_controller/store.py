@@ -44,6 +44,7 @@ POLICY_VERSION = "controller-claim-policy-v1"
 EFFECT_CLASSES: frozenset[str] = frozenset({"pure", "external"})
 MIN_LEASE_TTL = timedelta(seconds=1)
 MAX_LEASE_TTL = timedelta(days=1)
+MAX_SWEEP_LIMIT = 10_000
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MICRO = timedelta(microseconds=1)
 _READABLE_TABLES = frozenset(
@@ -128,6 +129,17 @@ class ClaimReceipt:
         body: dict[str, Any] = json.loads(text)
         expires = body.pop("lease_expires_at")
         return cls(**body, lease_expires_at=None if expires is None else from_micros(expires), replayed=True)
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryReceipt:
+    """The result of expiring one lease under the controller clock rule."""
+
+    task_id: str
+    lease_id: str
+    task_version: int
+    disposition: str
+    recovered_at: datetime
 
 
 class ControllerStore:
@@ -465,6 +477,122 @@ class ControllerStore:
                             task_version=version, task_state=task_state_after, lease_id=request.lease_id,
                             result_digest=request.result_digest, failure_class=request.failure_class)
 
+    # --- maintenance ownership and recovery (controller-only, IC-18) -----------------------
+
+    def acquire_maintenance(self, owner_id: str, *, ttl: timedelta) -> int:
+        """Become the one expiry owner for this database; return the new owner epoch.
+
+        Refused ``worker.owner_conflict`` while another owner's row is live. A row whose
+        expiry has passed (a crashed or stopped owner) is taken over with a higher epoch, which
+        fences the previous owner's later sweeps.
+        """
+        validate_opaque_id(owner_id, "owner_id")
+        ttl_us = _bounded_ttl(ttl)
+        with self._tx() as db:
+            now = self._now(db)
+            row = db.execute(
+                "SELECT owner_id, epoch, expires_at FROM maintenance_owner WHERE scope = 'expiry'"
+            ).fetchone()
+            if row is not None and now < int(row[2]) and row[0] != owner_id:
+                conflict = True
+            else:
+                conflict = False
+                epoch = 1 if row is None else int(row[1]) + 1
+                db.execute(
+                    "INSERT INTO maintenance_owner (scope, owner_id, epoch, expires_at)"
+                    " VALUES ('expiry', ?, ?, ?) ON CONFLICT (scope) DO UPDATE SET"
+                    " owner_id = excluded.owner_id, epoch = excluded.epoch, expires_at = excluded.expires_at",
+                    (owner_id, epoch, now + ttl_us),
+                )
+        if conflict:
+            raise ClaimRefused("worker.owner_conflict")
+        return epoch
+
+    def release_maintenance(self, owner_id: str, epoch: int) -> bool:
+        """Give up ownership if ``owner_id`` at ``epoch`` still holds it; return whether it did.
+
+        The row is kept with an expired deadline so the epoch stays monotonic.
+        """
+        with self._tx() as db:
+            now = self._now(db)
+            cursor = db.execute(
+                "UPDATE maintenance_owner SET expires_at = ?"
+                " WHERE scope = 'expiry' AND owner_id = ? AND epoch = ? AND expires_at > ?",
+                (now, owner_id, epoch, now),
+            )
+            return cursor.rowcount == 1
+
+    def recover_expired(
+        self, owner_id: str, epoch: int, *, limit: int, owner_ttl: timedelta
+    ) -> tuple[RecoveryReceipt, ...]:
+        """Expire at most ``limit`` leases whose controller-clock expiry has passed.
+
+        One transaction verifies that ``owner_id`` at ``epoch`` is the live maintenance owner
+        (else ``worker.fenced``), extends that ownership, and for each candidate re-verifies
+        with compare-and-set updates that the lease is still active and expired and that the
+        task is still claimed at the lease's fence version. Rows that fail that check are left
+        untouched. A ``pure`` task returns to ``pending``; an ``external`` task moves to
+        ``reconcile`` because expiry cannot prove its effects did not happen (IC-16).
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_SWEEP_LIMIT:
+            raise ValueError(f"limit must be an integer from 1 to {MAX_SWEEP_LIMIT}")
+        ttl_us = _bounded_ttl(owner_ttl)
+        fenced = False
+        receipts: list[RecoveryReceipt] = []
+        with self._tx() as db:
+            now = self._now(db)
+            owned = db.execute(
+                "UPDATE maintenance_owner SET expires_at = ?"
+                " WHERE scope = 'expiry' AND owner_id = ? AND epoch = ? AND expires_at > ?",
+                (now + ttl_us, owner_id, epoch, now),
+            )
+            if owned.rowcount != 1:
+                fenced = True
+            else:
+                candidates = db.execute(
+                    "SELECT l.lease_id, l.task_id, l.fence, t.effect_class FROM leases AS l"
+                    " JOIN tasks AS t ON t.task_id = l.task_id"
+                    " WHERE l.state = 'active' AND l.expires_at <= ?"
+                    " AND t.state = 'claimed' AND t.version = l.fence"
+                    " ORDER BY l.expires_at, l.lease_id LIMIT ?",
+                    (now, limit),
+                ).fetchall()
+                for lease_id, task_id, fence, effect_class in candidates:
+                    receipt = self._expire_one(db, now, str(lease_id), str(task_id), int(fence), str(effect_class))
+                    if receipt is not None:
+                        receipts.append(receipt)
+        if fenced:
+            raise ClaimRefused("worker.fenced")
+        return tuple(receipts)
+
+    def _expire_one(
+        self, db: sqlite3.Connection, now: int, lease_id: str, task_id: str, fence: int, effect_class: str
+    ) -> RecoveryReceipt | None:
+        """Expire one lease with compare-and-set checks; return ``None`` if anything moved."""
+        disposition = "pending" if effect_class == "pure" else "reconcile"
+        db.execute("SAVEPOINT expire_one")
+        lease = db.execute(
+            "UPDATE leases SET state = 'expired', ended_at = ?"
+            " WHERE lease_id = ? AND task_id = ? AND fence = ? AND state = 'active' AND expires_at <= ?",
+            (now, lease_id, task_id, fence, now),
+        )
+        task = db.execute(
+            "UPDATE tasks SET state = ?, version = ?, updated_at = ?"
+            " WHERE task_id = ? AND version = ? AND state = 'claimed'",
+            (disposition, fence + 1, now, task_id, fence),
+        )
+        if lease.rowcount != 1 or task.rowcount != 1:
+            db.execute("ROLLBACK TO expire_one")
+            db.execute("RELEASE expire_one")
+            return None
+        db.execute("RELEASE expire_one")
+        self._record(db, now, actor="controller-recovery", action="recover-expired", outcome="expired",
+                     lineage=None, policy_version=POLICY_VERSION,
+                     event={"kind": "claim.expired", "task_id": task_id, "task_version": fence + 1,
+                            "state": disposition, "lease_id": lease_id, "disposition": disposition})
+        return RecoveryReceipt(task_id=task_id, lease_id=lease_id, task_version=fence + 1,
+                               disposition=disposition, recovered_at=from_micros(now))
+
     # --- audit and outbox -----------------------------------------------------------------
 
     def _record(
@@ -525,6 +653,13 @@ _TASK_SELECT = (
 )
 
 
+def _bounded_ttl(ttl: timedelta) -> int:
+    """Return ``ttl`` in microseconds when it lies between one second and one day."""
+    if not isinstance(ttl, timedelta) or not MIN_LEASE_TTL <= ttl <= MAX_LEASE_TTL:
+        raise ValueError("ttl must be between one second and one day")
+    return ttl // _MICRO
+
+
 def _exactly_one(cursor: sqlite3.Cursor) -> None:
     """Assert a compare-and-set update changed exactly one row; otherwise abort the transaction."""
     if cursor.rowcount != 1:
@@ -535,7 +670,9 @@ __all__ = [
     "Admission",
     "ClaimReceipt",
     "ControllerStore",
+    "MAX_SWEEP_LIMIT",
     "POLICY_VERSION",
+    "RecoveryReceipt",
     "TaskView",
     "from_micros",
     "to_micros",
