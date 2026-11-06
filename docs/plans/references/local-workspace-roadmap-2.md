@@ -1,4 +1,9 @@
 # Roadmap 2: screenshot-grounded product architecture
+> **2026-11-06:** Preserved recommendation. Its repository table predates the
+> current ownership map: Core has no receipt module, and the workspace receipt
+> and verifier live in Oramasys `src/orama/workspace/`. See
+> [ARCHITECTURE.md](../../../ARCHITECTURE.md).
+
 Preserved recommendation from the preceding conversation; the subsequent implementation
 plan incorporates the user's choice to serve both audiences and configure privacy.
 

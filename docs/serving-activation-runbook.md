@@ -6,6 +6,12 @@ Nothing here activates serving. `ORAMA_GRANT_SERVING` stays **unset** until the 
 Dedicated serving UID; registry authority key ceremony done; archive medium and retention owner named;
 independent reviewer assigned; Phylax pin recorded; deployment files (seed, issuer DB, public state) in place.
 
+Recording the pin is not effect-authority evidence: the current verify-only pin
+(`requirements/compatibility-phylax-verify-only.txt`) is the recovery-grant verifier, which
+[cannot authenticate effect authority](release12-process-crash-evidence.md#remaining-release-gates).
+`serving_permitted` in `src/orama/deploy/profile.py` also requires a matching D6 approval record;
+its default matcher never matches, and no D6 record exists in this repository.
+
 ## 2. Run the evidence script (as the serving UID, on the serving host)
 ```bash
 export SERVING_UID SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN \

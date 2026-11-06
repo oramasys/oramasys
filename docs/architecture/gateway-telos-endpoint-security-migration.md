@@ -152,6 +152,12 @@ Historical Gateway absorption evidence:
 - Oramasys PR #5 merge commit:
   `539e112948a9a13d12d648464084bb0cf3c01f2a`.
 
+> **2026-11-06:** The list below is historical PR evidence. Its "verified"
+> wording applied to that PR's tree, not to current `main`. Current base pins
+> are read from [`pyproject.toml`](../../pyproject.toml) (Telos `931b6347…`,
+> Core `6d75cfe…`, Agate `172bfc3e…` at the time of this note); this note
+> re-states them without re-running the PR's verification.
+
 The outbound-convergence PR's own exact pins, verified directly against
 `pyproject.toml` and a real local test run, not merely asserted:
 

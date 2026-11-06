@@ -4,6 +4,25 @@ Status: draft requirements, 2026-10-29. This is a work list, not a qualification
 claim. Nothing here activates serving, effects, T3–T5 or remote autonomy, and
 no production pin is promoted by this document.
 
+> **2026-11-06 status (forward link):** This 2026-10-29 work list is superseded in
+> part by the [post-merge qualification handoff](release12-postmerge-qualification-2026-11-04.md).
+> The body below is preserved as written. "Candidate" means software and source tests
+> exist; it is not independent review, host qualification or activation.
+>
+> | Gate | Status | Evidence | Register row |
+> | --- | --- | --- | --- |
+> | R1 | Candidate | [Handoff readback](release12-postmerge-qualification-2026-11-04.md) states R1–R3 candidate software; repaired producer Phylax #31 merged as `1d2f2bb` | — |
+> | R2 | Candidate | [R3 synthesis handoff](release12-r3-synthesis-handoff-2026-11-02.md), [completion matrix](release12-r3-completion-matrix-2026-11-02.md) | — |
+> | R3 | Candidate | Same records; consumer publication Oramasys #92 merged as `f89f82c` | — |
+> | R4 | Open | No actual serving-identity evidence recorded | C8 |
+> | R5 | Open | (a) verifier scripts exist; (b) the [loaded-identity ADR](adr/loaded-deployment-identity.md) subset is loader-only and no reviewed collector exists | C7, C8 |
+> | R6 | Open | Same-session review is not independent R6 | C9 |
+> | R7 | Open | Production pins and accepted generations unchanged | C10 |
+> | R8 | Open | `ORAMA_GRANT_SERVING` unset; see the [runbook](serving-activation-runbook.md) | C11 |
+>
+> Register rows are those of the Orama master closure plan
+> (`docs/v2/MASTER-CLOSURE-AND-IMPLEMENTATION-PLAN-2026-11-06.md`). None of R1–R8 is closed.
+
 ## Established (software evidence only)
 
 - Evidence-mode run `40762683507` at harness `09cd1fb4bee8cbd7d29538620a3b4add49ef9221`:

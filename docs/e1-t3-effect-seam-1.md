@@ -1,5 +1,10 @@
 # E1 T3 first effect-authorization seam (consumer side)
 
+> **2026-11-06:** Historical seam record. Its `governed` limit is still live:
+> `SqliteAttemptStore` in `src/orama/graph/dispatch_attempts.py` still defaults
+> `governed` to `False`. The [serving activation runbook](serving-activation-runbook.md)
+> routes the `governed=True` check for the actual serving entrypoint.
+
 **Status:** implementation of the plan approved by the operator on 2026-10-19 against the ratified E1
 specification (`orama-system` main `59c623fa27497183d3a1c4ed19585d87623eae22`). It adds no provider
 transport, no retry, no serving, no pin change. `ORAMA_GRANT_SERVING` stays unset.
