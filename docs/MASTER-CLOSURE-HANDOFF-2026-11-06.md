@@ -14,8 +14,10 @@ Use `docs/revocation-capacity-handoff-2026-11-03.md`, the loaded-identity ADR an
 `docs/serving-activation-runbook.md`. Source tests, private topology projections
 and installed host qualification remain separately evidenced claims.
 
-C8–C11 follow actual identity/configuration evidence, independent R6 review,
-operator R7 generation approval and separate R8 activation. Ratified D3 requires
+C8 collects actual identity/configuration evidence on both platforms. C9/R6
+independently reviews that evidence at the exact revisions; C10/R7 then records
+the operator's generation/pin decision, followed by C11/R8's separate activation
+decision with canary, expiry and rollback. Ratified D3 requires
 POSIX and native Windows evidence before any promotion. No host or service
 manager is assumed here. Ratified D1 leaves PT manual and assigns automation
 only to v2 with explicit expiry and fencing. D2 retains compatibility shims.
