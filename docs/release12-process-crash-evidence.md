@@ -1,5 +1,9 @@
 # Release 1–2 inert process-crash evidence
 
+> **2026-11-06:** Historical evidence record. Its remaining-gate list is now
+> tracked as R1–R8 in the [remaining requirements](release12-remaining-requirements-2026-10-29.md)
+> and the [post-merge qualification handoff](release12-postmerge-qualification-2026-11-04.md).
+
 Status: draft candidate evidence; serving and production T3 remain unqualified.
 
 This extends PR #77's inert-driver tests on baseline

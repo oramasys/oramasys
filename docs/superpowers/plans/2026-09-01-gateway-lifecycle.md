@@ -1,5 +1,10 @@
 # Gateway Lifecycle Implementation Plan
 
+> **2026-11-06:** Historical implementation plan; unchecked boxes are not
+> current task state. `orama.gateway.GatewayLifecycle` is implemented; see the
+> [README](../../../README.md#gateway-lifecycle) and
+> [design spec](../specs/2026-09-01-gateway-lifecycle-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:subagent-driven-development` (recommended) or
 > `superpowers:executing-plans` to implement this plan task-by-task. Steps use

@@ -1,5 +1,10 @@
 # Gateway Dialer → Telos Absorption Implementation Plan
 
+> **2026-11-06:** Historical implementation plan; unchecked boxes are not
+> current task state. The absorption is recorded in the
+> [Gateway-to-Telos migration](../../architecture/gateway-telos-endpoint-security-migration.md)
+> and enforced by the [outbound authority ledger](../../architecture/outbound-consumer-authority-ledger.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Completely absorb Oramasys Gateway endpoint-security mechanics into Telos while preserving Gateway compatibility names as thin wrappers/pointers.

@@ -1,5 +1,12 @@
 # E1/C2 consumer slice 2
 
+> **2026-11-06:** Historical slice record, superseded in part. Later merged work
+> added candidate software for items listed below as "still not built", including
+> [execution witnesses](execution-witness.md) and retained signed permit/finalization
+> wires ([R3 synthesis handoff](release12-r3-synthesis-handoff-2026-11-02.md)).
+> Use the [post-merge qualification handoff](release12-postmerge-qualification-2026-11-04.md)
+> for current status; re-check source before relying on any item here.
+
 **Status:** implementation against the ratified E1 specification (`orama-system` main
 `59c623fa27497183d3a1c4ed19585d87623eae22`), stacked on the T3 first seam (PR 67). No provider transport,
 no serving, no pin change. `ORAMA_GRANT_SERVING` stays unset.
