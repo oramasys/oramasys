@@ -377,8 +377,9 @@ def test_clean_restart_resumes_recovery(tmp_path, clock) -> None:
     reopened = open_store(tmp_path, clock)
     restarted = ExpiryWorker(reopened, interval=1.0, batch_limit=10, owner_ttl=OWNER_TTL)
     restarted.start()
-    assert [r.lease_id for r in restarted.sweep_once()] == [claim.lease_id]
-    assert restarted.sweep_once() == ()
+    assert _wait_for(lambda: restarted.status().recovered == 1)
+    assert _lease_state(reopened, claim.lease_id) == "expired"
+    assert reopened.task("task-1").state == "pending"
     restarted.stop(timeout=5)
     reopened.close()
 
