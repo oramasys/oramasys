@@ -8,7 +8,9 @@
 > through an injected `DialPort` that must be Telos-backed, and keeps durable SQLite call/cost
 > holds tagged by `run_id` ([contract](../foreign-provider-transport.md)); the cap
 > counts all unreleased holds across the database. `build_graph`
-> also accepts an optional injected `OutboundLedger`; `JsonlOutboundLedger`
+> also accepts an optional injected `OutboundLedger` and calls `record` synchronously.
+> The standalone `JsonlOutboundLedger` has an async `record` and requires an adapter
+> for graph use; it cannot be injected directly. `JsonlOutboundLedger`
 > (`src/orama/providers/outbound_ledger.py`) is append-only and coordinates writers
 > within one process only. Neither is wired into a default serving path, and no
 > owner-defined persistence and retention authority has been recorded.
