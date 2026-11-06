@@ -123,7 +123,8 @@ class OutboxPublisher:
         """Deliver up to ``limit`` pending events in sequence order.
 
         A sink failure stops the pass and leaves that event and every later one pending. A
-        row that fails its integrity check raises ``OutboxIntegrityError`` and is not sent.
+        row that fails its integrity check raises ``OutboxIntegrityError`` before any
+        event in that batch is sent or its delivery attempt recorded.
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_PUBLISH_LIMIT:
             raise ValueError(f"limit must be an integer from 1 to {MAX_PUBLISH_LIMIT}")
