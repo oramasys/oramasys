@@ -206,7 +206,10 @@ class RevocationFeedAdapter:
         """Sample current trusted keys for ``key_ids``; None if any is no longer trusted."""
         sampled = []
         for key_id in key_ids:
-            key = self._keys.public_key(key_id)
+            try:
+                key = self._keys.public_key(key_id)
+            except Exception as exc:
+                raise RevocationUnavailable("issuer key resolver unavailable") from exc
             if key is None:
                 return None
             sampled.append((key_id, key))
@@ -270,7 +273,7 @@ class RevocationFeedAdapter:
 
         Only an optimization: it installs a reuse record bound to the exact bytes and trust it
         verified, and the locked lookup still rechecks bytes, trust, clock and freshness. Any
-        failures other than detected unstable trust are left to the locked path.
+        failures other than detected unstable or unavailable trust are left to the locked path.
         Concurrent lookups of one instance share a single replay (single flight): the others
         wait for it and then find a matching record.
         """

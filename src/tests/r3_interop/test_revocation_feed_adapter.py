@@ -975,3 +975,33 @@ def test_detected_transient_trust_change_refuses_without_retry(
     else:
         with pytest.raises(MODULE.RevocationUnavailable):
             lookup.refresh(*snapshot)
+
+
+@pytest.mark.parametrize("operation", ["prewarm", "warm", "refresh"])
+def test_once_raising_key_resolver_refuses_current_operation(
+    world: World, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    """A transient resolver outage cannot turn into an allow by retrying."""
+    _, _, _, _, adapter, signed = world
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    if operation == "prewarm":
+        lookup._snapshot_memo = None
+    original = lookup._keys._public_key_for
+    calls = 0
+
+    def raises_once(issuer: str, key: str) -> bytes | None:
+        """Fail the first trusted read and recover on later reads."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("resolver unavailable")
+        return original(issuer, key)
+
+    monkeypatch.setattr(lookup._keys, "_public_key_for", raises_once)
+    if operation == "refresh":
+        with pytest.raises((OSError, MODULE.RevocationUnavailable)):
+            lookup.refresh(*snapshot)
+    else:
+        unavailable(lookup)
