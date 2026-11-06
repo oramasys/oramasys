@@ -9,8 +9,10 @@ independent reviewer assigned; Phylax pin recorded; deployment files (seed, issu
 Recording the pin is not effect-authority evidence: the current verify-only pin
 (`requirements/compatibility-phylax-verify-only.txt`) is the recovery-grant verifier, which
 [cannot authenticate effect authority](release12-process-crash-evidence.md#remaining-release-gates).
-`serving_permitted` in `src/orama/deploy/profile.py` also requires a matching D6 approval record;
-its default matcher never matches, and no D6 record exists in this repository.
+`serving_permitted` in `src/orama/deploy/profile.py` requires its injected `approval_matcher`
+to return `True`; it does not itself read or validate a D6 record. Activation requires a trusted
+matcher wired to verify the applicable D6 record. The default matcher never matches, and no D6
+record exists in this repository.
 
 ## 2. Run the evidence script (as the serving UID, on the serving host)
 ```bash
