@@ -80,3 +80,22 @@ def test_unreviewed_migration_is_refused_before_it_runs(tmp_path, monkeypatch) -
     names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     db.close()
     assert "rogue" not in names and "tasks" not in names
+
+
+def test_refused_open_closes_its_connection(tmp_path) -> None:
+    """A store that refuses to open leaves no SQLite connection behind."""
+    import gc
+    import warnings
+
+    open_store(tmp_path).close()
+    db = sqlite3.connect(tmp_path / "state" / "controller.db")
+    db.execute("UPDATE schema_migrations SET digest = 'x' WHERE version = 1")
+    db.commit()
+    db.close()
+    gc.collect()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        with pytest.raises(MigrationRefused):
+            open_store(tmp_path)
+        gc.collect()
+    assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []

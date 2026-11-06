@@ -175,18 +175,22 @@ class ControllerStore:
         self._db = sqlite3.connect(
             str(prepared), isolation_level=None, check_same_thread=False, timeout=float(busy_timeout)
         )
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=FULL")
-        self._db.execute("PRAGMA foreign_keys=ON")
-        apply_migrations(self._db, to_micros(clock()))
-        with self._tx() as db:
-            db.execute(
-                "INSERT OR IGNORE INTO controller_meta (key, value) VALUES ('store_id', ?)",
-                (f"controller-store-{secrets.token_hex(16)}",),
-            )
-            self._store_id = str(
-                db.execute("SELECT value FROM controller_meta WHERE key = 'store_id'").fetchone()[0]
-            )
+        try:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=FULL")
+            self._db.execute("PRAGMA foreign_keys=ON")
+            apply_migrations(self._db, to_micros(clock()))
+            with self._tx() as db:
+                db.execute(
+                    "INSERT OR IGNORE INTO controller_meta (key, value) VALUES ('store_id', ?)",
+                    (f"controller-store-{secrets.token_hex(16)}",),
+                )
+                self._store_id = str(
+                    db.execute("SELECT value FROM controller_meta WHERE key = 'store_id'").fetchone()[0]
+                )
+        except BaseException:
+            self._db.close()
+            raise
 
     # --- lifecycle and introspection ------------------------------------------------------
 
