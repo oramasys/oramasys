@@ -65,6 +65,15 @@ Regressions in `src/tests/r3_interop/test_revocation_feed_adapter.py` (Phylax R3
 
 ## Benchmark harness
 
+**2026-11-06 harness correction:** The measured feed now remains at the
+configured event count, so a 256-event run does not exceed the ratified bound
+after refresh. Refresh re-signs that fixed-size feed; new revocations during
+the measurement window are not modelled. Snapshot-construction failures are
+counted, and an unfinished refresher prevents a successful result. The older
+container measurements below used the earlier append-on-refresh harness and
+are historical, not measurements of this corrected harness. A small synthetic
+CI smoke run proves only harness execution, never target-host C6 compliance.
+
 `scripts/benchmark_revocation_availability.py` (not part of the pytest suite). Each send is a
 complete `SealedInertDriver.send`:
 
@@ -74,8 +83,8 @@ complete `SealedInertDriver.send`:
 4. inert simulation
 5. receipt settlement
 
-A background refresher re-signs the state at wall time on a fixed cadence and appends one
-revocation while the feed is below 4096 events. Retryable `approval_verifier_unavailable` is
+A background refresher re-signs the fixed-size feed at wall time on a fixed
+cadence. Retryable `approval_verifier_unavailable` is
 retried up to `--retries` times with a 50 ms pause, because it does not burn the attempt. The
 harness reports p50, p95, p99, and maximum latency for successful sends, the first-try
 unavailable rate, the final error rate, and refresh latency and failures.
@@ -85,6 +94,15 @@ PYTHONPATH="src:$PHYLAX_SOURCE/src" python scripts/benchmark_revocation_availabi
   --events 256 4096 --senders 8 --sends 300 --send-interval 0.2 \
   --refresh-interval 15 --refresher separate --label "<filesystem description>"
 ```
+
+Before setup, the harness checks the process soft descriptor limit against
+`3 * (senders * sends + 3) + 3 * (senders + 2) + 128`, accounting conservatively
+for SQLite sidecars, concurrent cache connections and fixed headroom. Eight
+senders with 300 sends each require 7,367 descriptors. Insufficient capacity
+refuses before stores are created, with required/available counts. The harness
+never changes limits. Platforms without POSIX `resource` report capacity as
+`not_checked`; that is not qualification. Obtain an operator-approved process
+limit or reduce the workload explicitly, never silently alter approved inputs.
 
 Modelling limits:
 
@@ -183,7 +201,9 @@ fail-open; the regression tests cover that.
 ## Remaining limits and owner-held items
 
 - **Target filesystem (owner-held).** The deployment owner must select the host, OS, and
-  filesystem, then run the harness there with the confirmed workload. They should run it for
+  filesystem, then run the harness there with the confirmed workload. The operator
+  selected the Mac APFS data volume; native Windows remains separately pending.
+  Run only after final fixed-head CI and operator C3d acceptance. They should run it for
   long enough to resolve the error budget and record the label. This run is not that evidence.
 - **Operator confirmation (complete for specification only).** The workload and
   budget are ratified targets. This does not establish measured compliance;
