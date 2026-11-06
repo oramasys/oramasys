@@ -6,7 +6,8 @@
 > The "Explicit Gap" and "Dependency Boundary" absence statements are historical:
 > `GuardedForeignInvoker` is a concrete `ProviderInvoker` that ships dark, dials only
 > through an injected `DialPort` that must be Telos-backed, and keeps durable SQLite call/cost
-> holds keyed by `run_id` ([contract](../foreign-provider-transport.md)). `build_graph`
+> holds tagged by `run_id` ([contract](../foreign-provider-transport.md)); the cap
+> counts all unreleased holds across the database. `build_graph`
 > also accepts an optional injected `OutboundLedger`; `JsonlOutboundLedger`
 > (`src/orama/providers/outbound_ledger.py`) is append-only and coordinates writers
 > within one process only. Neither is wired into a default serving path, and no
