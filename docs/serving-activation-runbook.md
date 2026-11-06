@@ -1,10 +1,14 @@
 # Serving activation runbook (operator)
 
-Nothing here activates serving. `ORAMA_GRANT_SERVING` stays **unset** until the operator ratifies the receipt.
+Nothing here activates serving. `ORAMA_GRANT_SERVING` stays **unset** until the
+operator ratifies the receipt.
 
 ## 1. Preconditions the operator owns
+
 Dedicated serving UID; registry authority key ceremony done; archive medium and retention owner named;
-independent reviewer assigned; Phylax pin recorded; deployment files (seed, issuer DB, public state) in place.
+independent reviewer assigned for Release R6; Phylax pin recorded; deployment
+files (seed, issuer DB, public state) in place. This is distinct from the
+operator-only C3d controller review.
 
 Recording the pin is not effect-authority evidence: the current verify-only pin
 (`requirements/compatibility-phylax-verify-only.txt`) is the recovery-grant verifier, which
@@ -15,14 +19,18 @@ matcher wired to verify the applicable D6 record. The default matcher never matc
 record exists in this repository.
 
 ## 2. Run the evidence script (as the serving UID, on the serving host)
+
 ```bash
 export SERVING_UID SEED_FILE ISSUER_DB PUBLIC_STATE INSTALL_PLAN \
        CONSUMER_WHEEL CONSUMER_PROVENANCE PHYLAX_PIN_FILE ORAMASYS_CHECKOUT PYTHON
 set -o pipefail   # keep the script's non-zero exit when tee succeeds
 bash "$ORAMASYS_CHECKOUT/scripts/operator_serving_checks.sh" 2>&1 | tee serving-evidence.txt
 ```
+
 It runs `qualify_serving_identity.py`, `verify_installed_identity.py` and `verify_phylax_pin.py` under
-`python -I` from a scratch directory, prints the resolved input paths (the reviewer compares them with the service configuration), each exit code and output digest, and refuses if the switch is set.
+`python -I` from a scratch directory, prints the resolved input paths (the reviewer
+compares them with the service configuration), each exit code and output digest,
+and refuses if the switch is set.
 Exit 0 means evidence was printed, not that activation is approved.
 
 ## Required qualification gates before the receipt and activation
@@ -54,8 +62,11 @@ The R3/R4 names in graph compatibility documents describe a different gate
 series (reducers/joins and durable resume), not these Release 1–2 gates.
 
 ## 3. Receipt
-Fill `docs/templates/serving-activation-receipt.md` from `serving-evidence.txt`; the independent reviewer signs
-separately. The operator, not an agent, decides whether to set the switch afterwards.
+
+Fill `docs/templates/serving-activation-receipt.md` from `serving-evidence.txt`;
+the independent Release R6 reviewer signs separately. The operator, not an
+agent, decides whether to set the switch afterwards.
 
 ## 4. Rollback
+
 Unset `ORAMA_GRANT_SERVING` and restart the service; no data migration is involved.

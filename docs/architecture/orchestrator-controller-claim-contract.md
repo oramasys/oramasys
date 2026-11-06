@@ -229,8 +229,8 @@ row (IC-25).
 The task mutation, its audit row and its outbox row commit in one transaction.
 Outbox payloads are built from an allowlist (`event_id`, `kind`, `task_id`,
 `task_version`, `state`, `lease_id`, `disposition`, `failure_class`,
-`occurred_at` as integer microseconds, `lineage`) and then scanned for topology fragments (absolute or
-home paths, backslashes, IPv4/IPv6 literals, `localhost`, `.local`/`.lan`/
+`occurred_at` as integer microseconds, `lineage`) and then scanned for topology
+fragments (absolute or home paths, backslashes, IPv4/IPv6 literals, `localhost`, `.local`/`.lan`/
 `.internal`/`.home` hosts, `host:port`); a match aborts the transaction. The same
 scan rejects topology-shaped identifiers at intake, so in practice the outbox scan is
 defense in depth. Each row carries the payload digest and the allowlist digest; the

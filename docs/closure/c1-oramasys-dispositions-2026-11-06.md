@@ -86,5 +86,9 @@ does not review, qualify, approve or activate anything; R4–R8 stay open.
 - **R7 generation/pin decision:** operator, C10.
 - **R8 activation:** operator, C11.
 - **`governed` default:** runtime owner. Code is unchanged here.
-- **Controller:** partially implemented and not wired or deployed. C3d remains open for operator review and acceptance of the exact final SHA, legacy-job disposition, rollback and runbook acceptance, and contract review; real adapters and serving composition remain outside this slice.
-- **Future policy backlog:** make an independent reviewer configurable, defaulting to operator-only review. This does not change doc 68 or runtime policy in this closure.
+- **Controller:** partially implemented and not wired or deployed. C3d remains open for
+  operator review and acceptance of the exact final SHA, legacy-job disposition,
+  rollback and runbook acceptance, and contract review; real adapters and serving
+  composition remain outside this slice.
+- **Future policy backlog:** make an independent reviewer configurable, defaulting
+  to operator-only review. This does not change doc 68 or runtime policy in this closure.
