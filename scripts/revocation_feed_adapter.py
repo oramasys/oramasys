@@ -9,9 +9,9 @@ before cache freshness: interruption can leave denials ahead, never freshness ah
 Lookups reuse an earlier full verification only while the exact cached bytes (SHA-256 and
 length of both the signed state and the feed) and the current trusted public key for every
 key identifier that signed them are unchanged. The reuse record lives only in this process's
-memory: a restart, a failed refresh, any byte change or any trust change (retirement,
-replacement or resolver failure) forces a full signature and chain replay, which then fails
-closed if trust is gone. Freshness and the clock high-water mark are still checked per lookup.
+memory: a restart, a failed refresh or any byte change forces a full signature and chain
+replay. A detected trust change refuses the current operation; later operations reverify.
+Freshness and the clock high-water mark are still checked per lookup.
 """
 from __future__ import annotations
 
@@ -249,8 +249,10 @@ class RevocationFeedAdapter:
         if len(raw) > MAX_STATE_BYTES or len(feed) > self._max_bytes:
             raise ValueError("cache exceeds bounds")
         memo = self._snapshot_memo
-        if memo is not None and memo.matches(raw, feed) \
-                and self._trust([key_id for key_id, _ in memo.trust]) == memo.trust:
+        if memo is not None and memo.matches(raw, feed):
+            if self._trust([key_id for key_id, _ in memo.trust]) != memo.trust:
+                self._snapshot_memo = None
+                raise RevocationUnavailable("issuer key trust changed")
             if now is not None:
                 self._require_fresh(memo.state, now)
             return memo.state
@@ -268,7 +270,7 @@ class RevocationFeedAdapter:
 
         Only an optimization: it installs a reuse record bound to the exact bytes and trust it
         verified, and the locked lookup still rechecks bytes, trust, clock and freshness. Any
-        failure here is ignored so that the locked path makes the fail-closed decision.
+        failures other than detected unstable trust are left to the locked path.
         Concurrent lookups of one instance share a single replay (single flight): the others
         wait for it and then find a matching record.
         """
@@ -295,6 +297,9 @@ class RevocationFeedAdapter:
             _, memo = self._verify_and_remember(raw, feed, events, now)
             if memo is not None:
                 self._snapshot_memo = memo
+        except RevocationUnavailable:
+            self._snapshot_memo = None
+            raise
         except Exception:  # noqa: BLE001 - the locked path decides and fails closed
             return
 
@@ -338,7 +343,7 @@ class RevocationFeedAdapter:
         raw = bytes(raw_state)
         chain, feed = self._copy_feed(events)
         # Full replay of the caller's input happens before the cache write lock; trust is
-        # resampled under the lock and any change forces a locked re-verification.
+        # resampled under the lock and any detected change refuses the refresh.
         state, memo = self._verify_and_remember(raw, feed, chain, now)
         with self._transaction() as db:
             locked_now = self._clock()
@@ -347,8 +352,10 @@ class RevocationFeedAdapter:
                 raise ValueError("clock rollback during refresh")
             now = locked_now
             self._check_time(db, now)
-            if memo is None or self._trust([key_id for key_id, _ in memo.trust]) != memo.trust:
+            if memo is None:
                 state, memo = self._verify_and_remember(raw, feed, chain, now)
+            elif self._trust([key_id for key_id, _ in memo.trust]) != memo.trust:
+                raise RevocationUnavailable("issuer key trust changed")
             self._require_fresh(state, now)
             old = self._cached(db)
             if old:

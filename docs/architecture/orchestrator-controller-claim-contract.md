@@ -179,6 +179,14 @@ Every request passes, in this order, before any task or idempotency row is read:
 
 Default ports deny everything. A port that raises is treated as a denial.
 
+**2026-11-06 operator-confirmed timing rule (CL-1).** The controller samples
+an aware clock again after capability verification and propagates the verified
+expiry through `Admission.expires_at`. Under the SQLite write lock, before
+idempotency or task lookup, effective controller time must remain strictly
+less than that deadline. Expiry refuses the mutation; safe denial audit and
+clock-highwater writes remain required. This capability deadline is distinct
+from the claim's lease expiry and never authorizes a missing capability.
+
 | Code | Status | Meaning |
 | --- | --- | --- |
 | `envelope.invalid` | 400 | malformed, missing or unknown field |

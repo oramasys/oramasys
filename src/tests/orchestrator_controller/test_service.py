@@ -1,12 +1,16 @@
 """Targeted tests for ControllerService capability deadline verification and lock delay."""
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import timedelta
+from pathlib import Path
 import pytest
 
 from orama.orchestrator_controller.refusals import ClaimRefused
 from orama.orchestrator_controller.service import ControllerService
-from orama.orchestrator_controller.store import ControllerStore
+from orama.orchestrator_controller.envelope import ClaimRequest
+from orama.orchestrator_controller.ports import CapabilityDecision, CapabilityQuery
+from orama.orchestrator_controller.store import Admission, ClaimReceipt, ControllerStore
 
 from .doubles import ATTESTED, AUDIENCE, Grant, GrantTableVerifier, TransportDouble
 from .support import START, FakeClock, declare, open_store, raw
@@ -16,11 +20,13 @@ ALL_OPS = frozenset({"claim", "renew", "complete", "release", "fail"})
 
 @pytest.fixture
 def clock() -> FakeClock:
+    """Return a controllable controller clock."""
     return FakeClock()
 
 
 @pytest.fixture
-def store(tmp_path, clock) -> ControllerStore:
+def store(tmp_path: Path, clock: FakeClock) -> Iterator[ControllerStore]:
+    """Open a controller store with one declared task."""
     opened = open_store(tmp_path, clock)
     declare(opened)
     yield opened
@@ -29,6 +35,7 @@ def store(tmp_path, clock) -> ControllerStore:
 
 @pytest.fixture
 def grants() -> GrantTableVerifier:
+    """Return grants covering the test task and operations."""
     expires = START + timedelta(hours=1)
     return GrantTableVerifier({
         "agent-a": Grant(ALL_OPS, frozenset({"task-1"}), expires),
@@ -37,18 +44,22 @@ def grants() -> GrantTableVerifier:
 
 
 def _service(store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier) -> ControllerService:
+    """Compose a service with the supplied clock and grants."""
     return ControllerService(
         store, audience=AUDIENCE, clock=clock, capability_verifier=grants, transport_verifier=TransportDouble()
     )
 
 
-def test_capability_expiry_elapsing_during_verification_is_refused(store, clock, grants) -> None:
+def test_capability_expiry_elapsing_during_verification_is_refused(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+) -> None:
     """O1: If capability verification delay crosses the expiry deadline, admission refuses."""
     grants.grants["agent-a"].expires_at = START + timedelta(seconds=10)
     service = _service(store, clock, grants)
     original_verify = grants.verify
 
-    def delayed_verify(query):
+    def delayed_verify(query: CapabilityQuery) -> CapabilityDecision:
+        """Advance the clock during capability verification."""
         # Clock advances past capability expiration during port verification
         clock.now = START + timedelta(seconds=10)
         return original_verify(query)
@@ -60,13 +71,16 @@ def test_capability_expiry_elapsing_during_verification_is_refused(store, clock,
     assert store.task("task-1").state == "pending"
 
 
-def test_capability_expiry_elapsing_during_store_lock_is_refused_and_audited(store, clock, grants) -> None:
+def test_capability_expiry_elapsing_during_store_lock_is_refused_and_audited(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+) -> None:
     """O1: If capability deadline elapses during store write-lock wait, store refuses and preserves highwater."""
     grants.grants["agent-a"].expires_at = START + timedelta(seconds=10)
     service = _service(store, clock, grants)
     original_apply = store.apply_admitted
 
-    def delayed_apply(req, admission):
+    def delayed_apply(req: ClaimRequest, admission: Admission) -> ClaimReceipt:
+        """Advance the clock before entering the store transaction."""
         # Clock advances past admission.expires_at before transaction execution
         clock.now = START + timedelta(seconds=11)
         return original_apply(req, admission)

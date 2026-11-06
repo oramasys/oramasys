@@ -1,5 +1,13 @@
 # Revocation availability: proposed workload and budget (C6)
 
+> **2026-11-06 operator update (CL-2/CL-3):** The workload/SLO specification
+> is approved; target-filesystem measurement and qualification remain open.
+> The proposal-era status and container evidence below are preserved history,
+> not a claim of target-host availability. Detected absent or changing signing
+> key trust now refuses the current operation, including prewarm and locked
+> reuse/refresh; discarding a reuse memo alone is insufficient. Later requests
+> may reverify, but a detected change is never hidden by an immediate retry.
+
 **Status: PROPOSED — awaiting operator confirmation; target-filesystem measurement is owner-held.**
 Nothing here is an approved SLO, a qualification, or an availability claim. The measurements
 below come from one container run ("container filesystem, not target host") and are

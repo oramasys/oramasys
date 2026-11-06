@@ -886,6 +886,7 @@ def test_key_retirement_or_replacement_during_lookup_verification_fails_closed(
     original_verify = a._verify
 
     def verify_and_change_trust(raw: bytes, events: list[dict[str, Any]], now: datetime) -> Any:
+        """Change issuer trust immediately after signature verification."""
         state = original_verify(raw, events, now)
         if change == "retired":
             keys.pop((ISSUER, "key-1"))
@@ -908,6 +909,7 @@ def test_key_retirement_or_replacement_during_refresh_verification_fails_closed(
     original_verify = a._verify
 
     def verify_and_change_trust(raw_bytes: bytes, evts: list[dict[str, Any]], now: datetime) -> Any:
+        """Change issuer trust immediately after signature verification."""
         state = original_verify(raw_bytes, evts, now)
         if change == "retired":
             keys.pop((ISSUER, "key-1"))
@@ -920,3 +922,56 @@ def test_key_retirement_or_replacement_during_refresh_verification_fails_closed(
         a.refresh(raw, events)
     unavailable(a)
     assert store.acked_through(ISSUER) == 0
+
+
+def test_transient_trust_change_during_prewarm_refuses_lookup(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A detected trust change cannot be hidden by a later successful replay."""
+    _, _, _, keys, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    lookup._snapshot_memo = None
+    original = lookup._trust
+    calls = 0
+
+    def transient_trust(key_ids: Any) -> Any:
+        """Remove trust for the post-verification sample, then restore it."""
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return None
+        return original(key_ids)
+
+    monkeypatch.setattr(lookup, "_trust", transient_trust)
+    unavailable(lookup)
+    assert keys[(ISSUER, "key-1")] == PUBLIC
+
+
+@pytest.mark.parametrize("operation", ["lookup", "refresh"])
+def test_detected_transient_trust_change_refuses_without_retry(
+    world: World, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    """A changed locked trust sample refuses even when trust immediately recovers."""
+    _, _, _, _, adapter, signed = world
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    original = lookup._trust
+    calls = 0
+    changed_call = 1 if operation == "lookup" else 3
+
+    def transient_trust(key_ids: Any) -> Any:
+        """Return a changed key for the locked trust sample only."""
+        nonlocal calls
+        calls += 1
+        if calls == changed_call:
+            return (("key-1", b"x" * 32),)
+        return original(key_ids)
+
+    monkeypatch.setattr(lookup, "_trust", transient_trust)
+    if operation == "lookup":
+        unavailable(lookup)
+    else:
+        with pytest.raises(MODULE.RevocationUnavailable):
+            lookup.refresh(*snapshot)
