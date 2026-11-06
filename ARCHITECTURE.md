@@ -85,7 +85,7 @@ shared mutable cache, or a collection of undocumented integrations.
 | Job claims, handoffs and job-claim leases | Planned v2 Orchestrator Controller | The [controller](docs/architecture/orchestrator-controller-invariants.md) is a design-only internal module; a standalone repository remains a gated later option. PT owns v1 coordination. Existing [execution run-lease fencing](src/orama/graph/execution_guard.py) is distinct and already implemented. |
 | Local documentation search | Oramasys | The [knowledge surface](src/orama/knowledge/) provides read-only search and MCP/A2A routes. |
 | Configured memory and retrieval satellites | Dedicated owners | Planned boundaries require explicit contracts; label derived data and preserve provenance. |
-| Design decisions, ownership registry and capability schema | Orama `docs/v2` | These are documentation and CI inputs, not v1 runtime dependencies. |
+| Design decisions, ownership registry and capability schema | Orama `docs/v2` and `docs/schemas` | These are documentation and CI inputs, not v1 runtime dependencies. |
 | Human approval and deployment choice | Operator | Keep approval distinct from routing, evaluation, and completion. |
 
 The owner adapter definitions in `src/orama/graph/adapters.py` are composition
