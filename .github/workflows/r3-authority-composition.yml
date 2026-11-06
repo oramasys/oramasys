@@ -56,3 +56,24 @@ jobs:
           src/tests/test_serve_with_effect_grants.py
           src/tests/test_inert_effect_process_crashes.py
           src/tests/test_loaded_deployment_identity.py
+      - name: Rehearse inert availability harness (not C6 qualification)
+        env:
+          PYTHONPATH: phylax-r3/src:src
+        timeout-minutes: 3
+        run: |
+          python scripts/benchmark_revocation_availability.py \
+            --events 16 --senders 2 --sends 3 --send-interval 0 \
+            --refresh-interval 0 --refresher separate --retries 2 \
+            --label "CI synthetic smoke; not target-filesystem qualification" \
+            > "$RUNNER_TEMP/inert-availability-smoke.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads((Path(os.environ["RUNNER_TEMP"]) / "inert-availability-smoke.json").read_text())
+          results = report["results"]
+          assert len(results) == 1, "missing smoke workload"
+          assert results[0]["sends"] == 6, "incomplete smoke workload"
+          assert results[0]["outcomes"] == {"sent": 6}, "inert smoke send failed"
+          print("Six synthetic inert sends passed; no C6 SLO or host qualification asserted.")
+          PY
