@@ -120,6 +120,13 @@ def refresh_once(feed: Feed, writer: RevocationFeedAdapter, latencies: list[floa
         failures[name] = failures.get(name, 0) + 1
 
 
+def join_refresher(thread: threading.Thread) -> None:
+    """Require the refresher to stop before returning a workload result."""
+    thread.join(120)
+    if thread.is_alive():
+        raise RuntimeError("refresher did not stop within 120 seconds")
+
+
 def measure(
     *, events: int, senders: int, sends: int, send_interval: float, refresh_interval: float,
     refresher: str, retries: int,
@@ -206,7 +213,7 @@ def measure(
         finally:
             stop.set()
             if thread:
-                thread.join(120)
+                join_refresher(thread)
             for store in stores:
                 store.close()
         outcomes: dict[str, int] = {}
