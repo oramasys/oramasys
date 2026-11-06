@@ -125,6 +125,7 @@ class RevocationFeedAdapter:
         self._max_events, self._max_bytes, self._max_age = max_events, max_feed_bytes, max_age_seconds
         self._ready = False
         self._snapshot_memo: _SnapshotMemo | None = None
+        self._prewarm_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
         with closing(self._connect()) as db:
             db.execute("CREATE TABLE IF NOT EXISTS verified_snapshot ("
@@ -268,7 +269,14 @@ class RevocationFeedAdapter:
         Only an optimization: it installs a reuse record bound to the exact bytes and trust it
         verified, and the locked lookup still rechecks bytes, trust, clock and freshness. Any
         failure here is ignored so that the locked path makes the fail-closed decision.
+        Concurrent lookups of one instance share a single replay (single flight): the others
+        wait for it and then find a matching record.
         """
+        with self._prewarm_lock:
+            self._prewarm_locked(now)
+
+    def _prewarm_locked(self, now: datetime) -> None:
+        """Run one prewarm while holding the per-instance single-flight lock."""
         try:
             with closing(self._connect()) as db:
                 row = db.execute("SELECT raw_state, feed FROM verified_snapshot WHERE issuer_id=?",
