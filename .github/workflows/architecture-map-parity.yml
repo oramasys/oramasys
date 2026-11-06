@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: diazMelgarejo/orama-system
-          ref: b6c27b699d81b29b6138122f8ff48a8e1473a39a
+          ref: 3dfc78c22008e61ff8a544413079749cbbb65160
           path: legacy-map
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
