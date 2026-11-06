@@ -229,7 +229,7 @@ class ClaimRequest:
             raise ValueError("result_digest belongs to complete only")
         failure_class = body.get("failure_class")
         if operation == "fail":
-            if failure_class not in FAILURE_CLASSES:
+            if not isinstance(failure_class, str) or failure_class not in FAILURE_CLASSES:
                 raise ValueError("failure_class is not in the closed vocabulary")
         elif failure_class is not None:
             raise ValueError("failure_class belongs to fail only")

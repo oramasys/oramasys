@@ -50,6 +50,22 @@ def _service(store: ControllerStore, clock: FakeClock, grants: GrantTableVerifie
     )
 
 
+@pytest.mark.parametrize("failure_class", [[], {}])
+def test_unhashable_failure_class_is_refused_and_audited(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier, failure_class: object,
+) -> None:
+    """Malformed failure classes produce an audited envelope refusal."""
+    with pytest.raises(ClaimRefused) as caught:
+        _service(store, clock, grants).submit(
+            raw("fail", lease_id="lease-1", lease_token="t" * 43, failure_class=failure_class),
+            transport=ATTESTED,
+        )
+    assert (caught.value.code, caught.value.status) == ("envelope.invalid", 400)
+    with store._lock:
+        row = store._db.execute("SELECT outcome FROM audit ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row == ("refused:envelope.invalid",)
+
+
 def test_capability_expiry_elapsing_during_verification_is_refused(
     store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
 ) -> None:
