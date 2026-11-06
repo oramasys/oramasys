@@ -1,4 +1,4 @@
-# Revocation availability: proposed workload and budget (C6)
+# Revocation availability: ratified target and historical measurements (C6)
 
 > **2026-11-06 operator update (CL-2/CL-3):** The workload/SLO specification
 > is approved; target-filesystem measurement and qualification remain open.
@@ -8,8 +8,12 @@
 > reuse/refresh; discarding a reuse memo alone is insufficient. Later requests
 > may reverify, but a detected change is never hidden by an immediate retry.
 
-**Status: PROPOSED — awaiting operator confirmation; target-filesystem measurement is owner-held.**
-Nothing here is an approved SLO, a qualification, or an availability claim. The measurements
+**Status: target specification approved; physical target-filesystem qualification open.**
+The operator directly confirmed the six J1 decisions on 2026-11-06, matching
+GossipBus rows 6308/6309 under topic
+`OPERATOR_RATIFICATION_ALL_SIX_DECISIONS_AND_CLOSURE_APPROVAL_20261106`.
+The expected workload and budget below are approved targets, not a qualification
+or an achieved availability claim. The measurements
 below come from one container run ("container filesystem, not target host") and are
 implementation evidence only. Serving stays dark; no deployment keys were used.
 
@@ -31,8 +35,9 @@ bytes-only cache would revive trust in a retired key.
   feed match a per-instance record by SHA-256 *and* length, and every key identifier that signed
   them still resolves to the same trusted public key. Trust is sampled before and after the full
   verification; if it changed, nothing is recorded. Any byte, length, digest, or head change, and
-  any trust change (retirement, replacement, or resolver error), forces a full replay, which then
-  fails closed.
+  detected trust change (retirement, replacement, or resolver error) refuses the
+  current operation. A later operation may perform a full replay; the current
+  operation must not retry recovered trust into an allow.
 - **No persistence.** The record lives in memory only. A restart or a failed refresh discards it,
   and a restarted instance still needs an explicit successful refresh before any lookup.
 - **Per-lookup checks kept.** The clock high-water mark and the 60 s freshness window are still
@@ -42,7 +47,7 @@ bytes-only cache would revive trust in a retired key.
   read before taking the write lock. Concurrent lookups on one instance share that single replay.
   The locked path rechecks bytes, trust, clock, and freshness and makes the decision.
 - **Refresh.** Refresh verifies its input once, before the write lock. Under the lock it resamples
-  trust (and re-verifies on any change) and checks freshness at the locked time. For its
+  trust, refuses detected changes, and checks freshness at the locked time. For its
   antirollback comparison it reuses its own record of the previous snapshot.
 
 Regressions in `src/tests/r3_interop/test_revocation_feed_adapter.py` (Phylax R3 lane):
@@ -90,9 +95,9 @@ Modelling limits:
   clock).
 - The run measures whatever filesystem holds the system temporary directory.
 
-## Proposed workload (for operator confirmation)
+## Ratified expected workload
 
-| Dimension | Proposed expected | Stress, no budget proposed |
+| Dimension | Approved expected | Stress, no budget approved |
 | --- | --- | --- |
 | Feed size, complete from genesis | ≤ 256 events | 4096 (adapter default ceiling) |
 | Refresh | every 15 s from a separate adapter instance or process | every 1 s; same-instance refresh |
@@ -106,9 +111,9 @@ failures are tolerated before sends become unavailable.
 Refreshing through the serving instance is **not** proposed. A refresh marks that instance
 unavailable until it completes, by design.
 
-## Proposed latency and error budget (expected workload)
+## Ratified latency and error budget (expected workload)
 
-| Measure | Proposed budget |
+| Measure | Approved target budget |
 | --- | --- |
 | Complete-send latency, including retries | p95 ≤ 50 ms, p99 ≤ 250 ms |
 | First-try retryable unavailability | ≤ 1 % of sends |
@@ -180,8 +185,9 @@ fail-open; the regression tests cover that.
 - **Target filesystem (owner-held).** The deployment owner must select the host, OS, and
   filesystem, then run the harness there with the confirmed workload. They should run it for
   long enough to resolve the error budget and record the label. This run is not that evidence.
-- **Operator confirmation (owner-held).** The workload and budget above are proposals. The
-  operator may change any number. Until it is confirmed, C6 availability is not claimed.
+- **Operator confirmation (complete for specification only).** The workload and
+  budget are ratified targets. This does not establish measured compliance;
+  C6 availability remains unqualified until target-host receipts are accepted.
 - **Large-feed refresh.** Refresh still holds the cache write lock during
   `SqliteAttemptStore.ingest_events`, which re-verifies every event (about 0.6 s of a ≈1–1.5 s
   refresh at 4096 events). The first lookup after a change still costs one full replay per
