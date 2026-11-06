@@ -77,7 +77,8 @@ def test_importing_the_package_starts_nothing() -> None:
     code = (
         "import threading, orama.orchestrator_controller as c;"
         "import orama.orchestrator_controller.expiry, orama.orchestrator_controller.store;"
-        "import orama.orchestrator_controller.outbox;"
+        "import orama.orchestrator_controller.outbox, orama.orchestrator_controller.service;"
+        "import orama.orchestrator_controller.ports;"
         "print(threading.active_count())"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
