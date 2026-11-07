@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +14,17 @@ from orama.graph.private_store import (
     safe_replace,
 )
 
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX mode bits, UID, and umask not enforced on Windows NTFS DACLs",
+)
+
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.lstat().st_mode)
 
 
+@_posix_only
 def test_creates_private_parent_and_database_without_changing_ancestor(tmp_path: Path) -> None:
     ancestor_mode = _mode(tmp_path)
     store = tmp_path / "private" / "ledger.sqlite3"
@@ -30,6 +37,7 @@ def test_creates_private_parent_and_database_without_changing_ancestor(tmp_path:
     assert store.is_file()
 
 
+@_posix_only
 @pytest.mark.parametrize("mode", [0o400, 0o640, 0o666])
 def test_refuses_existing_database_with_non_private_mode_without_chmod(
     tmp_path: Path, mode: int
@@ -44,6 +52,7 @@ def test_refuses_existing_database_with_non_private_mode_without_chmod(
     assert _mode(store) == mode
 
 
+@_posix_only
 def test_refuses_existing_parent_with_non_private_mode_without_chmod(tmp_path: Path) -> None:
     parent = tmp_path / "shared"
     parent.mkdir(mode=0o700)
@@ -55,6 +64,7 @@ def test_refuses_existing_parent_with_non_private_mode_without_chmod(tmp_path: P
     assert _mode(parent) == 0o755
 
 
+@_posix_only
 def test_accepts_existing_private_database(tmp_path: Path) -> None:
     store = tmp_path / "ledger.sqlite3"
     store.touch(mode=0o600)
@@ -63,6 +73,7 @@ def test_accepts_existing_private_database(tmp_path: Path) -> None:
     assert _mode(store) == 0o600
 
 
+@_posix_only
 def test_accepts_existing_private_wal_and_shm(tmp_path: Path) -> None:
     store = tmp_path / "ledger.sqlite3"
     store.touch(mode=0o600)
@@ -76,6 +87,7 @@ def test_accepts_existing_private_wal_and_shm(tmp_path: Path) -> None:
     assert _mode(shm) == 0o600
 
 
+@_posix_only
 def test_refuses_parent_not_owned_by_current_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -85,6 +97,7 @@ def test_refuses_parent_not_owned_by_current_user(
         prepare_private_store(tmp_path / "ledger.sqlite3")
 
 
+@_posix_only
 def test_refuses_database_not_owned_by_current_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -98,6 +111,7 @@ def test_refuses_database_not_owned_by_current_user(
         prepare_private_store(store)
 
 
+@_posix_only
 def test_refuses_symlink_database_path(tmp_path: Path) -> None:
     target = tmp_path / "target.sqlite3"
     target.touch(mode=0o600)
@@ -108,6 +122,7 @@ def test_refuses_symlink_database_path(tmp_path: Path) -> None:
         prepare_private_store(link)
 
 
+@_posix_only
 def test_refuses_symlink_parent(tmp_path: Path) -> None:
     actual = tmp_path / "actual"
     actual.mkdir(mode=0o700)
@@ -120,6 +135,7 @@ def test_refuses_symlink_parent(tmp_path: Path) -> None:
     assert not (actual / "ledger.sqlite3").exists()
 
 
+@_posix_only
 @pytest.mark.parametrize("suffix", ["-wal", "-shm"])
 def test_refuses_non_private_sidecar_without_chmod(tmp_path: Path, suffix: str) -> None:
     store = tmp_path / "ledger.sqlite3"
@@ -149,6 +165,7 @@ def test_refuses_non_regular_database_and_sidecar(tmp_path: Path) -> None:
         prepare_private_store(store)
 
 
+@_posix_only
 def test_refuses_symlink_sidecar(tmp_path: Path) -> None:
     store = tmp_path / "ledger.sqlite3"
     store.touch(mode=0o600)
@@ -169,6 +186,7 @@ def test_does_not_create_missing_broad_ancestors(tmp_path: Path) -> None:
     assert not (tmp_path / "missing").exists()
 
 
+@_posix_only
 def test_created_database_is_not_affected_by_process_umask(tmp_path: Path) -> None:
     original_umask = os.umask(0o777)
     try:
@@ -180,6 +198,7 @@ def test_created_database_is_not_affected_by_process_umask(tmp_path: Path) -> No
     assert _mode(store) == 0o600
 
 
+@_posix_only
 def test_first_open_race_validates_the_winning_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -285,11 +304,11 @@ def test_windows_refuses_junction_parent_and_database(
     store = parent / "ledger.sqlite3"
     store.touch()
 
-    monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p) == parent)
+    monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p) == parent, raising=False)
     with pytest.raises(PermissionError, match="symlink"):
         prepare_private_store(store)
 
-    monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p) == store)
+    monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p) == store, raising=False)
     with pytest.raises(PermissionError, match="symlink"):
         prepare_private_store(store)
 
