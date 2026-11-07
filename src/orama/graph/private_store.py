@@ -66,7 +66,7 @@ def _check_windows_ownership(path: Path) -> bool:
         from ctypes import wintypes
 
         if not hasattr(ctypes, "windll"):
-            return True
+            return False
 
         advapi32 = ctypes.windll.advapi32
         kernel32 = ctypes.windll.kernel32
@@ -126,7 +126,7 @@ def _check_windows_ownership(path: Path) -> bool:
                 token_handle, 1, buffer, token_info_length.value, ctypes.byref(token_info_length)
             ):
                 return False
-            user_sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p)).contents.value
+            user_sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p)).contents
 
             OWNER_SECURITY_INFORMATION = 0x00000001
             p_file_owner_sid = ctypes.c_void_p()
@@ -157,7 +157,7 @@ def _check_windows_ownership(path: Path) -> bool:
 
 
 def _validate_directory(path: Path, status: os.stat_result) -> None:
-    """Require a real directory owned by this user with mode 0700 (mode check skipped on Windows)."""
+    """Require current-user ownership and POSIX 0700 or a private Windows DACL."""
     if _is_link_or_reparse_point(path, status):
         raise _permission_error(path, "must not be a symlink")
     if not (stat.S_ISDIR(status.st_mode) and os.path.isdir(path)):
@@ -165,6 +165,8 @@ def _validate_directory(path: Path, status: os.stat_result) -> None:
     if _is_windows():
         if not _check_windows_ownership(path):
             raise _permission_error(path, "must be owned by the current user")
+        if not _check_windows_acl(path):
+            raise _permission_error(path, "must have a private Windows DACL")
     else:
         if status.st_uid != os.geteuid():
             raise _permission_error(path, "must be owned by the current user")
@@ -173,7 +175,7 @@ def _validate_directory(path: Path, status: os.stat_result) -> None:
 
 
 def _validate_file(path: Path, status: os.stat_result) -> None:
-    """Require a regular file owned by this user with mode 0600 (mode check skipped on Windows)."""
+    """Require a current-user regular file with POSIX 0600 or a private Windows DACL."""
     if _is_link_or_reparse_point(path, status):
         raise _permission_error(path, "must not be a symlink")
     if not stat.S_ISREG(status.st_mode) or os.path.isdir(path):
@@ -181,6 +183,8 @@ def _validate_file(path: Path, status: os.stat_result) -> None:
     if _is_windows():
         if not _check_windows_ownership(path):
             raise _permission_error(path, "must be owned by the current user")
+        if not _check_windows_acl(path):
+            raise _permission_error(path, "must have a private Windows DACL")
     else:
         if status.st_uid != os.geteuid():
             raise _permission_error(path, "must be owned by the current user")
@@ -209,50 +213,54 @@ def safe_replace(
 
     Under Windows / NTFS, os.replace can fail transiently with PermissionError
     (WinError 5 / 32) due to file sharing contention, antivirus scanning, or indexing.
-    On Windows (or when sharing contention is detected), bounded exponential backoff
-    retries the replacement (default 5 retries over ~50ms).
+    Only explicit WinError 5/32 contention candidates are retried. Permanent
+    errors, including POSIX EACCES, propagate immediately. The default five
+    deterministic delays total 62 ms; no jitter is applied. WinError 5 can also
+    be a permanent ACL denial, so it is retried only within this bounded budget.
     """
     src_path = Path(src)
     dst_path = Path(dst)
     delay = initial_delay
-    last_error: Exception | None = None
+    if max_retries < 0:
+        raise ValueError("max_retries must be nonnegative")
 
     for attempt in range(max_retries + 1):
         try:
             os.replace(src_path, dst_path)
             return
-        except PermissionError as err:
-            last_error = err
-            winerror = getattr(err, "winerror", None)
-            is_contention = (
-                _is_windows()
-                or winerror in (5, 32)
-                or getattr(err, "errno", None) in (13, 16)
-            )
-            if is_contention and attempt < max_retries:
-                _sleep(delay)
-                delay *= backoff_factor
-                continue
-            raise
         except OSError as err:
-            last_error = err
-            winerror = getattr(err, "winerror", None)
-            is_contention = (
-                _is_windows()
-                or winerror in (5, 32)
-                or getattr(err, "errno", None) in (13, 16)
-            )
+            is_contention = getattr(err, "winerror", None) in (5, 32)
             if is_contention and attempt < max_retries:
                 _sleep(delay)
                 delay *= backoff_factor
                 continue
             raise
-
-    if last_error is not None:
-        raise last_error
-
 
 replace_file = safe_replace
+
+
+def _check_windows_acl(path: Path) -> bool:
+    """Refuse unavailable or unsafe native Windows security descriptors."""
+    from .windows_private import WindowsSecurity
+
+    try:
+        return WindowsSecurity().private_acl(path)
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _create_windows_directory(path: Path) -> None:
+    """Create a directory with an explicit owner and protected inheritable DACL."""
+    from .windows_private import WindowsSecurity
+
+    WindowsSecurity().create_directory(path)
+
+
+def _create_windows_file(path: Path) -> None:
+    """Create a database atomically with explicit owner and protected DACL."""
+    from .windows_private import WindowsSecurity
+
+    WindowsSecurity().create_file(path)
 
 
 def _prepare_private_store_posix(store: Path) -> Path:
@@ -336,14 +344,20 @@ def _prepare_private_store_posix(store: Path) -> Path:
 
 
 def _prepare_private_store_windows(store: Path) -> Path:
-    """Validate and precreate a private SQLite store on Windows systems."""
+    """Create private Windows objects and refuse unsafe existing ACLs.
+
+    Ancestors must not be writable/renameable by unrelated users. This flow
+    still resolves pathnames separately; it is not a handle-relative traversal
+    guarantee against concurrent ancestor/junction replacement. Deployment
+    qualification must establish that precondition before promotion.
+    """
     parent = store.parent
 
     try:
         parent_status = os.lstat(parent)
     except FileNotFoundError:
         try:
-            os.mkdir(parent, _DIRECTORY_MODE)
+            _create_windows_directory(parent)
         except FileExistsError:
             pass
         parent_status = os.lstat(parent)
@@ -368,19 +382,13 @@ def _prepare_private_store_windows(store: Path) -> Path:
             _validate_file(sidecar, sidecar_status)
 
     if target_status is None:
-        file_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_BINARY"):
-            file_flags |= os.O_BINARY
         try:
-            store_fd = os.open(str(store), file_flags, _FILE_MODE)
+            _create_windows_file(store)
         except FileExistsError:
             raced_status = os.lstat(store)
             _validate_file(store, raced_status)
         else:
-            try:
-                _validate_file(store, os.fstat(store_fd))
-            finally:
-                os.close(store_fd)
+            _validate_file(store, os.lstat(store))
 
     return store
 
