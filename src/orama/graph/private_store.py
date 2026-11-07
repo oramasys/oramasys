@@ -72,6 +72,45 @@ def _check_windows_ownership(path: Path) -> bool:
         kernel32 = ctypes.windll.kernel32
 
         TOKEN_QUERY = 0x0008
+
+        # 64-bit Windows handle & pointer signatures
+        try:
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.GetCurrentProcess.argtypes = []
+
+            advapi32.OpenProcessToken.restype = wintypes.BOOL
+            advapi32.OpenProcessToken.argtypes = [
+                wintypes.HANDLE,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.HANDLE),
+            ]
+
+            advapi32.GetTokenInformation.restype = wintypes.BOOL
+            advapi32.GetTokenInformation.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_int,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+
+            advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+            advapi32.GetNamedSecurityInfoW.argtypes = [
+                wintypes.LPCWSTR,
+                ctypes.c_int,
+                wintypes.DWORD,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+
+            advapi32.EqualSid.restype = wintypes.BOOL
+            advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        except (AttributeError, TypeError):
+            pass
+
         token_handle = wintypes.HANDLE()
         current_process = kernel32.GetCurrentProcess()
         if not advapi32.OpenProcessToken(current_process, TOKEN_QUERY, ctypes.byref(token_handle)):

@@ -238,6 +238,15 @@ def test_windows_accepts_existing_database_and_parent_regardless_of_posix_mode(
     assert store.is_file()
 
 
+def _symlink_or_skip(link: Path, target: Path, target_is_directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as e:
+        if getattr(e, "winerror", None) == 1314:
+            pytest.skip("Symlink creation requires elevation or Developer Mode on Windows")
+        raise
+
+
 def test_windows_refuses_symlink_parent_and_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -249,7 +258,7 @@ def test_windows_refuses_symlink_parent_and_database(
     actual = tmp_path / "actual"
     actual.mkdir()
     link_parent = tmp_path / "link_parent"
-    link_parent.symlink_to(actual, target_is_directory=True)
+    _symlink_or_skip(link_parent, actual, target_is_directory=True)
 
     with pytest.raises(PermissionError, match="symlink"):
         prepare_private_store(link_parent / "ledger.sqlite3")
@@ -257,7 +266,7 @@ def test_windows_refuses_symlink_parent_and_database(
     target_db = actual / "target.sqlite3"
     target_db.touch()
     link_db = actual / "ledger.sqlite3"
-    link_db.symlink_to(target_db)
+    _symlink_or_skip(link_db, target_db)
 
     with pytest.raises(PermissionError, match="symlink"):
         prepare_private_store(link_db)
@@ -346,7 +355,7 @@ def test_windows_refuses_symlink_sidecars(
     target = tmp_path / "sidecar-target"
     target.touch()
     wal = Path(f"{store}-wal")
-    wal.symlink_to(target)
+    _symlink_or_skip(wal, target)
 
     with pytest.raises(PermissionError, match="symlink"):
         prepare_private_store(store)
@@ -383,6 +392,25 @@ def test_windows_refuses_unowned_paths(
 
     with pytest.raises(PermissionError, match="owned by the current user"):
         prepare_private_store(tmp_path / "unowned" / "ledger.sqlite3")
+
+
+def test_windows_refuses_unowned_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import orama.graph.private_store as ps_mod
+
+    monkeypatch.setattr(ps_mod, "_is_windows", lambda: True)
+    monkeypatch.delattr(os, "geteuid", raising=False)
+
+    parent = tmp_path / "valid_parent"
+    parent.mkdir()
+    store = parent / "ledger.sqlite3"
+    store.touch()
+
+    monkeypatch.setattr(ps_mod, "_check_windows_ownership", lambda p: Path(p) != store)
+
+    with pytest.raises(PermissionError, match="owned by the current user"):
+        prepare_private_store(store)
 
 
 def test_windows_ownership_win32_api_mock(
@@ -455,6 +483,46 @@ def test_safe_replace_succeeds_on_first_try(tmp_path: Path) -> None:
     safe_replace(src, dst)
     assert dst.read_text(encoding="utf-8") == "updated"
     assert not src.exists()
+
+
+def test_safe_replace_retries_on_oserror_contention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import orama.graph.private_store as ps_mod
+
+    src = tmp_path / "src_os.txt"
+    dst = tmp_path / "dst_os.txt"
+    src.write_text("updated", encoding="utf-8")
+    dst.write_text("old", encoding="utf-8")
+
+    real_replace = os.replace
+    attempts = 0
+    slept: list[float] = []
+
+    def mock_replace(s: Any, d: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            err = OSError("Sharing violation")
+            err.winerror = 32
+            raise err
+        real_replace(s, d)
+
+    monkeypatch.setattr(ps_mod, "_is_windows", lambda: True)
+    monkeypatch.setattr(os, "replace", mock_replace)
+
+    safe_replace(
+        src,
+        dst,
+        max_retries=4,
+        initial_delay=0.001,
+        backoff_factor=2.0,
+        _sleep=slept.append,
+    )
+
+    assert attempts == 3
+    assert len(slept) == 2
+    assert dst.read_text(encoding="utf-8") == "updated"
 
 
 def test_safe_replace_retries_on_windows_contention(
