@@ -140,6 +140,12 @@ unavailable until it completes, by design.
 | Fail-open: any send allowed on stale, unknown, tampered, or untrusted state | 0; any occurrence is a defect, not budget |
 | Refresh latency | p95 ≤ 1 s; 0 failures at steady state |
 
+**2026-11-07 operator amendment:** The p95 budget is now <=60 ms for both
+scheduled latency and successful-call send latency, superseding the historical
+50 ms target above. Scheduled p99 <=250 ms and all other budgets remain
+unchanged. The three consecutive operator-run Mac passes and separate native
+Windows qualification are still required; this amendment qualifies no run.
+
 One container run of 2400 sends with 0 errors bounds the true error rate at about 0.125 % (95 %
 upper bound). Showing ≤ 0.1 % therefore needs a longer target-host run, for example one hour at
 the proposed rate (about 144,000 sends).

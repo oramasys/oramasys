@@ -7,10 +7,10 @@ the Tier-5 financial reservation/settlement ledger. The schema stays narrow
 on purpose — routing and policy evaluation remain in the graph and Telos
 respectively, while paid-call accounting remains a separate SQLite authority.
 
-Records are JSON-lines, one per dispatch, written under an in-process
-asyncio lock so concurrent run_ids within the SAME process cannot
-interleave a line -- this does not coordinate multiple OS processes
-writing to the same path; see JsonlOutboundLedger's own docstring.
+Records are JSON-lines, one per dispatch, written under a per-instance
+asyncio lock. Concurrent writers using that same instance cannot interleave
+a line. Separate instances, even within one process, require external writer
+coordination when sharing a path; see JsonlOutboundLedger's own docstring.
 ``read_all`` parses and validates strictly: a malformed line, or a
 syntactically valid line that violates the record schema (wrong field
 types, an outcome outside the allowed vocabulary, a missing/invalid
@@ -43,6 +43,7 @@ _ALLOWED_OUTCOMES = frozenset({"succeeded", "failed"})
 
 
 def _utc_now_iso() -> str:
+    """Return the current aware UTC timestamp for a newly created record."""
     return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
@@ -99,13 +100,16 @@ class JsonlOutboundLedger:
     does not (yet) satisfy that Protocol -- its record() is async and its
     read accessor is read_all(), not entries() -- so it is a standalone
     durable audit-log utility, not a drop-in implementation of that seam.
+
+    Writer serialization is per instance. Separate instances sharing a path,
+    whether in one process or multiple processes, need external coordination.
     """
 
     def __init__(self, path: Path | str) -> None:
-        # Single-writer-process restriction: self._lock is an in-process
-        # asyncio.Lock, so it serializes concurrent writers only within
-        # this Python process. It does not coordinate writers in separate
-        # OS processes sharing the same ledger path -- a genuine
+        """Create one writer instance with its own serialization lock."""
+        # Single-writer-instance restriction: self._lock is a per-instance
+        # asyncio.Lock. It does not coordinate separate instances, even
+        # within this process, sharing the same ledger path -- a genuine
         # inter-process lock (e.g. fcntl.flock, which is POSIX-only and
         # not portable to Windows without a separate code path) is a
         # larger, platform-specific addition than this class currently
