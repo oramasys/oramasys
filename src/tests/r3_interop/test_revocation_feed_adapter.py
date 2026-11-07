@@ -1005,3 +1005,259 @@ def test_once_raising_key_resolver_refuses_current_operation(
             lookup.refresh(*snapshot)
     else:
         unavailable(lookup)
+
+
+def test_event_crypto_is_outside_refresh_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every event primitive must run before the nested write-lock interval."""
+    producer, _, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    original = wire.verify_event
+    free: list[bool] = []
+
+    def probe(*args: Any) -> bool:
+        """Probe actual event crypto instead of only the outer replay method."""
+        with closing(sqlite3.connect(lookup.cache_path, timeout=0, isolation_level=None)) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("ROLLBACK")
+                free.append(True)
+            except sqlite3.OperationalError:
+                free.append(False)
+        return original(*args)
+
+    monkeypatch.setattr(wire, "verify_event", probe)
+    lookup.refresh(*signed())
+    assert free and all(free)
+
+
+def test_separate_writer_old_snapshot_replay_is_outside_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly opened refresher must not replay its old snapshot under lock."""
+    producer, _, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    adapter().refresh(*signed())
+    other = adapter()
+    free = lock_probe(other, monkeypatch)
+    other.refresh(*signed())
+    assert free and all(free)
+
+
+def test_prepared_event_verifier_misses_fail_closed(world: World) -> None:
+    """Changing any cryptographic tuple component must not hit prepared evidence."""
+    producer, _, _, keys, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    _, events = signed()
+    prepared = lookup._prepare_ingest_verifier(events, (("key-1", PUBLIC),))
+    event = events[0]
+    assert prepared.verify_event("key-1", event["event_digest"], event["signature"])
+    assert not prepared.verify_event("other", event["event_digest"], event["signature"])
+    assert not prepared.verify_event("key-1", "0" * 64, event["signature"])
+    assert not prepared.verify_event("key-1", event["event_digest"], "0" * len(event["signature"]))
+    keys[(ISSUER, "key-1")] = b"x" * 32
+    with pytest.raises(MODULE.RevocationUnavailable):
+        prepared.verify_event("key-1", event["event_digest"], event["signature"])
+
+
+def test_preparation_does_not_hold_cache_writer_and_lookup_progresses(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A separate serving adapter can make progress while refresh prepares crypto."""
+    _, _, _, _, adapter, signed = world
+    serving, writer = adapter(), adapter()
+    snapshot = signed()
+    serving.refresh(*snapshot)
+    entered, release = threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+    original = writer._prepare_ingest_verifier
+
+    def blocked(*args: Any) -> Any:
+        """Pause only outside-lock preparation using bounded synchronization."""
+        entered.set()
+        assert release.wait(5)
+        return original(*args)
+
+    def refresh() -> None:
+        """Keep thread failures visible to the test owner."""
+        try:
+            writer.refresh(*snapshot)
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(writer, "_prepare_ingest_verifier", blocked)
+    worker = threading.Thread(target=refresh)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert serving.revoked("safe", ISSUER) is False
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive() and not errors
+
+
+def test_changed_old_snapshot_never_replays_under_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cross-process replacement after preparation refuses this refresh."""
+    _, store, _, _, adapter, signed = world
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    original = lookup._prepare_previous_snapshot
+
+    def replace_after_prepare() -> Any:
+        """Change exact durable bytes after their historical authentication."""
+        memo = original()
+        with sqlite3.connect(lookup.cache_path) as db:
+            db.execute("UPDATE verified_snapshot SET feed=?", (b"[ ]",))
+        return memo
+
+    monkeypatch.setattr(lookup, "_prepare_previous_snapshot", replace_after_prepare)
+    free = lock_probe(lookup, monkeypatch)
+    with pytest.raises(MODULE.RevocationUnavailable):
+        lookup.refresh(*snapshot)
+    assert all(free)
+    assert store.acked_through(ISSUER) == 0
+    unavailable(lookup)
+
+
+def test_trust_loss_after_ack_blocks_freshness_publication(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committed denials may survive trust loss, but new freshness must not."""
+    producer, store, _, keys, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    original = store.ingest_events
+
+    def revoke_after_ack(*args: Any) -> None:
+        """Remove trust in the exact post-ack/pre-publication window."""
+        original(*args)
+        keys.clear()
+
+    monkeypatch.setattr(store, "ingest_events", revoke_after_ack)
+    with pytest.raises(MODULE.RevocationUnavailable):
+        lookup.refresh(*signed())
+    assert store.acked_through(ISSUER) == 1
+    with sqlite3.connect(lookup.cache_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM verified_snapshot").fetchone()[0] == 0
+
+
+def test_public_duplicate_ingest_still_checks_signature(world: World) -> None:
+    """Optimized adapter evidence does not relax the public ingestion port."""
+    from orama.graph.dispatch_attempts import EventRefused
+
+    producer, store, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    damaged = deepcopy(snapshot[1])
+    damaged[0]["signature"] = wire.sign_event(b"x" * 32, damaged[0]["event_digest"])
+    with pytest.raises(EventRefused) as caught:
+        store.ingest_events(ISSUER, damaged, lookup._keys)
+    assert caught.value.reason == "event_signature"
+
+
+def test_lookup_uses_one_durable_clock_transaction(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup need not acquire the same SQLite writer twice."""
+    from contextlib import contextmanager
+
+    _, _, _, _, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    original = lookup._transaction
+    writes: list[int] = []
+
+    @contextmanager
+    def count() -> Iterator[sqlite3.Connection]:
+        """Count committed-clock transaction entries."""
+        writes.append(1)
+        with original() as db:
+            yield db
+
+    monkeypatch.setattr(lookup, "_transaction", count)
+    assert lookup.revoked("safe", ISSUER) is False
+    assert writes == [1]
+
+
+def test_refused_lookup_preserves_forward_clock(world: World) -> None:
+    """Consolidating transactions must still commit time on stale-snapshot refusal."""
+    _, _, now, _, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    now[0] += timedelta(seconds=61)
+    unavailable(lookup)
+    with sqlite3.connect(lookup.cache_path) as db:
+        at = db.execute("SELECT at FROM observed_clock WHERE singleton=1").fetchone()[0]
+    assert wire.parse_timestamp(at) == now[0]
+    now[0] -= timedelta(seconds=1)
+    with pytest.raises(ValueError, match="clock rollback"):
+        lookup._observe_time()
+
+
+def test_trust_change_in_approval_callback_refuses_lookup(world: World) -> None:
+    """A trusted callback cannot leave a decision using newly retired keys."""
+    _, _, _, keys, adapter, signed = world
+
+    def retire(grant: str, issuer: str) -> str:
+        """Simulate trust changing after cache verification but before decision."""
+        keys.clear()
+        return ""
+
+    lookup = adapter(approval_ref_for=retire)
+    lookup.refresh(*signed())
+    unavailable(lookup)
+
+
+def test_prepared_verifier_resolves_only_each_events_key(world: World) -> None:
+    """Multiple signing keys must not turn N event checks into N-squared reads."""
+    trust = tuple((f"key-{n}", PUBLIC) for n in range(16))
+    calls: list[str] = []
+
+    def sample(ids: list[str]) -> tuple[tuple[str, bytes], ...]:
+        """Count trusted resolver reads independently of cryptography."""
+        calls.extend(ids)
+        return tuple((key, PUBLIC) for key in ids)
+
+    entries = frozenset((ISSUER, key, PUBLIC, "digest", "signature") for key, _ in trust)
+    prepared = MODULE._PreparedEventVerifier(ISSUER, entries, trust, sample)
+    for key, _ in trust:
+        assert prepared.verify_event(key, "digest", "signature")
+    assert len(calls) == 16
+
+
+def test_prewarm_trust_refusal_still_commits_forward_clock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already detected prewarm error is retained while time commits, not retried."""
+    _, _, now, _, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    now[0] += timedelta(seconds=1)
+    raw, _ = signed()
+    with sqlite3.connect(lookup.cache_path) as db:
+        db.execute("UPDATE verified_snapshot SET raw_state=?", (raw,))
+    original = lookup._keys._public_key_for
+    calls: list[int] = []
+
+    def once(issuer: str, key: str) -> bytes | None:
+        """Fail one trusted read, making automatic recovery observable."""
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("synthetic-trust-outage")
+        return original(issuer, key)
+
+    monkeypatch.setattr(lookup._keys, "_public_key_for", once)
+    unavailable(lookup)
+    with sqlite3.connect(lookup.cache_path) as db:
+        at = db.execute("SELECT at FROM observed_clock").fetchone()[0]
+    assert wire.parse_timestamp(at) == now[0]
+    assert calls == [1]

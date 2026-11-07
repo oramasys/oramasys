@@ -20,6 +20,7 @@ import logging
 import sqlite3
 import hashlib
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from datetime import datetime
@@ -29,7 +30,6 @@ from typing import Any
 from orama.graph.dispatch_attempts import SqliteAttemptStore
 from orama.graph.final_boundary import RevocationUnavailable
 from phylax import dispatch_wire as wire
-from phylax.dispatch_retention import verify_chain
 from phylax.revocation_publication import (
     DEFAULT_MAX_STATE_AGE_SECONDS,
     MAX_STATE_BYTES,
@@ -86,6 +86,26 @@ class _SnapshotMemo:
                 and hashlib.sha256(feed).digest() == self.feed_sha256)
 
 
+class _PreparedEventVerifier:
+    """Use private successful crypto evidence while resampling live issuer trust."""
+
+    def __init__(
+        self, issuer: str, entries: frozenset[tuple[str, str, bytes, str, str]],
+        trust: tuple[tuple[str, bytes], ...],
+        sample: Callable[[Sequence[str]], tuple[tuple[str, bytes], ...] | None],
+    ) -> None:
+        """Freeze this operation's evidence so later eviction cannot mutate it."""
+        self._issuer, self._entries, self._trust, self._sample = issuer, entries, trust, sample
+        self._public = dict(trust)
+
+    def verify_event(self, key_id: str, digest: str, signature: str) -> bool:
+        """Refuse changed trust; misses never run cryptography under the store lock."""
+        public = self._public.get(key_id)
+        if public is not None and self._sample([key_id]) != ((key_id, public),):
+            raise RevocationUnavailable("issuer key trust changed")
+        return public is not None and (self._issuer, key_id, public, digest, signature) in self._entries
+
+
 class RevocationFeedAdapter:
     """Explicit bounded full-feed refresh and retryable-unavailable RevocationLookup.
 
@@ -127,6 +147,8 @@ class RevocationFeedAdapter:
         self._snapshot_memo: _SnapshotMemo | None = None
         self._prewarm_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
+        self._crypto_lock = threading.Lock()
+        self._event_crypto: OrderedDict[tuple[str, str, bytes, str, str], None] = OrderedDict()
         with closing(self._connect()) as db:
             db.execute("CREATE TABLE IF NOT EXISTS verified_snapshot ("
                        "issuer_id TEXT PRIMARY KEY, raw_state BLOB NOT NULL, feed BLOB NOT NULL)")
@@ -196,11 +218,58 @@ class RevocationFeedAdapter:
         # Explicit genesis checks also support the producer's original R3 main API.
         if state.head_version != len(events) or (events and events[0].get("version") != 1):
             raise ValueError("feed must be complete from genesis")
-        tip = verify_chain(events, previous_digest=wire.GENESIS_EVENT_DIGEST, resolver=self._keys)
-        if tip != state.head_event_digest:
-            raise ValueError("state head mismatch")
+        # The producer verifies signatures, genesis, exact head and replayed summary.
         verify_state_against_chain(state, events, resolver=self._keys)
         return state
+
+    def _prepare_ingest_verifier(
+        self, events: Sequence[Mapping[str, Any]], trust: tuple[tuple[str, bytes], ...],
+    ) -> _PreparedEventVerifier:
+        """Prepare bounded exact event evidence outside cache and store write locks."""
+        if len(events) > self._max_events or self._trust([key for key, _ in trust]) != trust:
+            raise RevocationUnavailable("unavailable event verification trust")
+        public = dict(trust)
+        entries: set[tuple[str, str, bytes, str, str]] = set()
+        for event in events:
+            key_id, digest, signature = (event[name] for name in ("issuer_key_id", "event_digest", "signature"))
+            key = public.get(key_id)
+            if key is None:
+                raise RevocationUnavailable("event key unavailable")
+            entry = (self._issuer, key_id, key, digest, signature)
+            with self._crypto_lock:
+                known = entry in self._event_crypto
+            if not known and not wire.verify_event(key, digest, signature):
+                raise RevocationUnavailable("event signature unavailable")
+            entries.add(entry)
+            with self._crypto_lock:
+                self._event_crypto[entry] = None
+                self._event_crypto.move_to_end(entry)
+                while len(self._event_crypto) > self._max_events:
+                    self._event_crypto.popitem(last=False)
+        if self._trust([key for key, _ in trust]) != trust:
+            raise RevocationUnavailable("issuer key trust changed")
+        return _PreparedEventVerifier(self._issuer, frozenset(entries), trust, self._trust)
+
+    def _prepare_previous_snapshot(self) -> _SnapshotMemo | None:
+        """Authenticate old bytes outside locks solely for historical antirollback."""
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT raw_state, feed FROM verified_snapshot WHERE issuer_id=?",
+                             (self._issuer,)).fetchone()
+        if row is None:
+            return None
+        raw, feed = row
+        if not isinstance(raw, bytes) or not isinstance(feed, bytes):
+            raise ValueError("cache holds non-byte values")
+        if len(raw) > MAX_STATE_BYTES or len(feed) > self._max_bytes:
+            raise ValueError("cache exceeds bounds")
+        if self._snapshot_memo is not None and self._snapshot_memo.matches(raw, feed):
+            return self._snapshot_memo
+        events, canonical = self._copy_feed(json.loads(feed))
+        if canonical != feed:
+            raise ValueError("noncanonical cached feed")
+        at = wire.parse_timestamp(json.loads(raw)["body"]["generated_at"])
+        _, memo = self._verify_and_remember(raw, feed, events, at)
+        return memo
 
     def _trust(self, key_ids: Sequence[str]) -> tuple[tuple[str, bytes], ...] | None:
         """Sample current trusted keys for ``key_ids``; None if any is no longer trusted."""
@@ -236,7 +305,9 @@ class RevocationFeedAdapter:
         """Apply the producer freshness rule verify_state applies; raise when stale or future."""
         CombinedRevocationLookup(state, clock=lambda: at, max_age_seconds=self._max_age).reason("", None)
 
-    def _cached(self, db: sqlite3.Connection, *, now: datetime | None = None) -> VerifiedState | None:
+    def _cached(
+        self, db: sqlite3.Connection, *, now: datetime | None = None, allow_replay: bool = True,
+    ) -> VerifiedState | None:
         """Return the cached snapshot, reverifying unless exact bytes and trust are unchanged.
 
         Historical signature verification (``now`` None) is ONLY for antirollback comparison.
@@ -260,6 +331,8 @@ class RevocationFeedAdapter:
                 self._require_fresh(memo.state, now)
             return memo.state
         self._snapshot_memo = None
+        if not allow_replay:
+            raise RevocationUnavailable("cached snapshot changed after preparation")
         events, canonical = self._copy_feed(json.loads(feed))
         if canonical != feed:
             raise ValueError("noncanonical cached feed")
@@ -335,6 +408,8 @@ class RevocationFeedAdapter:
                 self._refresh_locked(raw_state, events)
             except BaseException:
                 self._snapshot_memo = None
+                with self._crypto_lock:
+                    self._event_crypto.clear()
                 raise
             self._ready = True
 
@@ -348,6 +423,10 @@ class RevocationFeedAdapter:
         # Full replay of the caller's input happens before the cache write lock; trust is
         # resampled under the lock and any detected change refuses the refresh.
         state, memo = self._verify_and_remember(raw, feed, chain, now)
+        if memo is None:
+            raise RevocationUnavailable("unavailable verified feed trust")
+        prepared = self._prepare_ingest_verifier(chain, memo.trust)
+        self._snapshot_memo = self._prepare_previous_snapshot()
         with self._transaction() as db:
             locked_now = self._clock()
             wire.timestamp(locked_now)
@@ -355,12 +434,10 @@ class RevocationFeedAdapter:
                 raise ValueError("clock rollback during refresh")
             now = locked_now
             self._check_time(db, now)
-            if memo is None:
-                state, memo = self._verify_and_remember(raw, feed, chain, now)
-            elif self._trust([key_id for key_id, _ in memo.trust]) != memo.trust:
+            if self._trust([key_id for key_id, _ in memo.trust]) != memo.trust:
                 raise RevocationUnavailable("issuer key trust changed")
             self._require_fresh(state, now)
-            old = self._cached(db)
+            old = self._cached(db, allow_replay=False)
             if old:
                 if state.head_version < old.head_version or state.generated_at < old.generated_at:
                     raise ValueError("state rollback")
@@ -371,10 +448,12 @@ class RevocationFeedAdapter:
                 raise ValueError("attempt store diverged")
             if self._store.acked_through(self._issuer) > state.head_version:
                 raise ValueError("snapshot behind acknowledged events")
-            self._store.ingest_events(self._issuer, chain, self._keys)
+            self._store.ingest_events(self._issuer, chain, prepared)
             if (self._store.acked_through(self._issuer) != state.head_version
                     or self._store.is_diverged(self._issuer)):
                 raise ValueError("event acknowledgement incomplete")
+            if self._trust([key_id for key_id, _ in memo.trust]) != memo.trust:
+                raise RevocationUnavailable("issuer key trust changed")
             fresh = self._final_time(db, now, state) is not None
             if fresh:
                 # This commit must be last. On failure existing store denials survive.
@@ -396,41 +475,59 @@ class RevocationFeedAdapter:
             if not self._ready:
                 raise RevocationUnavailable("revocation feed has not completed a fresh refresh")
             wire.validate_identifier("grant_id", grant_id)
-            self._prewarm(self._clock())
-            now = self._observe_time()
+            deferred: Exception | None = None
+            try:
+                self._prewarm(self._clock())
+            except Exception as error:  # noqa: BLE001 - retain refusal while time commits
+                deferred = error
             unavailable: str | None = None
             decision: bool | None = None
             with self._transaction() as db:
-                locked_now = self._clock()
-                if locked_now < now:
-                    raise ValueError("clock rollback during lookup")
-                now = locked_now
+                now = self._clock()
+                stamp = wire.timestamp(now)
                 self._check_time(db, now)
-                cached = self._cached(db, now=now)
-                if cached is None or not self._ready:
-                    unavailable = "revocation feed is unavailable during refresh"
-                else:
-                    approval = self._approval(grant_id, issuer_id) if self._approval else None
-                    if approval is not None and not isinstance(approval, str):
-                        unavailable = "trusted approval reference is unavailable"
+                db.execute("INSERT INTO observed_clock VALUES (1, ?) "
+                           "ON CONFLICT(singleton) DO UPDATE SET at=excluded.at", (stamp,))
+                try:
+                    if deferred is not None:
+                        raise deferred
+                    cached = self._cached(db, now=now)
+                    if cached is None or not self._ready:
+                        unavailable = "revocation feed is unavailable during refresh"
                     else:
-                        if approval:
-                            wire.validate_identifier("approval_id", approval)
-                        final = self._final_time(db, now, cached)
-                        if final is None:
-                            unavailable = "revocation feed became stale during lookup"
+                        approval = self._approval(grant_id, issuer_id) if self._approval else None
+                        if approval is not None and not isinstance(approval, str):
+                            unavailable = "trusted approval reference is unavailable"
                         else:
-                            lookup = CombinedRevocationLookup(
-                                cached, clock=lambda: final, max_age_seconds=self._max_age,
-                            )
-                            decision = lookup.reason(grant_id, approval) is not None
+                            if approval:
+                                wire.validate_identifier("approval_id", approval)
+                            memo = self._snapshot_memo
+                            if (memo is None or memo.state is not cached
+                                    or self._trust([key for key, _ in memo.trust]) != memo.trust):
+                                raise RevocationUnavailable("issuer key trust changed")
+                            final = self._final_time(db, now, cached)
+                            if final is None:
+                                unavailable = "revocation feed became stale during lookup"
+                            else:
+                                lookup = CombinedRevocationLookup(
+                                    cached, clock=lambda: final, max_age_seconds=self._max_age,
+                                )
+                                decision = lookup.reason(grant_id, approval) is not None
+                except Exception as error:  # noqa: BLE001 - commit observed time, then refuse
+                    deferred = error
+            if deferred is not None:
+                raise deferred
             if unavailable is not None:
                 raise RevocationUnavailable(unavailable)
             if decision is None:
                 raise RevocationUnavailable("revocation feed returned no decision")
             return decision
         except RevocationUnavailable:
+            with self._crypto_lock:
+                self._event_crypto.clear()
             raise
         except Exception as error:  # noqa: BLE001 - fail closed on any unsafe read
+            with self._crypto_lock:
+                self._event_crypto.clear()
             _LOG.warning("revocation lookup failed closed: %s", type(error).__name__)
             raise RevocationUnavailable("revocation feed lookup failed") from None
