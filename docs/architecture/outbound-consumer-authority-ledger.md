@@ -3,6 +3,18 @@
 > **2026-11-06:** The earlier absence claim below predates
 > [`GuardedForeignInvoker`](../../src/orama/providers/foreign_transport.py).
 > Its presence does not qualify a real provider deployment or bypass Telos authority.
+> The "Explicit Gap" and "Dependency Boundary" absence statements are historical:
+> `GuardedForeignInvoker` is a concrete `ProviderInvoker` that ships dark, dials only
+> through an injected `DialPort` that must be Telos-backed, and keeps durable SQLite call/cost
+> holds tagged by `run_id` ([contract](../foreign-provider-transport.md)); the cap
+> counts all unreleased holds across the database. `build_graph`
+> also accepts an optional injected `OutboundLedger` and calls `record` synchronously.
+> The standalone `JsonlOutboundLedger` has an async `record` and requires an adapter
+> for graph use; it cannot be injected directly. `JsonlOutboundLedger`
+> (`src/orama/providers/outbound_ledger.py`) is append-only and coordinates writers
+> only within one instance. Separate instances writing the same path require external
+> coordination, even within one process. Neither is wired into a default serving path, and no
+> owner-defined persistence and retention authority has been recorded.
 
 Status: current static inventory. This document records authority boundaries;
 it is not a runtime dispatch or financial ledger.
@@ -12,6 +24,7 @@ it is not a runtime dispatch or financial ledger.
 | `src/orama/gateway/dialer.py` | No | `telos.SecureDialer` via `ModelServerDialer` | `src/tests/test_model_server_dialer.py`, `src/tests/test_gateway_telos_conformance.py` | Enforced |
 | Oramasys discovery health probe | No | `telos.request` via `orama.discovery.probe` (exact-candidate authorizer); Core keeps pure store/selection only | `src/tests/test_core_telos_discovery_contract.py`, `src/tests/test_discovery_health_probe.py` | Composition-owned |
 | `src/orama/graph/perpetua_graph.py` provider dispatch | No | Injected `ProviderInvoker` contract; result requires opaque provider and decision references | `src/tests/test_provider_transport_contract.py` | Delegated boundary |
+| `src/orama/providers/foreign_transport.py` `GuardedForeignInvoker` | No (AST-checked) | Injected `DialPort` (must be Telos-backed); default `TransportConfig()` refuses every call | `src/tests/test_foreign_transport.py` | Dark by default; not wired |
 | Production-source scan | N/A | `scripts/check_telos_network_authority.py` rejects independent HTTP, socket, and network-command paths | `src/tests/test_telos_network_authority.py` | Enforced |
 
 ## Explicit Gap

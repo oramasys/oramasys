@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import closing
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -580,3 +581,683 @@ def test_lookup_rechecks_clock_after_trusted_callback(world: World, seconds: int
         time[0] = NOW
         with pytest.raises(ValueError):
             adapter().refresh(*original)
+
+
+# ---------------------------------------------------------------------------
+# C6: trust-and-byte-aware verified-snapshot reuse (2026-11-06)
+# ---------------------------------------------------------------------------
+
+
+def counted(lookup: Any, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count full signature/chain replays performed by one adapter instance."""
+    calls: list[int] = []
+    original = lookup._verify
+
+    def verify(*args: Any) -> Any:
+        """Record a full replay before delegating to the real verification."""
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(lookup, "_verify", verify)
+    return calls
+
+
+def test_unchanged_bytes_and_trust_reuse_verification_without_replay(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identical cached bytes under identical current trust skip the full chain replay."""
+    producer, _, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    a = adapter()
+    a.refresh(*signed())
+    replays = counted(a, monkeypatch)
+    for _ in range(3):
+        assert a.revoked("safe", ISSUER) is False
+        assert a.revoked("bad", ISSUER) is True
+    assert replays == []
+
+
+@pytest.mark.parametrize("change", ["retired", "replaced", "resolver_error"])
+def test_key_retirement_after_snapshot_write_invalidates_reuse(
+    world: World, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """Trust removal or replacement without any byte change must not revive the snapshot."""
+    _, _, _, keys, adapter, signed = world
+    a = adapter()
+    a.refresh(*signed())
+    assert a.revoked("safe", ISSUER) is False
+    if change == "retired":
+        keys.pop((ISSUER, "key-1"))
+    elif change == "replaced":
+        keys[(ISSUER, "key-1")] = crypto_sign_seed_keypair(b"2" * 32)[0]
+    else:
+        def broken(issuer: str, key: str) -> bytes | None:
+            """Simulate an unavailable trusted key registry."""
+            raise OSError("registry unavailable")
+
+        monkeypatch.setattr(a._keys, "_public_key_for", broken)
+    unavailable(a)
+    unavailable(a)
+    if change != "resolver_error":
+        keys[(ISSUER, "key-1")] = PUBLIC
+        # Restored trust reverifies the unchanged bytes rather than trusting a memo.
+        assert a.revoked("safe", ISSUER) is False
+
+
+def test_retired_key_snapshot_is_not_revived_by_restart(world: World) -> None:
+    """A restarted instance cannot reload or refresh a snapshot signed by a retired key."""
+    _, store, _, keys, adapter, signed = world
+    original = signed()
+    adapter().refresh(*original)
+    keys.pop((ISSUER, "key-1"))
+    restarted = adapter()
+    unavailable(restarted)
+    with pytest.raises(Exception):
+        restarted.refresh(*original)
+    unavailable(restarted)
+    assert store.acked_through(ISSUER) == 0
+
+
+@pytest.mark.parametrize("damage", [
+    "state_truncated", "state_extended", "state_byte_flip", "feed_truncated",
+    "feed_extended", "feed_byte_flip", "state_other_head", "feed_other_head", "state_resigned_digest",
+])
+def test_cached_byte_tamper_after_warm_lookup_fails_closed(
+    world: World, damage: str,
+) -> None:
+    """Any change to cached bytes, length, digest or head is reverified and refused."""
+    producer, _, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    shorter = signed()
+    producer.append_revocation("grant", "worse", signer=Signer())
+    raw, events = signed()
+    a = adapter()
+    a.refresh(raw, events)
+    assert a.revoked("safe", ISSUER) is False
+    with sqlite3.connect(a.cache_path) as db:
+        state, feed = db.execute("SELECT raw_state, feed FROM verified_snapshot").fetchone()
+        if damage == "state_truncated":
+            state = state[:-1]
+        elif damage == "state_extended":
+            state = state + b" "
+        elif damage == "state_byte_flip":
+            index = state.index(b'"worse"') + 1
+            state = state[:index] + b"W" + state[index + 1:]
+        elif damage == "feed_truncated":
+            feed = feed[:-1]
+        elif damage == "feed_extended":
+            feed = feed + b" "
+        elif damage == "feed_byte_flip":
+            index = feed.index(b'"worse"') + 1
+            feed = feed[:index] + b"W" + feed[index + 1:]
+        elif damage == "state_other_head":
+            state = shorter[0]
+        elif damage == "feed_other_head":
+            feed = b"[" + b",".join(wire.canonical_bytes(e) for e in shorter[1]) + b"]"
+        else:
+            state = resign(state, head_event_digest="sha256:" + "0" * 64)
+        db.execute("UPDATE verified_snapshot SET raw_state = ?, feed = ?", (state, feed))
+    unavailable(a)
+    unavailable(a, "bad")
+
+
+def test_cross_process_writer_replaces_reused_snapshot(world: World) -> None:
+    """A newer snapshot written by another instance is read, never the reused older one."""
+    producer, _, _, _, adapter, signed = world
+    reader, writer = adapter(), adapter()
+    reader.refresh(*signed())
+    assert reader.revoked("late", ISSUER) is False
+    producer.append_revocation("grant", "late", signer=Signer())
+    writer.refresh(*signed())
+    assert reader.revoked("late", ISSUER) is True
+
+
+@pytest.mark.parametrize("seconds", [-1, 61])
+def test_reused_snapshot_still_obeys_clock_rollback_and_expiry(world: World, seconds: int) -> None:
+    """Reuse never skips the per-lookup clock high-water mark or freshness window."""
+    _, _, time, _, adapter, _ = world
+    a = adapter()
+    a.refresh(*world[5]())
+    assert a.revoked("safe", ISSUER) is False
+    time[0] += timedelta(seconds=seconds)
+    unavailable(a)
+    time[0] = NOW + timedelta(seconds=1)
+    if seconds < 0:
+        assert a.revoked("safe", ISSUER) is False
+    else:
+        unavailable(a)
+
+
+def test_restart_reverifies_and_failed_refresh_drops_reuse(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse is per-instance memory: restart reverifies, and a failed refresh discards it."""
+    producer, _, _, _, adapter, signed = world
+    a = adapter()
+    a.refresh(*signed())
+    assert a.revoked("safe", ISSUER) is False
+    restarted = adapter()
+    restarted.refresh(*signed())
+    replays = counted(restarted, monkeypatch)
+    assert restarted.revoked("safe", ISSUER) is False
+    assert replays == []
+    with pytest.raises(Exception):
+        restarted.refresh(b"{}", [])
+    unavailable(restarted)
+    assert restarted._snapshot_memo is None
+
+
+def test_lookup_replays_a_changed_snapshot_outside_the_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full replay after another writer's refresh must not block other cache writers."""
+    producer, _, _, _, adapter, signed = world
+    reader, writer = adapter(), adapter()
+    reader.refresh(*signed())
+    producer.append_revocation("grant", "late", signer=Signer())
+    writer.refresh(*signed())
+    lock_free = lock_probe(reader, monkeypatch)
+    assert reader.revoked("late", ISSUER) is True
+    assert lock_free == [True]
+    # The locked decision reused the outside-lock verification of the same bytes.
+    assert reader.revoked("safe", ISSUER) is False
+    assert lock_free == [True]
+
+
+def lock_probe(lookup: Any, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Record, per full replay, whether another connection could take the cache write lock."""
+    original = lookup._verify
+    lock_free: list[bool] = []
+
+    def probe(*args: Any) -> Any:
+        """Try a zero-wait write lock from a second connection, then replay for real."""
+        with closing(sqlite3.connect(lookup.cache_path, timeout=0, isolation_level=None)) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("ROLLBACK")
+                lock_free.append(True)
+            except sqlite3.OperationalError:
+                lock_free.append(False)
+        return original(*args)
+
+    monkeypatch.setattr(lookup, "_verify", probe)
+    return lock_free
+
+
+def test_refresh_replays_new_input_once_and_outside_the_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh verifies its input before locking and reuses its own previous snapshot record."""
+    producer, _, _, _, adapter, signed = world
+    a = adapter()
+    a.refresh(*signed())
+    producer.append_revocation("grant", "late", signer=Signer())
+    lock_free = lock_probe(a, monkeypatch)
+    a.refresh(*signed())
+    assert lock_free == [True]
+    assert a.revoked("late", ISSUER) is True
+    assert lock_free == [True]
+
+
+def test_refresh_rechecks_trust_after_taking_the_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Key retirement between outside-lock verification and the locked commit is refused."""
+    from contextlib import contextmanager
+
+    producer, store, _, keys, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    a = adapter()
+    raw, events = signed()
+    transaction = a._transaction
+    entered: list[int] = []
+
+    @contextmanager
+    def retire_on_second_lock() -> Iterator[sqlite3.Connection]:
+        """Retire the key just as the refresh's main write transaction begins."""
+        entered.append(1)
+        if len(entered) == 2:
+            keys.pop((ISSUER, "key-1"))
+        with transaction() as database:
+            yield database
+
+    monkeypatch.setattr(a, "_transaction", retire_on_second_lock)
+    with pytest.raises(Exception):
+        a.refresh(raw, events)
+    assert len(entered) >= 2
+    assert store.acked_through(ISSUER) == 0
+    with sqlite3.connect(a.cache_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM verified_snapshot").fetchone()[0] == 0
+    unavailable(a)
+
+
+def test_concurrent_lookups_replay_a_changed_snapshot_once(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threads that find the same changed snapshot share one full replay, not one each."""
+    import time as wall
+
+    producer, _, _, _, adapter, signed = world
+    reader, writer = adapter(), adapter()
+    reader.refresh(*signed())
+    producer.append_revocation("grant", "late", signer=Signer())
+    writer.refresh(*signed())
+    original = reader._verify
+    replays: list[int] = []
+
+    def slow(*args: Any) -> Any:
+        """Widen the replay window so concurrent lookups overlap it."""
+        replays.append(1)
+        wall.sleep(0.2)
+        return original(*args)
+
+    monkeypatch.setattr(reader, "_verify", slow)
+    start = threading.Barrier(4)
+    answers: list[bool | str] = []
+
+    def lookup() -> None:
+        """Start together, then record the decision or the unavailability."""
+        start.wait()
+        try:
+            answers.append(reader.revoked("late", ISSUER))
+        except MODULE.RevocationUnavailable:
+            answers.append("unavailable")
+
+    threads = [threading.Thread(target=lookup) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert replays == [1]
+    assert answers == [True] * 4
+
+
+@pytest.mark.parametrize("change", ["retired", "replaced"])
+def test_key_retirement_or_replacement_during_lookup_verification_fails_closed(
+    world: World, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """O2: Trust retiring or replacing while _verify runs must fail closed and never return allow."""
+    _, _, _, keys, adapter, signed = world
+    a = adapter()
+    a.refresh(*signed())
+    assert a.revoked("safe", ISSUER) is False
+
+    a._snapshot_memo = None
+    original_verify = a._verify
+
+    def verify_and_change_trust(raw: bytes, events: list[dict[str, Any]], now: datetime) -> Any:
+        """Change issuer trust immediately after signature verification."""
+        state = original_verify(raw, events, now)
+        if change == "retired":
+            keys.pop((ISSUER, "key-1"))
+        else:
+            keys[(ISSUER, "key-1")] = crypto_sign_seed_keypair(b"9" * 32)[0]
+        return state
+
+    monkeypatch.setattr(a, "_verify", verify_and_change_trust)
+    unavailable(a)
+
+
+@pytest.mark.parametrize("change", ["retired", "replaced"])
+def test_key_retirement_or_replacement_during_refresh_verification_fails_closed(
+    world: World, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """O2: Trust retiring or replacing while refresh verifies must fail closed."""
+    _, store, _, keys, adapter, signed = world
+    a = adapter()
+    raw, events = signed()
+    original_verify = a._verify
+
+    def verify_and_change_trust(raw_bytes: bytes, evts: list[dict[str, Any]], now: datetime) -> Any:
+        """Change issuer trust immediately after signature verification."""
+        state = original_verify(raw_bytes, evts, now)
+        if change == "retired":
+            keys.pop((ISSUER, "key-1"))
+        else:
+            keys[(ISSUER, "key-1")] = crypto_sign_seed_keypair(b"9" * 32)[0]
+        return state
+
+    monkeypatch.setattr(a, "_verify", verify_and_change_trust)
+    with pytest.raises(MODULE.RevocationUnavailable):
+        a.refresh(raw, events)
+    unavailable(a)
+    assert store.acked_through(ISSUER) == 0
+
+
+def test_transient_trust_change_during_prewarm_refuses_lookup(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A detected trust change cannot be hidden by a later successful replay."""
+    _, _, _, keys, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    lookup._snapshot_memo = None
+    original = lookup._trust
+    calls = 0
+
+    def transient_trust(key_ids: Any) -> Any:
+        """Remove trust for the post-verification sample, then restore it."""
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return None
+        return original(key_ids)
+
+    monkeypatch.setattr(lookup, "_trust", transient_trust)
+    unavailable(lookup)
+    assert keys[(ISSUER, "key-1")] == PUBLIC
+
+
+@pytest.mark.parametrize("operation", ["lookup", "refresh"])
+def test_detected_transient_trust_change_refuses_without_retry(
+    world: World, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    """A changed locked trust sample refuses even when trust immediately recovers."""
+    _, _, _, _, adapter, signed = world
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    original = lookup._trust
+    calls = 0
+    changed_call = 1 if operation == "lookup" else 3
+
+    def transient_trust(key_ids: Any) -> Any:
+        """Return a changed key for the locked trust sample only."""
+        nonlocal calls
+        calls += 1
+        if calls == changed_call:
+            return (("key-1", b"x" * 32),)
+        return original(key_ids)
+
+    monkeypatch.setattr(lookup, "_trust", transient_trust)
+    if operation == "lookup":
+        unavailable(lookup)
+    else:
+        with pytest.raises(MODULE.RevocationUnavailable):
+            lookup.refresh(*snapshot)
+
+
+@pytest.mark.parametrize("operation", ["prewarm", "warm", "refresh"])
+def test_once_raising_key_resolver_refuses_current_operation(
+    world: World, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    """A transient resolver outage cannot turn into an allow by retrying."""
+    _, _, _, _, adapter, signed = world
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    if operation == "prewarm":
+        lookup._snapshot_memo = None
+    original = lookup._keys._public_key_for
+    calls = 0
+
+    def raises_once(issuer: str, key: str) -> bytes | None:
+        """Fail the first trusted read and recover on later reads."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("resolver unavailable")
+        return original(issuer, key)
+
+    monkeypatch.setattr(lookup._keys, "_public_key_for", raises_once)
+    if operation == "refresh":
+        with pytest.raises(MODULE.RevocationUnavailable):
+            lookup.refresh(*snapshot)
+    else:
+        unavailable(lookup)
+
+
+def test_event_crypto_is_outside_refresh_cache_write_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every event primitive must run before the nested write-lock interval."""
+    producer, _, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    original = wire.verify_event
+    free: list[bool] = []
+
+    def probe(*args: Any) -> bool:
+        """Probe actual event crypto instead of only the outer replay method."""
+        with closing(sqlite3.connect(lookup.cache_path, timeout=0, isolation_level=None)) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("ROLLBACK")
+                free.append(True)
+            except sqlite3.OperationalError:
+                free.append(False)
+        return original(*args)
+
+    monkeypatch.setattr(wire, "verify_event", probe)
+    lookup.refresh(*signed())
+    assert free and all(free)
+
+
+def test_separate_writer_old_snapshot_replay_is_outside_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly opened refresher must not replay its old snapshot under lock."""
+    producer, _, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    adapter().refresh(*signed())
+    other = adapter()
+    free = lock_probe(other, monkeypatch)
+    other.refresh(*signed())
+    assert free and all(free)
+
+
+def test_prepared_event_verifier_misses_fail_closed(world: World) -> None:
+    """Changing any cryptographic tuple component must not hit prepared evidence."""
+    producer, _, _, keys, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    _, events = signed()
+    prepared = lookup._prepare_ingest_verifier(events, (("key-1", PUBLIC),))
+    event = events[0]
+    assert prepared.verify_event("key-1", event["event_digest"], event["signature"])
+    assert not prepared.verify_event("other", event["event_digest"], event["signature"])
+    assert not prepared.verify_event("key-1", "0" * 64, event["signature"])
+    assert not prepared.verify_event("key-1", event["event_digest"], "0" * len(event["signature"]))
+    keys[(ISSUER, "key-1")] = b"x" * 32
+    with pytest.raises(MODULE.RevocationUnavailable):
+        prepared.verify_event("key-1", event["event_digest"], event["signature"])
+
+
+def test_preparation_does_not_hold_cache_writer_and_lookup_progresses(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A separate serving adapter can make progress while refresh prepares crypto."""
+    _, _, _, _, adapter, signed = world
+    serving, writer = adapter(), adapter()
+    snapshot = signed()
+    serving.refresh(*snapshot)
+    entered, release = threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+    original = writer._prepare_ingest_verifier
+
+    def blocked(*args: Any) -> Any:
+        """Pause only outside-lock preparation using bounded synchronization."""
+        entered.set()
+        assert release.wait(5)
+        return original(*args)
+
+    def refresh() -> None:
+        """Keep thread failures visible to the test owner."""
+        try:
+            writer.refresh(*snapshot)
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(writer, "_prepare_ingest_verifier", blocked)
+    worker = threading.Thread(target=refresh)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert serving.revoked("safe", ISSUER) is False
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive() and not errors
+
+
+def test_changed_old_snapshot_never_replays_under_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cross-process replacement after preparation refuses this refresh."""
+    _, store, _, _, adapter, signed = world
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    original = lookup._prepare_previous_snapshot
+
+    def replace_after_prepare() -> Any:
+        """Change exact durable bytes after their historical authentication."""
+        memo = original()
+        with sqlite3.connect(lookup.cache_path) as db:
+            db.execute("UPDATE verified_snapshot SET feed=?", (b"[ ]",))
+        return memo
+
+    monkeypatch.setattr(lookup, "_prepare_previous_snapshot", replace_after_prepare)
+    free = lock_probe(lookup, monkeypatch)
+    with pytest.raises(MODULE.RevocationUnavailable):
+        lookup.refresh(*snapshot)
+    assert all(free)
+    assert store.acked_through(ISSUER) == 0
+    unavailable(lookup)
+
+
+def test_trust_loss_after_ack_blocks_freshness_publication(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committed denials may survive trust loss, but new freshness must not."""
+    producer, store, _, keys, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    original = store.ingest_events
+
+    def revoke_after_ack(*args: Any) -> None:
+        """Remove trust in the exact post-ack/pre-publication window."""
+        original(*args)
+        keys.clear()
+
+    monkeypatch.setattr(store, "ingest_events", revoke_after_ack)
+    with pytest.raises(MODULE.RevocationUnavailable):
+        lookup.refresh(*signed())
+    assert store.acked_through(ISSUER) == 1
+    with sqlite3.connect(lookup.cache_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM verified_snapshot").fetchone()[0] == 0
+
+
+def test_public_duplicate_ingest_still_checks_signature(world: World) -> None:
+    """Optimized adapter evidence does not relax the public ingestion port."""
+    from orama.graph.dispatch_attempts import EventRefused
+
+    producer, store, _, _, adapter, signed = world
+    producer.append_revocation("grant", "bad", signer=Signer())
+    lookup = adapter()
+    snapshot = signed()
+    lookup.refresh(*snapshot)
+    damaged = deepcopy(snapshot[1])
+    damaged[0]["signature"] = wire.sign_event(b"x" * 32, damaged[0]["event_digest"])
+    with pytest.raises(EventRefused) as caught:
+        store.ingest_events(ISSUER, damaged, lookup._keys)
+    assert caught.value.reason == "event_signature"
+
+
+def test_lookup_uses_one_durable_clock_transaction(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup need not acquire the same SQLite writer twice."""
+    from contextlib import contextmanager
+
+    _, _, _, _, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    original = lookup._transaction
+    writes: list[int] = []
+
+    @contextmanager
+    def count() -> Iterator[sqlite3.Connection]:
+        """Count committed-clock transaction entries."""
+        writes.append(1)
+        with original() as db:
+            yield db
+
+    monkeypatch.setattr(lookup, "_transaction", count)
+    assert lookup.revoked("safe", ISSUER) is False
+    assert writes == [1]
+
+
+def test_refused_lookup_preserves_forward_clock(world: World) -> None:
+    """Consolidating transactions must still commit time on stale-snapshot refusal."""
+    _, _, now, _, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    now[0] += timedelta(seconds=61)
+    unavailable(lookup)
+    with sqlite3.connect(lookup.cache_path) as db:
+        at = db.execute("SELECT at FROM observed_clock WHERE singleton=1").fetchone()[0]
+    assert wire.parse_timestamp(at) == now[0]
+    now[0] -= timedelta(seconds=1)
+    with pytest.raises(ValueError, match="clock rollback"):
+        lookup._observe_time()
+
+
+def test_trust_change_in_approval_callback_refuses_lookup(world: World) -> None:
+    """A trusted callback cannot leave a decision using newly retired keys."""
+    _, _, _, keys, adapter, signed = world
+
+    def retire(grant: str, issuer: str) -> str:
+        """Simulate trust changing after cache verification but before decision."""
+        keys.clear()
+        return ""
+
+    lookup = adapter(approval_ref_for=retire)
+    lookup.refresh(*signed())
+    unavailable(lookup)
+
+
+def test_prepared_verifier_resolves_only_each_events_key(world: World) -> None:
+    """Multiple signing keys must not turn N event checks into N-squared reads."""
+    trust = tuple((f"key-{n}", PUBLIC) for n in range(16))
+    calls: list[str] = []
+
+    def sample(ids: list[str]) -> tuple[tuple[str, bytes], ...]:
+        """Count trusted resolver reads independently of cryptography."""
+        calls.extend(ids)
+        return tuple((key, PUBLIC) for key in ids)
+
+    entries = frozenset((ISSUER, key, PUBLIC, "digest", "signature") for key, _ in trust)
+    prepared = MODULE._PreparedEventVerifier(ISSUER, entries, trust, sample)
+    for key, _ in trust:
+        assert prepared.verify_event(key, "digest", "signature")
+    assert len(calls) == 16
+
+
+def test_prewarm_trust_refusal_still_commits_forward_clock(
+    world: World, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already detected prewarm error is retained while time commits, not retried."""
+    _, _, now, _, adapter, signed = world
+    lookup = adapter()
+    lookup.refresh(*signed())
+    now[0] += timedelta(seconds=1)
+    raw, _ = signed()
+    with sqlite3.connect(lookup.cache_path) as db:
+        db.execute("UPDATE verified_snapshot SET raw_state=?", (raw,))
+    original = lookup._keys._public_key_for
+    calls: list[int] = []
+
+    def once(issuer: str, key: str) -> bytes | None:
+        """Fail one trusted read, making automatic recovery observable."""
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("synthetic-trust-outage")
+        return original(issuer, key)
+
+    monkeypatch.setattr(lookup._keys, "_public_key_for", once)
+    unavailable(lookup)
+    with sqlite3.connect(lookup.cache_path) as db:
+        at = db.execute("SELECT at FROM observed_clock").fetchone()[0]
+    assert wire.parse_timestamp(at) == now[0]
+    assert calls == [1]

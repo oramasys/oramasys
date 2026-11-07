@@ -1,5 +1,9 @@
 # ADR 71: Operator-Provisioned Recovery Grants and C4 Autonomous Tier
 
+> **2026-11-06:** This local copy is not maintained. The canonical ADR is
+> [orama-system `docs/v2/71`](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/71-operator-provisioning-and-autonomous-tier-adr.md)
+> on `main`; it governs where the two differ.
+
 > **Numbering and ownership.** This is ADR 71 in `orama-system`'s `docs/v2/` numbering (drafted here as `56-`). Documentation lives in `orama-system`; this file is to become a link-only pointer to [the orama-system copy](https://github.com/diazMelgarejo/orama-system/blob/docs/v2-71-operator-provisioning-adr-20261013/docs/v2/71-operator-provisioning-and-autonomous-tier-adr.md), with no duplicate content.
 
 **Date:** 2026-10-13

@@ -1,5 +1,10 @@
 # Task 6 Operator Provisioning and Autonomous Tier Implementation Plan
 
+> **2026-11-06:** This local copy is not maintained, and its statements about
+> what is on Phylax `main` disagree internally. The canonical plan is
+> [orama-system `docs/v2/72`](https://github.com/diazMelgarejo/orama-system/blob/main/docs/v2/72-task6-operator-provisioning-and-autonomous-tier-plan.md)
+> on `main`; verify Phylax state from Phylax itself.
+
 > For agentic workers: use `superpowers:subagent-driven-development` for independent implementation and review, or `superpowers:executing-plans` for a single-worker execution. This document is a planning artifact; implementation starts after its written review.
 >
 > **Numbering and ownership.** This is plan 72 in `orama-system`'s `docs/v2/` numbering (drafted here as `57-`). Documentation lives in `orama-system`; this file is to become a link-only pointer to [the orama-system copy](https://github.com/diazMelgarejo/orama-system/blob/docs/v2-71-operator-provisioning-adr-20261013/docs/v2/72-task6-operator-provisioning-and-autonomous-tier-plan.md), with no duplicate content.

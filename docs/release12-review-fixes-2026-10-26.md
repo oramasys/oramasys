@@ -1,5 +1,9 @@
 # Release 1–2 review fixes and remaining deployment evidence
 
+> **2026-11-06:** Historical review-fix record (2026-10-26). Current gate status is
+> in the [post-merge qualification handoff](release12-postmerge-qualification-2026-11-04.md)
+> and the R1–R8 table of the [remaining requirements](release12-remaining-requirements-2026-10-29.md).
+
 ## Candidate boundaries
 
 Phylax candidate `e3e954a0253d7d4b452af1da71348a06b23118ae` restricts issuance to
