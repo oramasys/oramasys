@@ -2,8 +2,8 @@
 
 > **2026-11-06:** Next-gate items 1 and 2 have an implementation and container-only
 > measurements in the [availability budget proposal](revocation-availability-budget-proposal-2026-11-06.md).
-> The workload and budget there are proposed, not approved; target-filesystem measurement
-> remains owner-held. The body below is preserved as written.
+> The workload and budget are approved targets, as amended in the linked proposal.
+> Target-filesystem measurement and qualification remain open. The body below is preserved as written.
 
 ## Sources and implementation
 
