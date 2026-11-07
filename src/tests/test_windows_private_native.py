@@ -45,10 +45,25 @@ def test_native_windows_refuses_everyone_acl(tmp_path: Path, target: str) -> Non
     selected = {"parent": store.parent, "store": store,
                 "wal": Path(f"{store}-wal"), "shm": Path(f"{store}-shm")}[target]
     if target in ("wal", "shm"):
-        selected.touch()
+        # Elevated runners may default to Administrators ownership. Establish
+        # the valid owner first so this case specifically tests ACL refusal.
+        WindowsSecurity().create_file(selected)
+    assert prepare_private_store(store) == store
     subprocess.run(["icacls", str(selected), "/grant", "*S-1-1-0:(R)"],
                    check=True, capture_output=True)
     with pytest.raises(PermissionError, match="DACL"):
+        prepare_private_store(store)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native token default-owner semantics")
+def test_native_windows_refuses_different_default_owner(tmp_path: Path) -> None:
+    """Existing default-Administrators-owned sidecars are not silently repaired."""
+    store = prepare_private_store(tmp_path / "private" / "ledger.sqlite3")
+    sidecar = Path(f"{store}-wal")
+    sidecar.touch()
+    if _check_windows_ownership(sidecar):
+        pytest.skip("token default owner already equals TokenUser")
+    with pytest.raises(PermissionError, match="owned by the current user"):
         prepare_private_store(store)
 
 

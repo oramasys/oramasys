@@ -120,6 +120,13 @@ Existing parents, databases and sidecars are inspected, never silently repaired.
 An elevated token's default owner does not authorize accepting arbitrary
 existing administrator-owned stores.
 
+Native CI observed that ordinary sidecar creation under an elevated token can
+choose Administrators as owner, even beneath a protected parent. Such existing
+sidecars deliberately refuse rather than being repaired or accepted globally.
+This candidate does not qualify elevated SQLite WAL operation: native agents
+must test the actual service token and full create/reopen lifecycle. Prefer the
+reviewed non-elevated service identity; do not change its privileges silently.
+
 Creation and later validation still perform separate pathname resolutions.
 New-file security is inspected through its handle, but this is not a
 handle-relative traversal guarantee for the parent or ancestors. The selected

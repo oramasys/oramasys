@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install focused test runner
-        run: python -m pip install 'pytest>=7,<9'
+        run: python -m pip install 'pytest>=7,<9' 'pytest-asyncio>=0.21,<2'
       - name: Exercise real Win32 ownership, protected ACLs and unsafe-ACL refusal
         env:
           PYTHONPATH: src
