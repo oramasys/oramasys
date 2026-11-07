@@ -86,9 +86,11 @@ does not review, qualify, approve or activate anything; R4–R8 stay open.
 - **R7 generation/pin decision:** operator, C10.
 - **R8 activation:** operator, C11.
 - **`governed` default:** runtime owner. Code is unchanged here.
-- **Controller:** partially implemented and not wired or deployed. C3d remains open for
-  operator review and acceptance of the exact final SHA, legacy-job disposition,
-  rollback and runbook acceptance, and contract review; real adapters and serving
-  composition remain outside this slice.
+- **Controller (C3d):** Partially implemented and not wired or deployed. C3d accepted
+  by operator on 2026-11-07 for PR #95 at exact tip `8961a8f697a3edf7772b77733df1f3084821b96e`
+  (alongside orama-system #477 at `602a9099` and Perpetua-Tools #481 at `3f04623c`).
+  Real adapters and serving composition remain outside this slice; serving remains
+  OFF (`governed=False`, `ORAMA_GRANT_SERVING` unset). Native Windows, host
+  qualification, and Release R6 remain open.
 - **Future policy backlog:** make an independent reviewer configurable, defaulting
   to operator-only review. This does not change doc 68 or runtime policy in this closure.
