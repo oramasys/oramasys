@@ -30,7 +30,15 @@ Do not "fix" this by wrapping ``gh`` in ``telos.request()``.
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 import hashlib
 import hmac
 import json
@@ -43,7 +51,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 GRANT_MARKER = "operator-grant-v2"
 GRANT_TTL_SECONDS = 8 * 3600
@@ -61,10 +69,12 @@ class GrantError(Exception):
 
 
 def _now_utc() -> datetime:
+    """Return the current aware UTC timestamp."""
     return datetime.now(timezone.utc)
 
 
 def _parse_timestamp(raw: str) -> datetime | None:
+    """Parse an ISO timestamp, returning None for malformed input."""
     try:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
@@ -94,6 +104,7 @@ def _canonical_payload(
     action: str,
     content_digest: str,
 ) -> bytes:
+    """Perform canonical payload."""
     return canonical_payload_bytes(
         repo, pr_number, nonce, issued_at, action, content_digest
     )
@@ -107,6 +118,7 @@ def content_digest_for_append(
     message: str | None,
     cwd: Path | None = None,
 ) -> str:
+    """Perform content digest for append."""
     if file_path:
         if any(ch in file_path for ch in ("\x00", "\r", "\n")):
             raise GrantError("file_path contains invalid control characters")
@@ -139,6 +151,7 @@ def content_digest_for_append(
 
 
 def _read_secret_from_keychain() -> str | None:
+    """Perform read secret from keychain."""
     if sys.platform != "darwin":
         return None
     try:
@@ -164,6 +177,7 @@ def _read_secret_from_keychain() -> str | None:
 
 
 def _ensure_keychain_secret() -> str:
+    """Perform ensure keychain secret."""
     existing = _read_secret_from_keychain()
     if existing:
         return existing
@@ -193,6 +207,7 @@ def _ensure_keychain_secret() -> str:
 
 
 def _read_fallback_secret_file() -> str | None:
+    """Perform read fallback secret file."""
     if not FALLBACK_SECRET_PATH.is_file():
         return None
     try:
@@ -207,6 +222,7 @@ _ACTION_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 
 
 def _validate_repo_slug(repo: str) -> None:
+    """Perform validate repo slug."""
     if not isinstance(repo, str) or not _REPO_SLUG_RE.match(repo.strip()):
         raise GrantError(
             "grant repo must not contain pipe or newline characters and must match 'owner/repo'"
@@ -214,6 +230,7 @@ def _validate_repo_slug(repo: str) -> None:
 
 
 def _validate_pr_number(pr_number: str | int) -> None:
+    """Perform validate pr number."""
     text = str(pr_number).strip()
     if not _PR_NUMBER_RE.match(text):
         raise GrantError(
@@ -222,6 +239,7 @@ def _validate_pr_number(pr_number: str | int) -> None:
 
 
 def _validate_action(action: str) -> None:
+    """Perform validate action."""
     if not isinstance(action, str) or not _ACTION_RE.match(action.strip()):
         raise GrantError(
             "grant action must not contain pipe or newline characters and must match alphanumeric slug"
@@ -229,6 +247,7 @@ def _validate_action(action: str) -> None:
 
 
 def _write_private_file(path: Path, content: str) -> None:
+    """Perform write private file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.unlink(missing_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -240,10 +259,12 @@ def _write_private_file(path: Path, content: str) -> None:
 
 
 def _write_fallback_secret_file(secret: str) -> None:
+    """Perform write fallback secret file."""
     _write_private_file(FALLBACK_SECRET_PATH, secret + "\n")
 
 
 def resolve_hmac_secret(allow_generate: bool = False) -> bytes:
+    """Resolve the configured HMAC secret, generating only when permitted."""
     env_val = os.environ.get(ENV_SECRET)
     if env_val:
         return env_val.encode("utf-8")
@@ -272,14 +293,17 @@ def resolve_hmac_secret(allow_generate: bool = False) -> bytes:
 
 
 def _sign(secret: bytes, payload: bytes) -> str:
+    """Compute the hexadecimal HMAC signature over the exact payload."""
     return hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
 def _constant_time_eq(left: str, right: str) -> bool:
+    """Compare signatures using the constant-time primitive."""
     return hmac.compare_digest(left, right)
 
 
 def parse_ack_text(text: str) -> dict[str, str]:
+    """Perform parse ack text."""
     fields: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
@@ -294,6 +318,7 @@ def parse_ack_text(text: str) -> dict[str, str]:
 
 
 def read_ack_fields() -> dict[str, str]:
+    """Perform read ack fields."""
     if not ACK_PATH.is_file():
         return {}
     try:
@@ -303,6 +328,7 @@ def read_ack_fields() -> dict[str, str]:
 
 
 def _grant_ttl_ok(issued_raw: str) -> bool:
+    """Perform grant ttl ok."""
     issued = _parse_timestamp(issued_raw)
     if issued is None:
         return False
@@ -312,12 +338,37 @@ def _grant_ttl_ok(issued_raw: str) -> bool:
     return 0 <= age <= GRANT_TTL_SECONDS
 
 
+def lock_file_exclusive(handle: Any) -> None:
+    """Acquire an exclusive advisory lock across POSIX and Windows."""
+    if os.name == "nt" or fcntl is None:
+        if msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            raise OSError("No file locking mechanism available on this platform")
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def unlock_file(handle: Any) -> None:
+    """Release an advisory lock across POSIX and Windows."""
+    if os.name == "nt" or fcntl is None:
+        if msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @contextmanager
-def _locked_nonce_state():
+def _locked_nonce_state() -> Iterator[tuple[Any, dict[str, Any]]]:
+    """Yield nonce state under a lock, always closing even after cleanup failure."""
     NONCE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     handle = open(NONCE_STATE_PATH, "a+", encoding="utf-8")
+    acquired = False
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        lock_file_exclusive(handle)
+        acquired = True
         handle.seek(0)
         raw = handle.read()
         if raw.strip():
@@ -333,11 +384,15 @@ def _locked_nonce_state():
             state["reservations"] = {}
         yield handle, state
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        try:
+            if acquired:
+                unlock_file(handle)
+        finally:
+            handle.close()
 
 
 def _write_nonce_state(handle: Any, state: dict[str, Any]) -> None:
+    """Write, flush and fsync the nonce ledger while its lock is held."""
     handle.seek(0)
     handle.truncate()
     json.dump(state, handle)
@@ -346,6 +401,7 @@ def _write_nonce_state(handle: Any, state: dict[str, Any]) -> None:
 
 
 def _prune_nonce_state(state: dict[str, Any]) -> None:
+    """Remove expired or malformed nonce and reservation entries."""
     nonces = state.get("nonces", {})
     reservations = state.get("reservations", {})
     cutoff = _now_utc().timestamp() - GRANT_TTL_SECONDS
@@ -371,6 +427,7 @@ def _reservation_matches(
     pr_number: str,
     content_digest: str,
 ) -> bool:
+    """Perform reservation matches."""
     return (
         entry.get("repo", "") == repo
         and entry.get("pr", "") == str(pr_number)
@@ -384,6 +441,7 @@ def _reservation_blocks_verify(
     pr_number: str,
     content_digest: str,
 ) -> tuple[bool, str]:
+    """Perform reservation blocks verify."""
     with _locked_nonce_state() as (_handle, state):
         _prune_nonce_state(state)
         entry = state.get("reservations", {}).get(nonce)
@@ -446,6 +504,7 @@ def release_nonce_reservation_atomic(nonce: str) -> None:
 
 
 def nonce_is_consumed(nonce: str) -> bool:
+    """Perform nonce is consumed."""
     with _locked_nonce_state() as (_handle, state):
         _prune_nonce_state(state)
         return nonce in state["nonces"]
@@ -476,6 +535,7 @@ def verify_grant_fields(
     action: str = DEFAULT_ACTION,
     check_nonce_consumed: bool = True,
 ) -> tuple[bool, str]:
+    """Perform verify grant fields."""
     try:
         _validate_repo_slug(repo)
         _validate_pr_number(pr_number)
@@ -556,6 +616,7 @@ def verify_grant_for_append(
     # Reject malformed grant identity before touching an operator-supplied path.
     # verify_grant_fields repeats these checks as defense in depth for callers
     # that already have a digest.
+    """Perform verify grant for append."""
     try:
         _validate_repo_slug(repo)
         _validate_pr_number(pr_number)
@@ -601,6 +662,7 @@ def reserve_grant_for_append(
     message: str | None,
     cwd: Path | None = None,
 ) -> tuple[bool, str]:
+    """Perform reserve grant for append."""
     try:
         _validate_repo_slug(repo)
         _validate_pr_number(pr_number)
@@ -633,6 +695,7 @@ def mark_remote_applied_for_append(
     message: str | None,
     cwd: Path | None = None,
 ) -> tuple[bool, str]:
+    """Perform mark remote applied for append."""
     try:
         _validate_repo_slug(repo)
         _validate_pr_number(pr_number)
@@ -662,6 +725,7 @@ def release_grant_for_append(
     message: str | None,
     cwd: Path | None = None,
 ) -> tuple[bool, str]:
+    """Perform release grant for append."""
     try:
         _validate_repo_slug(repo)
         _validate_pr_number(pr_number)
@@ -779,6 +843,7 @@ def mint_grant(
     message: str | None,
     cwd: Path | None = None,
 ) -> Path:
+    """Perform mint grant."""
     _validate_repo_slug(repo)
     _validate_pr_number(pr_number)
     digest = content_digest_for_append(file_path, message, cwd=cwd)
@@ -816,6 +881,7 @@ APPEND_SEGMENT_RE = re.compile(
 
 
 def parse_append_segment(segment: str) -> tuple[str, str, str | None, str | None] | None:
+    """Perform parse append segment."""
     seg = segment.strip()
     if "append_pr_summary.py" not in seg and "append-pr-body.sh" not in seg:
         return None
@@ -855,6 +921,7 @@ def parse_append_segment(segment: str) -> tuple[str, str, str | None, str | None
 
 
 def _cmd_mint(args: argparse.Namespace) -> int:
+    """Perform mint."""
     path = mint_grant(args.repo, args.pr, args.file, args.message)
     print(f"OK: grant v2 written to {path}")
     print(f"  repo={args.repo} pr={args.pr} TTL=8h single-use")
@@ -862,6 +929,7 @@ def _cmd_mint(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
+    """Perform verify."""
     ok, err = verify_grant_for_append(
         args.repo,
         args.pr,
@@ -877,6 +945,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_consume(args: argparse.Namespace) -> int:
+    """Perform consume."""
     ok, err = verify_grant_for_append(
         args.repo,
         args.pr,
@@ -892,6 +961,7 @@ def _cmd_consume(args: argparse.Namespace) -> int:
 
 
 def _cmd_reserve(args: argparse.Namespace) -> int:
+    """Perform reserve."""
     ok, err = reserve_grant_for_append(
         args.repo,
         args.pr,
@@ -906,6 +976,7 @@ def _cmd_reserve(args: argparse.Namespace) -> int:
 
 
 def _cmd_release(args: argparse.Namespace) -> int:
+    """Perform release."""
     ok, err = release_grant_for_append(
         args.repo,
         args.pr,
@@ -920,6 +991,7 @@ def _cmd_release(args: argparse.Namespace) -> int:
 
 
 def _cmd_mark_applied(args: argparse.Namespace) -> int:
+    """Perform mark applied."""
     ok, err = mark_remote_applied_for_append(
         args.repo,
         args.pr,
@@ -934,6 +1006,7 @@ def _cmd_mark_applied(args: argparse.Namespace) -> int:
 
 
 def _cmd_reconcile(args: argparse.Namespace) -> int:
+    """Perform reconcile."""
     try:
         remote_body = Path(args.remote_body_file).read_text(encoding="utf-8")
     except OSError as exc:
@@ -968,10 +1041,12 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch the operator grant command-line interface."""
     parser = argparse.ArgumentParser(description="PR-body operator grant v2")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_append_args(p: argparse.ArgumentParser) -> None:
+        """Perform add append args."""
         p.add_argument("--repo", required=True)
         p.add_argument("--pr", required=True)
         p.add_argument("--file")
