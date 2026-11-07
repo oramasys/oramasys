@@ -8,22 +8,7 @@ import subprocess
 import pytest
 
 from orama.graph.private_store import _check_windows_ownership, prepare_private_store
-from orama.graph.windows_private import WindowsSecurity, acl_is_private
-
-
-@pytest.mark.parametrize("aces,expected", [
-    ([(0, 0x1F01FF, "user"), (0, 0x1F01FF, "S-1-5-18")], True),
-    ([(0, 0x1F01FF, "S-1-5-32-544")], True),
-    ([(0, 1, "S-1-1-0")], False),
-    ([(0, 0x10000000, "other-user")], False),
-    ([(1, 0x1F01FF, "S-1-1-0")], True),
-    ([(5, 1, "user")], False),
-])
-def test_acl_policy_rejects_foreign_or_unknown_grants(
-    aces: list[tuple[int, int, str]], expected: bool
-) -> None:
-    """Foreign read/write grants and unknown ACE forms must refuse validation."""
-    assert acl_is_private(aces, "user") is expected
+from orama.graph.windows_private import WindowsSecurity
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires actual Win32 ctypes and NTFS ACLs")
@@ -73,4 +58,5 @@ def test_native_windows_foreign_owner_fixture() -> None:
     fixture = os.environ.get("ORAMA_TEST_FOREIGN_OWNER_FILE")
     if not fixture:
         pytest.skip("operator-provisioned foreign-owner fixture not supplied")
+    assert Path(fixture).is_file(), "foreign-owner fixture must exist as a regular file"
     assert not _check_windows_ownership(Path(fixture))

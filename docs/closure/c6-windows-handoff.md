@@ -137,7 +137,10 @@ qualification pending a separately reviewed handle-pinned traversal design.
 No test here proves isolation from the same user or an administrator.
 
 The native CI lane tests Windows Python 3.11, 3.12 and 3.13. Linux simulations
-are not native Windows security evidence. Native-agent tasks:
+are not native Windows security evidence. Native cases live in `tests/windows/`
+and run in their dedicated required evidence lane; platform-independent ACL
+policy tests remain in the application suite. Linux compatibility-oracle skip
+budgets are unchanged. Native-agent tasks:
 
 1. Freeze source head, interpreter/build, SQLite source ID and NTFS facts.
    Use a disposable checkout and test directory, never production data.
@@ -147,7 +150,7 @@ are not native Windows security evidence. Native-agent tasks:
 
    ```powershell
    $env:PYTHONPATH = 'src'
-   python -m pytest -q src/tests/test_windows_private_native.py
+   python -m pytest -q tests/windows/test_private_store_native.py
    if ($LASTEXITCODE -ne 0) { throw 'Native security verification failed' }
    python -m pytest -q src/tests/test_private_store.py -k 'safe_replace or nonce_lock_failure'
    if ($LASTEXITCODE -ne 0) { throw 'Replacement/lock verification failed' }

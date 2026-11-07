@@ -28,8 +28,8 @@ jobs:
       - name: Exercise real Win32 ownership, protected ACLs and unsafe-ACL refusal
         env:
           PYTHONPATH: src
-        run: python -m pytest -q src/tests/test_windows_private_native.py
+        run: python -m pytest -q tests/windows/test_private_store_native.py
       - name: Exercise bounded replacement and lock-cleanup semantics
         env:
           PYTHONPATH: src
-        run: python -m pytest -q src/tests/test_private_store.py -k 'safe_replace or nonce_lock_failure'
+        run: python -m pytest -q src/tests/test_private_store.py -k 'safe_replace or nonce_lock_failure or acl_policy'

@@ -48,6 +48,23 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.lstat().st_mode)
 
 
+@pytest.mark.parametrize("aces,expected", [
+    ([(0, 0x1F01FF, "user"), (0, 0x1F01FF, "S-1-5-18")], True),
+    ([(0, 0x1F01FF, "S-1-5-32-544")], True),
+    ([(0, 1, "S-1-1-0")], False),
+    ([(0, 0x10000000, "other-user")], False),
+    ([(1, 0x1F01FF, "S-1-1-0")], True),
+    ([(5, 1, "user")], False),
+])
+def test_acl_policy_rejects_foreign_or_unknown_grants(
+    aces: list[tuple[int, int, str]], expected: bool
+) -> None:
+    """Foreign read/write grants and unknown ACE forms must refuse validation."""
+    from orama.graph.windows_private import acl_is_private
+
+    assert acl_is_private(aces, "user") is expected
+
+
 @_posix_only
 def test_creates_private_parent_and_database_without_changing_ancestor(tmp_path: Path) -> None:
     """Verify creates private parent and database without changing ancestor."""
