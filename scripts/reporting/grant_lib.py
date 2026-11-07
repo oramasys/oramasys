@@ -30,7 +30,15 @@ Do not "fix" this by wrapping ``gh`` in ``telos.request()``.
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 import hashlib
 import hmac
 import json
@@ -312,12 +320,34 @@ def _grant_ttl_ok(issued_raw: str) -> bool:
     return 0 <= age <= GRANT_TTL_SECONDS
 
 
+def lock_file_exclusive(handle: Any) -> None:
+    """Acquire an exclusive advisory lock across POSIX and Windows."""
+    if os.name == "nt" or fcntl is None:
+        if msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            raise OSError("No file locking mechanism available on this platform")
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def unlock_file(handle: Any) -> None:
+    """Release an advisory lock across POSIX and Windows."""
+    if os.name == "nt" or fcntl is None:
+        if msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @contextmanager
 def _locked_nonce_state():
     NONCE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     handle = open(NONCE_STATE_PATH, "a+", encoding="utf-8")
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        lock_file_exclusive(handle)
         handle.seek(0)
         raw = handle.read()
         if raw.strip():
@@ -333,7 +363,7 @@ def _locked_nonce_state():
             state["reservations"] = {}
         yield handle, state
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        unlock_file(handle)
         handle.close()
 
 
