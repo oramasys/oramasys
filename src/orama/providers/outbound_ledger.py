@@ -8,9 +8,10 @@ on purpose — routing and policy evaluation remain in the graph and Telos
 respectively, while paid-call accounting remains a separate SQLite authority.
 
 Records are JSON-lines, one per dispatch, written under a per-instance
-asyncio lock. Concurrent writers using that same instance cannot interleave
-a line. Separate instances, even within one process, require external writer
-coordination when sharing a path; see JsonlOutboundLedger's own docstring.
+asyncio lock. The no-interleaving guarantee is limited to coroutines using
+the same instance on a single event loop. Threads, separate event loops,
+and separate instances sharing a path require external writer coordination;
+see JsonlOutboundLedger's own docstring.
 ``read_all`` parses and validates strictly: a malformed line, or a
 syntactically valid line that violates the record schema (wrong field
 types, an outcome outside the allowed vocabulary, a missing/invalid
@@ -101,8 +102,9 @@ class JsonlOutboundLedger:
     read accessor is read_all(), not entries() -- so it is a standalone
     durable audit-log utility, not a drop-in implementation of that seam.
 
-    Writer serialization is per instance. Separate instances sharing a path,
-    whether in one process or multiple processes, need external coordination.
+    Writer serialization is per instance on a single event loop. Threads,
+    separate event loops, and separate instances sharing a path require
+    external writer coordination.
     """
 
     def __init__(self, path: Path | str) -> None:
