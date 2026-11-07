@@ -110,6 +110,68 @@ passes or proof that every workload meets the amended budget.
 
 ## Review and Return Evidence
 
+### PR 98 review closure and native-agent checklist
+
+The review fix creates new parents and stores with an explicit current-token
+user owner and protected DACL, allowing only that user, SYSTEM and
+Administrators. Directory grants inherit into SQLite sidecars. Python 3.11+
+uses the same Win32 security mechanism, not POSIX `mode=0700` emulation.
+Existing parents, databases and sidecars are inspected, never silently repaired.
+An elevated token's default owner does not authorize accepting arbitrary
+existing administrator-owned stores.
+
+Creation and later validation still perform separate pathname resolutions.
+New-file security is inspected through its handle, but this is not a
+handle-relative traversal guarantee for the parent or ancestors. The selected
+deployment location must have ancestors that unrelated users cannot write,
+rename or replace with junctions/reparse points. Do not qualify a shared or
+attacker-writable namespace. If that precondition cannot be established, block
+qualification pending a separately reviewed handle-pinned traversal design.
+No test here proves isolation from the same user or an administrator.
+
+The native CI lane tests Windows Python 3.11, 3.12 and 3.13. Linux simulations
+are not native Windows security evidence. Native-agent tasks:
+
+1. Freeze source head, interpreter/build, SQLite source ID and NTFS facts.
+   Use a disposable checkout and test directory, never production data.
+2. Run under the actual non-elevated serving account, then in a separately
+   authorized elevated test shell. The created-store test must pass in both.
+   Record token class without publishing the actual account name/SID.
+
+   ```powershell
+   $env:PYTHONPATH = 'src'
+   python -m pytest -q src/tests/test_windows_private_native.py
+   if ($LASTEXITCODE -ne 0) { throw 'Native security verification failed' }
+   python -m pytest -q src/tests/test_private_store.py -k 'safe_replace or nonce_lock_failure'
+   if ($LASTEXITCODE -ne 0) { throw 'Replacement/lock verification failed' }
+   ```
+
+3. Provision a foreign-owned disposable fixture through an approved second
+   principal. Set `ORAMA_TEST_FOREIGN_OWNER_FILE` locally and rerun the native
+   suite. The test reads but does not modify that fixture. Without it, report
+   the negative-owner case as skipped, not verified.
+4. Confirm existing administrator-owned objects are refused for a different
+   token user. Exercise actual second-account read/write denial for the parent,
+   database, WAL and SHM. Everyone-grant tests alter only their own temporary
+   fixtures; never grant access on real data.
+5. Establish trusted-ancestor ACL/rename restrictions and test real junction
+   refusal and handle cleanup. Test SQLite WAL creation/reopen and advisory-lock
+   serialization across actual processes. Mocks do not establish these claims.
+6. Continue Tier 3 full producer/consumer controls and qualification above.
+   Preserve failed trials and return sanitized receipts and unresolved limits.
+
+`safe_replace` uses deterministic backoff: five default sleeps total 62 ms,
+without jitter. Only explicit WinError 5/32 candidates retry. WinError 5 can
+also be permanent ACL denial, so exhaustion propagates it. Missing-source,
+cross-device and POSIX permission failures propagate immediately. The original
+implementation overgeneralized contention to every Windows `OSError` and
+duplicated subclass/base-class handlers. That was correctness debt, not a team
+style requirement. Do not repeat the old description's unimplemented jitter.
+
+These source fixes do not close Windows qualification, independent review,
+promotion or activation. Both platforms must supply evidence before the
+C8 → C9/R6 → C10/R7 → C11/R8 sequence can close.
+
 Return sanitized facts, exact source/build identifiers, experiment digests,
 test outputs and a design per slice through the approved peer inbox or
 GossipBus. Preserve originating author, current actor, bounded review and
