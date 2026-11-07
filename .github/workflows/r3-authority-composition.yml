@@ -56,12 +56,24 @@ jobs:
           src/tests/test_serve_with_effect_grants.py
           src/tests/test_inert_effect_process_crashes.py
           src/tests/test_loaded_deployment_identity.py
+      # The availability harness refuses any SQLite older than the WAL-reset fix (3.51.3), and the
+      # runner's own Python 3.11/3.12 embeds an older one. The rehearsal therefore runs under a pinned,
+      # uv-managed CPython whose embedded SQLite passes the same gate (3.13.15 embeds 3.53.1). The
+      # matrix tests above are unchanged, and the gate below still fails closed if the build is wrong.
+      - name: Install a SQLite-floor Python for the inert availability rehearsal
+        timeout-minutes: 8
+        run: |
+          python -m pip install 'uv==0.13.4'
+          uv python install --no-bin 3.13.15
+          uv venv --managed-python --python 3.13.15 "$RUNNER_TEMP/c6-venv"
+          uv pip install --python "$RUNNER_TEMP/c6-venv/bin/python" '.[dev]' 'PyNaCl==1.6.2'
+          "$RUNNER_TEMP/c6-venv/bin/python" -I scripts/c6_runtime.py
       - name: Rehearse inert availability harness (not C6 qualification)
         env:
           PYTHONPATH: phylax-r3/src:src
         timeout-minutes: 3
         run: |
-          python scripts/benchmark_revocation_availability.py \
+          "$RUNNER_TEMP/c6-venv/bin/python" scripts/benchmark_revocation_availability.py \
             --events 16 --senders 2 --sends 3 --send-interval 0 \
             --refresh-interval 0 --refresher separate --retries 2 \
             --label "CI synthetic smoke; not target-filesystem qualification" \
