@@ -27,9 +27,9 @@ and merges operator-held.
 | --- | --- | --- | --- |
 | Phylax producer portability (`platform_fs`, reserved names) | C6 Windows handoff Tier 2 | **Software landed** | Phylax `origin/main` `2c11d15` (ex `#32`) |
 | Oramasys Windows private_store / grant_lib slice | C6 Windows handoff Tier 2–3 software | **Software landed** | Oramasys `main` `f33d809` (ex `#98`) |
-| Mac SQLite floor ≥ 3.51.3 on *actual* linked library | C6 Mac runbook C7/C8 | **Pass on uv 3.13.15** | Receipt `/tmp/c6-runtime-receipt-uv-3.13.15-20261113.json` — SQLite **3.53.1** |
+| Mac SQLite floor on the service-manager interpreter | C6 Mac runbook C7/C8 | **Open** | The uv 3.13.15 receipt shows SQLite 3.53.1 for that interpreter only. The serving-runtime gate stays open until a receipt from the service-manager interpreter. |
 | Framework / default Mac Python 3.13.0 | same | **Fail closed** | SQLite **3.45.3** — do not use for C6 |
-| Selected baseline CPython 3.13.18 | runbook preferred build | **Not installed** | Floor met by 3.13.15/3.53.1; fresh baseline comparison required if operator insists on 3.13.18 |
+| Selected runtime baseline | runbook unchanged adapter/store comparison | **Open** | Whichever CPython the operator selects needs a fresh comparison on the same harness, runtime, and dependencies as the candidate. 3.13.18 is not installed. 3.13.15 with SQLite 3.53.1 meets the floor and does not replace that comparison. |
 | Dedicated env with `.[dev]` + `PyNaCl==1.6.2` | runbook isolated environment | **Done (agent)** | `/private/tmp/c6-venv-20261113` on uv 3.13.15 |
 | Crypto packages on dedicated venv | runtime receipt | **Done (agent)** | PyNaCl 1.6.2 + cffi in `c6-runtime-receipt.json` |
 | Inert CI-scale availability smoke | CI rehearsal only | **Done (agent)** | 6/6 sent; not target-filesystem qualification |
@@ -84,12 +84,20 @@ PYTHONPATH="src:$PHYLAX_SOURCE/src" \
 Operator Mac candidate (do **not** run as activation):
 
 ```bash
-# After controls A/B per c6-qualification-runbook.md — three times, distinct files:
-$PY scripts/benchmark_revocation_availability.py \
+# After controls A/B per c6-qualification-runbook.md — three times, distinct files.
+# EVIDENCE must already be a protected directory. Do not create it here.
+: "${EVIDENCE:?set EVIDENCE to an existing protected directory}"
+test -d "$EVIDENCE" && test -w "$EVIDENCE"
+export PY="$C6_VENV/bin/python"
+export PYTHONPATH="src:${PHYLAX_SOURCE}/src"
+set -o noclobber
+"$PY" scripts/benchmark_revocation_availability.py \
   --events 256 --senders 8 --sends 300 --send-interval 0.2 \
   --refresh-interval 15 --refresher separate --retries 2 \
   --samples-jsonl "$EVIDENCE/run-N.jsonl" \
-  --label "Mac APFS candidate run N"
+  --label "Mac APFS candidate run N" \
+  > "$EVIDENCE/run-N.stdout.json" \
+  2> "$EVIDENCE/run-N.stderr.txt"
 ```
 
 ---
