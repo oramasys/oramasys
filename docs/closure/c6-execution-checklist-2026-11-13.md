@@ -81,15 +81,21 @@ PYTHONPATH="src:$PHYLAX_SOURCE/src" \
   --label "agent inert smoke; not target-filesystem qualification"
 ```
 
-Operator Mac candidate (do **not** run as activation):
+Operator environment, before controls A/B and every candidate run.
+Do not run as activation. Do not point `PY` at `C6_VENV` unless that
+venv is the runtime already selected for the baseline and controls.
+Leave `PY` unchanged for the candidate runs.
 
 ```bash
-# After controls A/B per c6-qualification-runbook.md — three times, distinct files.
-# EVIDENCE must already be a protected directory. Do not create it here.
+: "${PY:?set PY to the selected interpreter before controls}"
 : "${EVIDENCE:?set EVIDENCE to an existing protected directory}"
 test -d "$EVIDENCE" && test -w "$EVIDENCE"
-export PY="$C6_VENV/bin/python"
 export PYTHONPATH="src:${PHYLAX_SOURCE}/src"
+```
+
+Candidate command, three times, distinct files. Uses the same `PY`:
+
+```bash
 set -o noclobber
 "$PY" scripts/benchmark_revocation_availability.py \
   --events 256 --senders 8 --sends 300 --send-interval 0.2 \
