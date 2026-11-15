@@ -63,6 +63,7 @@ def test_native_windows_foreign_owner_fixture() -> None:
 
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires actual Win32 ctypes and NTFS ACLs")
 def test_default_dacl_root_passes_private_acl(tmp_path: Path) -> None:
     """A tempfile-style run root must pass the private-DACL gate on Windows.
 
