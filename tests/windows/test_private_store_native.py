@@ -60,3 +60,39 @@ def test_native_windows_foreign_owner_fixture() -> None:
         pytest.skip("operator-provisioned foreign-owner fixture not supplied")
     assert Path(fixture).is_file(), "foreign-owner fixture must exist as a regular file"
     assert not _check_windows_ownership(Path(fixture))
+
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires actual Win32 ctypes and NTFS ACLs")
+def test_default_dacl_root_passes_private_acl(tmp_path: Path) -> None:
+    """A tempfile-style run root must pass the private-DACL gate on Windows.
+
+    Regression for the native Windows C6 Tier 3 blocker: ``os.mkdir`` with NULL
+    security attributes gives the child the process token's default DACL, which
+    grants SYSTEM, Administrators and OWNER RIGHTS (S-1-3-4). OWNER RIGHTS is
+    the object owner itself at access-check time, and ownership is already
+    pinned to the current user, so such a grant cannot widen access to any
+    other principal.
+    """
+    import shutil
+    import tempfile
+
+    from orama.graph.private_store import _check_windows_ownership
+    from orama.graph.windows_private import WindowsSecurity
+
+    default_root = Path(tempfile.mkdtemp(prefix="orama-private-acl-"))
+    # Elevated runners (e.g. GitHub windows-latest) default object ownership
+    # to Administrators, not TokenUser, so a default-DACL child is not
+    # current-user owned and private_acl must refuse it. That is a different
+    # precondition, not this invariant: skip exactly that environment, as the
+    # elevated-ownership isolation in the existing native tests does.
+    probe = default_root / "owner-probe.txt"
+    probe.write_text("")
+    if not _check_windows_ownership(probe):
+        shutil.rmtree(default_root, ignore_errors=True)
+        pytest.skip("token default owner is not TokenUser (elevated runner): "
+                    "default-DACL children are Administrators-owned")
+    try:
+        assert WindowsSecurity().private_acl(default_root) is True
+    finally:
+        shutil.rmtree(default_root, ignore_errors=True)

@@ -51,6 +51,12 @@ def _mode(path: Path) -> int:
 @pytest.mark.parametrize("aces,expected", [
     ([(0, 0x1F01FF, "user"), (0, 0x1F01FF, "S-1-5-18")], True),
     ([(0, 0x1F01FF, "S-1-5-32-544")], True),
+    ([(0, 0x1F01FF, "S-1-3-4")], True),
+    ([
+        (0, 0x1F01FF, "S-1-5-18"),
+        (0, 0x1F01FF, "S-1-5-32-544"),
+        (0, 0x1F01FF, "S-1-3-4"),
+    ], True),
     ([(0, 1, "S-1-1-0")], False),
     ([(0, 0x10000000, "other-user")], False),
     ([(1, 0x1F01FF, "S-1-1-0")], True),
