@@ -60,3 +60,26 @@ def test_native_windows_foreign_owner_fixture() -> None:
         pytest.skip("operator-provisioned foreign-owner fixture not supplied")
     assert Path(fixture).is_file(), "foreign-owner fixture must exist as a regular file"
     assert not _check_windows_ownership(Path(fixture))
+
+
+
+def test_default_dacl_root_passes_private_acl(tmp_path: Path) -> None:
+    """A tempfile-style run root must pass the private-DACL gate on Windows.
+
+    Regression for the native Windows C6 Tier 3 blocker: ``os.mkdir`` with NULL
+    security attributes gives the child the process token's default DACL, which
+    grants SYSTEM, Administrators and OWNER RIGHTS (S-1-3-4). OWNER RIGHTS is
+    the object owner itself at access-check time, and ownership is already
+    pinned to the current user, so such a grant cannot widen access to any
+    other principal.
+    """
+    import shutil
+    import tempfile
+
+    from orama.graph.windows_private import WindowsSecurity
+
+    default_root = Path(tempfile.mkdtemp(prefix="orama-private-acl-"))
+    try:
+        assert WindowsSecurity().private_acl(default_root) is True
+    finally:
+        shutil.rmtree(default_root, ignore_errors=True)
