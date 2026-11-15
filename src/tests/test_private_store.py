@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 import errno
@@ -51,6 +53,12 @@ def _mode(path: Path) -> int:
 @pytest.mark.parametrize("aces,expected", [
     ([(0, 0x1F01FF, "user"), (0, 0x1F01FF, "S-1-5-18")], True),
     ([(0, 0x1F01FF, "S-1-5-32-544")], True),
+    ([(0, 0x1F01FF, "S-1-3-4")], True),
+    ([
+        (0, 0x1F01FF, "S-1-5-18"),
+        (0, 0x1F01FF, "S-1-5-32-544"),
+        (0, 0x1F01FF, "S-1-3-4"),
+    ], True),
     ([(0, 1, "S-1-1-0")], False),
     ([(0, 0x10000000, "other-user")], False),
     ([(1, 0x1F01FF, "S-1-1-0")], True),
@@ -836,3 +844,26 @@ def test_grant_lib_cross_platform_locking(
     assert locked_calls[0][2] == 1
     assert locked_calls[1][1] == FakeMsvcrt.LK_UNLCK
     assert locked_calls[1][2] == 1
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="reproduces the Windows token default-DACL shape (OWNER RIGHTS ACE)",
+)
+def test_windows_default_dacl_root_passes_private_acl(tmp_path: Path) -> None:
+    """A tempfile-style run root must pass the private-DACL gate on Windows.
+
+    Regression for the native Windows C6 Tier 3 blocker: ``os.mkdir`` with NULL
+    security attributes gives the child the process token's default DACL, which
+    grants SYSTEM, Administrators and OWNER RIGHTS (S-1-3-4). OWNER RIGHTS is
+    the object owner itself at access-check time, and ownership is already
+    pinned to the current user, so such a grant cannot widen access to any
+    other principal.
+    """
+    from orama.graph.windows_private import WindowsSecurity
+
+    default_root = Path(tempfile.mkdtemp(prefix="orama-private-acl-"))
+    try:
+        assert WindowsSecurity().private_acl(default_root) is True
+    finally:
+        shutil.rmtree(default_root, ignore_errors=True)

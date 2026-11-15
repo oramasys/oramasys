@@ -18,8 +18,22 @@ def acl_is_private(aces: list[tuple[int, int, str]], user: str) -> bool:
 
     Plain deny ACEs only restrict access. Inherit-only grants are deliberately
     included: they can expose subsequently created SQLite sidecars.
+
+    OWNER RIGHTS (S-1-3-4) is owner-equivalent, not foreign: Windows resolves
+    it to whoever owns the object at access-check time, and directory/file
+    ownership is already pinned to the current user before this check runs.
+    An OWNER RIGHTS grant therefore cannot widen access to any principal the
+    owner check has not already admitted. This is the shape of a default-DACL
+    child (os.mkdir with NULL security attributes): SYSTEM, Administrators and
+    OWNER RIGHTS. Rejecting it there would fail closed on every directory a
+    plain mkdir creates, without blocking any access the owner check does not.
     """
-    allowed = {user, "S-1-5-18", "S-1-5-32-544"}  # user, SYSTEM, Administrators
+    allowed = {
+        user,
+        "S-1-3-4",      # OWNER RIGHTS: aliases the (already pinned) owner
+        "S-1-5-18",     # SYSTEM
+        "S-1-5-32-544",  # Administrators
+    }
     return all(kind == 1 or (kind == 0 and (mask == 0 or sid in allowed))
                for kind, mask, sid in aces)
 
