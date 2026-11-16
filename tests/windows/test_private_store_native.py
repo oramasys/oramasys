@@ -62,14 +62,16 @@ def test_native_windows_foreign_owner_fixture() -> None:
     assert not _check_windows_ownership(Path(fixture))
 
 
-
 @pytest.mark.skipif(os.name != "nt", reason="requires actual Win32 ctypes and NTFS ACLs")
 def test_default_dacl_root_passes_private_acl(tmp_path: Path) -> None:
     """A tempfile-style run root must pass the private-DACL gate on Windows.
 
-    Regression for the native Windows C6 Tier 3 blocker: ``os.mkdir`` with NULL
-    security attributes gives the child the process token's default DACL, which
-    grants SYSTEM, Administrators and OWNER RIGHTS (S-1-3-4). OWNER RIGHTS is
+    Regression for the native Windows C6 Tier 3 blocker: ``tempfile.mkdtemp``
+    creates the root with ``mode=0o700``, for which CPython 3.13+ applies a
+    protected DACL granting SYSTEM, Administrators and OWNER RIGHTS (S-1-3-4).
+    (Corrected 2026-11-16: NULL security attributes inherit the parent's
+    inheritable ACEs and use the token default DACL only when none are
+    inherited.) OWNER RIGHTS is
     the object owner itself at access-check time, and ownership is already
     pinned to the current user, so such a grant cannot widen access to any
     other principal.
