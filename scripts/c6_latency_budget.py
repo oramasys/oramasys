@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -48,19 +49,65 @@ def platform_key(os_name: str = os.name) -> str:
     return "windows-native" if os_name == "nt" else "posix"
 
 
+def _finite(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or None for anything that is not one.
+
+    bool is an int subclass and strings such as "NaN" convert, so both are refused here:
+    a latency is a real JSON number, and NaN or infinity must never compare as in budget.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def violations(result: Mapping[str, Any], key: str) -> list[str]:
-    """Return every budget breach; a missing measurement is a breach (fail closed)."""
+    """Return every budget breach for one result cell; bad measurements fail closed."""
     if key not in BUDGETS:
         raise ValueError(f"unknown budget key {key!r}; expected one of {sorted(BUDGETS)}")
     budget = BUDGETS[key]
     found: list[str] = []
     for name, section, field in _MEASURES:
-        value = (result.get(section) or {}).get(field)
-        if value is None:
+        raw = (result.get(section) or {}).get(field)
+        if raw is None:
             found.append(f"{name} missing")
-        elif float(value) > budget[name]:
-            found.append(f"{name} {float(value)} > {budget[name]}")
+            continue
+        value = _finite(raw)
+        if value is None:
+            found.append(f"{name} not a finite number")
+        elif value > budget[name]:
+            found.append(f"{name} {value} > {budget[name]}")
     return found
+
+
+def check_receipt(receipt: Any, key: str) -> dict[str, Any]:
+    """Check a benchmark receipt (``{"results": [cell, ...]}``) or one bare result cell.
+
+    Every cell must be within budget. A receipt with no usable cell fails closed.
+    """
+    if isinstance(receipt, Mapping) and "results" in receipt:
+        cells = receipt["results"]
+    else:
+        cells = [receipt]
+    found: list[str] = []
+    usable = 0
+    if isinstance(cells, list):
+        for index, cell in enumerate(cells):
+            if not isinstance(cell, Mapping):
+                found.append(f"cell {index}: not a result object")
+                continue
+            usable += 1
+            found.extend(f"cell {index}: {item}" for item in violations(cell, key))
+    if not usable:
+        found.append("no usable result cells")
+    return {
+        "platform": key,
+        "budget": BUDGETS[key],
+        "cells": usable,
+        "violations": found,
+        "within_budget": not found,
+        "qualifies_run": False,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,15 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("result", type=Path, help="benchmark_revocation_availability JSON")
     parser.add_argument("--platform", choices=sorted(BUDGETS), default=platform_key())
     args = parser.parse_args(argv)
-    found = violations(json.loads(args.result.read_text(encoding="utf-8")), args.platform)
-    print(json.dumps({
-        "platform": args.platform,
-        "budget": BUDGETS[args.platform],
-        "violations": found,
-        "within_budget": not found,
-        "qualifies_run": False,
-    }, indent=2))
-    return 1 if found else 0
+    receipt = json.loads(args.result.read_text(encoding="utf-8"))
+    report = check_receipt(receipt, args.platform)
+    print(json.dumps(report, indent=2))
+    return 0 if report["within_budget"] else 1
 
 
 if __name__ == "__main__":

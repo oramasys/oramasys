@@ -95,7 +95,8 @@ fail-open in the accompanying adversarial suite. Review all outcomes, not just
 retryable unavailability. (2026-11-16 operator amendment: native Windows
 scheduled p95 is <=150 ms, provisional until the service-account re-measure;
 this Mac runbook keeps 60 ms. Check a result with
-`python scripts/c6_latency_budget.py <result.json> --platform posix`.) Retries are limited to the retryable approval-verifier
+`python scripts/c6_latency_budget.py <receipt.json> --platform posix`, where the receipt is the
+whole benchmark output; every cell in `results` must pass, and a NaN or non-numeric latency fails.) Retries are limited to the retryable approval-verifier
 unavailable reason, twice, with 50 ms pauses. Unknown worker failures fail the
 cell rather than disappear from its denominator.
 

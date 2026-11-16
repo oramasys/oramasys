@@ -93,7 +93,7 @@ def test_acl_is_private_is_only_reached_after_the_owner_check() -> None:
     would turn OWNER RIGHTS into a grant to whoever owns the object.
     """
     root = Path(__file__).resolve().parents[1] / "orama"
-    callers = sorted(str(path.relative_to(root)) for path in root.rglob("*.py")
+    callers = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.py")
                      if "acl_is_private(" in path.read_text(encoding="utf-8"))
     assert callers == ["graph/windows_private.py"]
     source = (root / "graph" / "windows_private.py").read_text(encoding="utf-8")

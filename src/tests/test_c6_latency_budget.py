@@ -96,3 +96,79 @@ def test_cli_exit_code_and_no_qualification_claim(budget: ModuleType, tmp_path: 
     report = json.loads(capsys.readouterr().out)
     assert report["within_budget"] is False
     assert report["qualifies_run"] is False
+
+
+def _receipt(*cells: dict) -> dict:
+    """Shape benchmark_revocation_availability prints: metadata plus a results list."""
+    return {"label": "t", "python": "3.13.18", "platform": "Darwin", "results": list(cells)}
+
+
+def test_receipt_with_results_list_is_checked_per_cell(budget: ModuleType) -> None:
+    report = budget.check_receipt(_receipt(_result(55.0), _result(58.0)), "posix")
+    assert report["within_budget"] is True
+    assert report["cells"] == 2
+    assert report["violations"] == []
+
+
+def test_receipt_reports_the_failing_cell_index(budget: ModuleType) -> None:
+    report = budget.check_receipt(_receipt(_result(55.0), _result(61.0)), "posix")
+    assert report["within_budget"] is False
+    assert report["violations"] == ["cell 1: scheduled_p95_ms 61.0 > 60"]
+
+
+@pytest.mark.parametrize("receipt", [
+    {"results": []},
+    {"results": "nope"},
+    {"label": "no results key"},
+    {"results": [None]},
+])
+def test_receipt_with_no_usable_cells_fails_closed(budget: ModuleType, receipt: dict) -> None:
+    assert budget.check_receipt(receipt, "posix")["within_budget"] is False
+
+
+def test_bare_single_result_dict_is_still_accepted(budget: ModuleType) -> None:
+    assert budget.check_receipt(_result(55.0), "posix")["within_budget"] is True
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), "NaN", "inf",
+                                 "fast", True, [], {}])
+def test_non_finite_or_non_numeric_measurement_is_rejected(budget: ModuleType, bad: object) -> None:
+    found = budget.violations(_result(bad), "posix")  # type: ignore[arg-type]
+    assert found == ["scheduled_p95_ms not a finite number"]
+
+
+def test_nan_scheduled_p95_cannot_pass_with_other_measures_in_budget(budget: ModuleType) -> None:
+    assert budget.violations(_result(float("nan"), send_p95=10.0, scheduled_p99=10.0),
+                             "windows-native") != []
+
+
+def test_cli_accepts_the_real_receipt_shape(budget: ModuleType, tmp_path: Path,
+                                            capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps(_receipt(_result(55.0))))
+    assert budget.main([str(path), "--platform", "posix"]) == 0
+    assert json.loads(capsys.readouterr().out)["qualifies_run"] is False
+
+
+def test_cli_rejects_nan_json_constants(budget: ModuleType, tmp_path: Path) -> None:
+    """Python's json accepts a bare NaN token; the checker must still fail closed."""
+    path = tmp_path / "nan.json"
+    path.write_text('{"scheduled_latency": {"p95_ms": NaN, "p99_ms": 1.0}, '
+                    '"send_latency": {"p95_ms": 1.0}}')
+    assert budget.main([str(path), "--platform", "posix"]) == 1
+
+
+def test_receipt_matches_the_structure_the_harness_emits(budget: ModuleType) -> None:
+    """Mirror scripts/benchmark_revocation_availability.py: extra per-cell fields are ignored."""
+    cell = {
+        "runtime": {"python": "3.13.18"}, "file_descriptors": {}, "events": 256, "senders": 8,
+        "sends": 2400, "elapsed_s": 480.1, "outcomes": {"sent": 2400},
+        "send_latency": {"p50_ms": 4.0, "p95_ms": 9.5, "p99_ms": 20.0, "max_ms": 51.0},
+        "scheduled_latency": {"p50_ms": 73.8, "p95_ms": 139.2, "p99_ms": 162.8, "max_ms": 300.0},
+        "queue_latency": {"p95_ms": 120.0}, "first_try_unavailable_count": 0,
+    }
+    receipt = {"label": "pr100-control-a", "python": "3.13.14", "platform": "Windows",
+               "tempdir": "system temporary directory", "results": [cell]}
+    assert budget.check_receipt(receipt, "windows-native")["within_budget"] is True
+    assert budget.check_receipt(receipt, "posix")["violations"] == [
+        "cell 0: scheduled_p95_ms 139.2 > 60"]
