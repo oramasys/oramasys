@@ -61,6 +61,20 @@ def _mode(path: Path) -> int:
     ([(0, 0x10000000, "other-user")], False),
     ([(1, 0x1F01FF, "S-1-1-0")], True),
     ([(5, 1, "user")], False),
+    # Adversarial fail-open rows (C6 follow-up, 2026-11-16): OWNER RIGHTS must not
+    # carry a foreign grant through, and SID text must match exactly.
+    ([(0, 0x1F01FF, "S-1-3-4"), (0, 1, "S-1-1-0")], False),          # + Everyone
+    ([(0, 0x1F01FF, "S-1-3-4"), (0, 0x1F01FF, "S-1-5-11")], False),  # + Authenticated Users
+    ([(0, 0x1F01FF, "S-1-3-4"), (0, 0x1F01FF, "S-1-5-32-545")], False),  # + Users
+    ([(0, 0x1F01FF, "S-1-3-4"), (0, 0x1F01FF, "S-1-3-0")], False),   # + CREATOR OWNER
+    ([(0, 0x1F01FF, "S-1-3-4"), (0, 0x1F01FF, "S-1-5-21-1-2-3-1001")], False),  # + other user
+    ([(0, 0x1F01FF, "S-1-3-4"), (1, 0x1F01FF, "S-1-1-0")], True),    # + Everyone deny only
+    ([(0, 0, "S-1-1-0")], True),                                     # zero-mask allow grants nothing
+    ([(2, 0x1F01FF, "S-1-3-4")], False),                             # unknown ACE kind
+    ([(5, 0x1F01FF, "S-1-1-0")], False),                             # unknown kind, foreign SID
+    ([(0, 0x1F01FF, "s-1-3-4")], False),                             # lowercase SID text
+    ([(0, 0x1F01FF, "S-1-3-4 ")], False),                            # trailing space
+    ([], True),  # empty DACL denies everyone; a NULL DACL never reaches this (private_acl)
 ])
 def test_acl_policy_rejects_foreign_or_unknown_grants(
     aces: list[tuple[int, int, str]], expected: bool
@@ -69,6 +83,24 @@ def test_acl_policy_rejects_foreign_or_unknown_grants(
     from orama.graph.windows_private import acl_is_private
 
     assert acl_is_private(aces, "user") is expected
+
+
+def test_acl_is_private_is_only_reached_after_the_owner_check() -> None:
+    """OWNER RIGHTS is safe only behind the owner check; pin the single production caller.
+
+    ``acl_is_private`` allows S-1-3-4 because ``private_acl`` has already required the
+    object owner to be the current user. A new caller that used the table check alone
+    would turn OWNER RIGHTS into a grant to whoever owns the object.
+    """
+    root = Path(__file__).resolve().parents[1] / "orama"
+    callers = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.py")
+                     if "acl_is_private(" in path.read_text(encoding="utf-8"))
+    assert callers == ["graph/windows_private.py"]
+    source = (root / "graph" / "windows_private.py").read_text(encoding="utf-8")
+    body = source[source.index("def private_acl("):]
+    assert body.index("self._sid_text(owner) != self.user") < body.index("acl_is_private(aces")
+    assert source.count("acl_is_private(") == 2  # the definition and that one call
+    assert "not dacl.value" in body  # a NULL DACL fails before the table check
 
 
 @_posix_only

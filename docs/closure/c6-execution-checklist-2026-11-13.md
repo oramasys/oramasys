@@ -35,6 +35,7 @@ and merges operator-held.
 | Inert CI-scale availability smoke | CI rehearsal only | **Done (agent)** | 6/6 sent; not target-filesystem qualification |
 | Target-filesystem Mac 3-pass (256×8, p95≤60 ms) | C6 Mac runbook | **Operator-held** | Agent diagnostics ≠ three operator passes |
 | Native Windows Tier 1–3 qualification | C6 Windows handoff | **Operator/Win-held** | Software slices ≠ native qualification |
+| Native Windows scheduled p95 budget (2026-11-16) | budget proposal 2026-11-16 amendment | **Provisional** | 150 ms for native Windows only (Mac/POSIX stay 60 ms); re-measure as the service account before treating as final |
 | R4–R8 / serving activation | serving-activation-runbook | **Open** | Separate from C6 availability |
 
 ---

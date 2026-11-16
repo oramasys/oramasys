@@ -23,10 +23,19 @@ def acl_is_private(aces: list[tuple[int, int, str]], user: str) -> bool:
     it to whoever owns the object at access-check time, and directory/file
     ownership is already pinned to the current user before this check runs.
     An OWNER RIGHTS grant therefore cannot widen access to any principal the
-    owner check has not already admitted. This is the shape of a default-DACL
-    child (os.mkdir with NULL security attributes): SYSTEM, Administrators and
-    OWNER RIGHTS. Rejecting it there would fail closed on every directory a
-    plain mkdir creates, without blocking any access the owner check does not.
+    owner check has not already admitted. SYSTEM, Administrators and OWNER
+    RIGHTS is the protected DACL that CPython 3.13+ applies on Windows for
+    ``os.mkdir(path, mode=0o700)`` (and so ``tempfile.mkdtemp``). Rejecting it
+    would fail closed on every such directory without blocking any access the
+    owner check does not. (Corrected 2026-11-16: a directory created with NULL
+    security attributes inherits the parent's inheritable ACEs and uses the
+    token default DACL only when none are inherited; it is not this shape in
+    general.)
+
+    Never call this as the only gate: OWNER RIGHTS is safe only because
+    ``private_acl`` checks the owner first, and a NULL DACL (which grants
+    everyone) is rejected there before this table check runs. An empty ACE
+    list is a real empty DACL, which denies everyone, so it passes.
     """
     allowed = {
         user,

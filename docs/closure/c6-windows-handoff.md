@@ -27,6 +27,10 @@ changes for operator approval rather than silently weakening a control.
   unavailability <=1%; final errors <=0.1%; steady refresh p95 <=1,000 ms;
   zero refresh failures. Test zero fail-open through the adversarial suite,
   not the performance harness alone.
+- 2026-11-16 operator amendment: native Windows scheduled p95 <=150 ms,
+  provisional until re-measured as the service account. Send p95 stays
+  <=60 ms and scheduled p99 <=250 ms. Mac and POSIX keep 60 ms. See the
+  budget proposal's 2026-11-16 amendment and `scripts/c6_latency_budget.py`.
 - Error-rate point estimates and statistical bounds are separate. Zero
   errors in 2,400 sends gives a one-sided 95% upper bound about 0.1247%,
   not a population guarantee <=0.1%. Report temporal-correlation limits.
