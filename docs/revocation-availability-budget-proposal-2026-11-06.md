@@ -146,6 +146,18 @@ scheduled latency and successful-call send latency, superseding the historical
 unchanged. The three consecutive operator-run Mac passes and separate native
 Windows qualification are still required; this amendment qualifies no run.
 
+**2026-11-16 operator amendment (native Windows, provisional):** The scheduled p95
+budget for native Windows is <=150 ms. Mac and POSIX keep <=60 ms. Successful-call
+send p95 stays <=60 ms and scheduled p99 stays <=250 ms on every platform. Evidence:
+oramasys PR 100, Windows 11 26200, CPython 3.13.14, SQLite 3.53.1, NTFS, one host;
+scheduled p50 / p95 / p99 ms were 73.8 / 139.2 / 162.8 (control A), 73.9 / 138.4 /
+164.7, 73.6 / 139.1 / 168.5 and 73.2 / 136.3 / 166.7 (candidates 1-3). The worst
+p95 leaves about 7% headroom. Decided by the operator on 2026-11-16. The value is
+provisional until it is re-measured in the service-account context, and like the
+2026-11-07 amendment it qualifies no run. The keyed values live in
+`scripts/c6_latency_budget.py`, which checks a harness result and never reports
+qualification.
+
 One container run of 2400 sends with 0 errors bounds the true error rate at about 0.125 % (95 %
 upper bound). Showing ≤ 0.1 % therefore needs a longer target-host run, for example one hour at
 the proposed rate (about 144,000 sends).
