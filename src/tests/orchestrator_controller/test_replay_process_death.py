@@ -13,7 +13,8 @@ from .support import admitted, declare, open_store, request
 _CHILD = r'''
 import os, sys
 from pathlib import Path
-from tests.orchestrator_controller.support import admitted, open_store, request
+sys.path.insert(0, sys.argv[3])
+from support import admitted, open_store, request
 store = open_store(Path(sys.argv[1]))
 if sys.argv[2] == 'before':
     def trace(sql):
@@ -32,8 +33,11 @@ def test_retry_process_death_preserves_commit_boundary(tmp_path: Path, boundary:
     declare(store)
     original = store.apply_admitted(request(), admitted())
     store.close()
-    child = subprocess.run([sys.executable, '-c', _CHILD, str(tmp_path), boundary], check=False)
-    assert child.returncode == (71 if boundary == 'before' else 72)
+    child = subprocess.run(
+        [sys.executable, '-c', _CHILD, str(tmp_path), boundary, str(Path(__file__).resolve().parent)],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert child.returncode == (71 if boundary == 'before' else 72), child.stderr
     store = open_store(tmp_path)
     retry = store.apply_admitted(request(), admitted())
     assert retry.lease_token == (original.lease_token if boundary == 'before' else None)
