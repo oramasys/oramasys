@@ -15,7 +15,7 @@ proof material (IC-25).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from orama.orchestrator_controller.envelope import ClaimRequest, OPERATIONS, validate_opaque_id
 from orama.orchestrator_controller.ports import (
@@ -43,12 +43,16 @@ class ControllerService:
         clock: Clock,
         capability_verifier: CapabilityVerifier | None = None,
         transport_verifier: TransportVerifier | None = None,
+        max_admission_age: timedelta | None = None,
     ) -> None:
         """Compose the service; missing ports default to deny-all adapters.
 
         ``audience`` is this controller's opaque identity that every capability must name.
         ``clock`` is the time used to re-check capability expiry.
         """
+        if max_admission_age is not None and (not isinstance(max_admission_age, timedelta) or max_admission_age <= timedelta(0)):
+            raise ValueError("max_admission_age must be positive")
+        self._max_admission_age = max_admission_age
         self._store = store
         self._audience = validate_opaque_id(audience, "audience")
         self._clock = clock
@@ -116,7 +120,8 @@ class ControllerService:
             or decision.audience != self._audience
         ):
             raise ClaimRefused("capability.insufficient")
-        return Admission(principal_id=request.principal, expires_at=expires)
+        return Admission(principal_id=request.principal, expires_at=expires, verified_at=post_verify_now,
+                         max_age=self._max_admission_age)
 
 
 def _hints(body: object) -> tuple[str, str | None]:

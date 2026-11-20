@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -360,3 +361,49 @@ def test_restart_preserves_state_and_never_reissues_an_unexpired_lease(tmp_path,
     assert _refusal(reopened, request(principal="agent-b", idempotency_key="b"), "agent-b").code == "task.already_claimed"
     assert reopened.apply_admitted(lease_request("complete", claim), admitted()).task_state == "completed"
     reopened.close()
+
+
+def test_claim_replay_token_is_delivered_only_once_after_original(store: ControllerStore) -> None:
+    """One replay may disclose the token; subsequent receipts do not."""
+    req = request()
+    original = store.apply_admitted(req, admitted())
+    retry = store.apply_admitted(req, admitted())
+    later = store.apply_admitted(req, admitted())
+    assert retry.lease_token == original.lease_token
+    assert later.lease_token is None
+    assert later.replayed
+    assert original.lease_token not in repr(store._read_all('idempotency'))
+
+
+def test_retry_allowance_survives_restart_and_response_loss(tmp_path: Path) -> None:
+    """Reopening cannot restore a consumed retry token after response loss."""
+    store = open_store(tmp_path)
+    declare(store)
+    original = store.apply_admitted(request(), admitted())
+    store.close()
+    store = open_store(tmp_path)
+    assert store.apply_admitted(request(), admitted()).lease_token == original.lease_token
+    store.close()  # response may be lost after commit
+    store = open_store(tmp_path)
+    assert store.apply_admitted(request(), admitted()).lease_token is None
+    store.close()
+
+
+def test_two_connections_only_one_retry_receives_token(tmp_path: Path) -> None:
+    """Concurrent retry transactions can disclose the token at most once."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    a, b = open_store(tmp_path), open_store(tmp_path)
+    declare(a)
+    original = a.apply_admitted(request(), admitted())
+    barrier = Barrier(2)
+    def retry(store: ControllerStore) -> str | None:
+        """Race a retry against the other connection."""
+        barrier.wait()
+        return store.apply_admitted(request(), admitted()).lease_token
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tokens = list(pool.map(retry, (a, b)))
+    assert tokens.count(original.lease_token) == 1
+    assert tokens.count(None) == 1
+    a.close()
+    b.close()

@@ -117,3 +117,44 @@ def test_capability_expiry_elapsing_during_store_lock_is_refused_and_audited(
             "SELECT actor, action, outcome FROM audit WHERE actor = 'agent-a' AND action = 'claim' ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
     assert audit_row == ("agent-a", "claim", "refused:capability.expired")
+
+
+def test_freshness_deadline_is_checked_after_wait_before_replay(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+) -> None:
+    """A stale admission cannot consume the token during a delayed retry."""
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=TransportDouble(), max_admission_age=timedelta(seconds=2))
+    original = service.submit(raw(), transport=ATTESTED)
+    apply = store.apply_admitted
+    def delayed(req: ClaimRequest, admission: Admission) -> ClaimReceipt:
+        """Advance time between verification and the transaction."""
+        clock.advance(3)
+        return apply(req, admission)
+    store.apply_admitted = delayed
+    with pytest.raises(ClaimRefused):
+        service.submit(raw(), transport=ATTESTED)
+    store.apply_admitted = apply
+    assert service.submit(raw(), transport=ATTESTED).lease_token == original.lease_token
+
+
+def test_denied_cross_channel_and_revoked_retry_do_not_consume_allowance(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+) -> None:
+    """Denied alternate-channel and revoked requests leave the retry token available."""
+    from orama.orchestrator_controller.ports import TransportAttestation, TransportDecision
+    class ChannelVerifier:
+        def verify(self, attestation: TransportAttestation) -> TransportDecision:
+            """Refuse a different channel."""
+            return TransportDecision(verified=attestation.channel_ref == 'channel-1')
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=ChannelVerifier())
+    original = service.submit(raw(), transport=ATTESTED)
+    with pytest.raises(ClaimRefused, match='transport.unverified'):
+        service.submit(raw(), transport=TransportAttestation(channel_ref='other'))
+    grants.grants['agent-a'].revoked = True
+    with pytest.raises(ClaimRefused, match='capability.revoked'):
+        service.submit(raw(), transport=ATTESTED)
+    grants.grants['agent-a'].revoked = False
+    assert service.submit(raw(), transport=ATTESTED).lease_token == original.lease_token
+    assert service.submit(raw(), transport=ATTESTED).lease_token is None

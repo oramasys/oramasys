@@ -20,7 +20,7 @@ import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -72,6 +72,8 @@ class Admission:
     principal_id: str
     expires_at: datetime | None = None
     policy_version: str = POLICY_VERSION
+    verified_at: datetime | None = None
+    max_age: timedelta | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +119,7 @@ class ClaimReceipt:
             "task_version": self.task_version,
             "task_state": self.task_state,
             "lease_id": self.lease_id,
-            "lease_token": self.lease_token,
+            "lease_token": None,
             "lease_expires_at": None if self.lease_expires_at is None else to_micros(self.lease_expires_at),
             "result_digest": self.result_digest,
             "failure_class": self.failure_class,
@@ -359,6 +361,9 @@ class ControllerStore:
             """Decide and apply the transition inside the open transaction."""
             if admission.expires_at is not None and now >= to_micros(admission.expires_at):
                 raise ClaimRefused("capability.expired")
+            if admission.max_age is not None:
+                if admission.verified_at is None or now >= to_micros(admission.verified_at + admission.max_age):
+                    raise ClaimRefused("capability.unverifiable")
             stored = db.execute(
                 "SELECT request_digest, receipt_json FROM idempotency"
                 " WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
@@ -367,7 +372,19 @@ class ControllerStore:
             if stored is not None:
                 if stored[0] != digest:
                     raise ClaimRefused("idempotency.key_reused")
-                return ClaimReceipt.from_json(str(stored[1]))
+                receipt = ClaimReceipt.from_json(str(stored[1]))
+                key = (request.principal, request.operation, request.idempotency_key)
+                token = db.execute(
+                    "SELECT token FROM replay_tokens WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
+                    key,
+                ).fetchone()
+                if token is not None:
+                    db.execute(
+                        "DELETE FROM replay_tokens WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
+                        key,
+                    )
+                    receipt = replace(receipt, lease_token=str(token[0]))
+                return receipt
             row = db.execute(_TASK_SELECT, (request.task_id,)).fetchone()
             if row is None:
                 raise ClaimRefused("task.unknown")
@@ -384,6 +401,11 @@ class ControllerStore:
                 (request.principal, request.operation, request.idempotency_key, digest,
                  receipt.to_json(), now),
             )
+            if receipt.lease_token is not None:
+                db.execute(
+                    "INSERT INTO replay_tokens (principal_id, operation, idempotency_key, token) VALUES (?, ?, ?, ?)",
+                    (request.principal, request.operation, request.idempotency_key, receipt.lease_token),
+                )
             return receipt
 
         return self._commit_refusal(body)

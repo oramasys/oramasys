@@ -89,10 +89,22 @@ MIGRATIONS: tuple[Migration, ...] = (
             " epoch INTEGER NOT NULL CHECK (epoch >= 1), expires_at INTEGER NOT NULL)",
         ),
     ),
+    Migration(
+        version=2,
+        name="bounded_claim_replay_v2",
+        statements=(
+            "CREATE TABLE replay_tokens (principal_id TEXT NOT NULL, operation TEXT NOT NULL,"
+            " idempotency_key TEXT NOT NULL, token TEXT NOT NULL,"
+            " PRIMARY KEY (principal_id, operation, idempotency_key),"
+            " FOREIGN KEY (principal_id, operation, idempotency_key) REFERENCES idempotency"
+            " (principal_id, operation, idempotency_key))",
+        ),
+    ),
 )
 
 REVIEWED_MIGRATION_DIGESTS: Mapping[int, str] = MappingProxyType({
     1: "00b385b918214207f31c5bc2edaecb0c6a11af2f5cb24f0dc6bfaf82fad29b60",
+    2: "fa4735540e771fcc15f88559493aa6e5c999dca9d3fb651dd68e9b2306558a39",
 })
 
 
@@ -121,6 +133,11 @@ def apply_migrations(db: sqlite3.Connection, applied_at: int) -> int:
         db.execute("BEGIN IMMEDIATE")
         try:
             if version not in _applied(db):
+                if version == 2 and any(
+                    db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                    for table in ("tasks", "leases", "idempotency", "outbox", "audit", "maintenance_owner")
+                ):
+                    raise MigrationRefused("populated legacy store requires accepted cutover disposition")
                 for statement in migration.statements:
                     db.execute(statement)
                 db.execute(

@@ -436,5 +436,5 @@ def test_every_table_is_accounted_for(tmp_path) -> None:
     """The schema holds exactly the contract's tables, so nothing else can carry claim state."""
     store = open_store(tmp_path, FakeClock())
     names = {r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert names - {"sqlite_sequence"} == set(ALL_TABLES) | {"controller_meta", "schema_migrations"}
+    assert names - {"sqlite_sequence"} == set(ALL_TABLES) | {"controller_meta", "schema_migrations", "replay_tokens"}
     store.close()
