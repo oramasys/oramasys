@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -99,3 +100,38 @@ def test_refused_open_closes_its_connection(tmp_path) -> None:
             open_store(tmp_path)
         gc.collect()
     assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+
+
+def test_populated_v1_refuses_without_changing_rows(tmp_path: Path) -> None:
+    """An unresolved legacy receipt blocks migration without changes."""
+    path = tmp_path / 'legacy.db'
+    db = sqlite3.connect(path, isolation_level=None)
+    db.execute(migrations._BOOTSTRAP)
+    m = MIGRATIONS[0]
+    for statement in m.statements:
+        db.execute(statement)
+    db.execute('INSERT INTO schema_migrations VALUES (?, ?, ?, ?)', (1, m.name, migration_digest(m), 0))
+    db.execute("INSERT INTO idempotency VALUES ('p', 'claim', 'k', 'digest', 'receipt', 0)")
+    before = db.execute('SELECT * FROM idempotency').fetchall()
+    with pytest.raises(MigrationRefused, match='disposition'):
+        migrations.apply_migrations(db, 0)
+    assert db.execute('SELECT * FROM idempotency').fetchall() == before
+    assert db.execute('SELECT version FROM schema_migrations').fetchall() == [(1,)]
+    db.close()
+
+
+def test_empty_v1_migrates_and_old_binary_refuses_v2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty stores preserve clock state and a prior migration set refuses the upgrade."""
+    db = sqlite3.connect(tmp_path / 'legacy-empty.db', isolation_level=None)
+    db.execute(migrations._BOOTSTRAP)
+    m = MIGRATIONS[0]
+    for statement in m.statements:
+        db.execute(statement)
+    db.execute('INSERT INTO schema_migrations VALUES (?, ?, ?, ?)', (1, m.name, migration_digest(m), 0))
+    db.execute("INSERT INTO controller_meta VALUES ('clock_highwater', '123')")
+    assert migrations.apply_migrations(db, 0) == 2
+    assert db.execute("SELECT value FROM controller_meta WHERE key='clock_highwater'").fetchone() == ('123',)
+    monkeypatch.setattr(migrations, 'MIGRATIONS', (m,))
+    with pytest.raises(MigrationRefused, match='newer'):
+        migrations.apply_migrations(db, 0)
+    db.close()
