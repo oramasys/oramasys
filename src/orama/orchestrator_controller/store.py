@@ -371,7 +371,7 @@ class ControllerStore:
                 tick = time.monotonic()
                 if (admission.verified_at is None or admission.verified_monotonic is None
                     or now < to_micros(admission.verified_at)
-                    or now >= to_micros(admission.verified_at + admission.max_age)
+                    or now >= to_micros(admission.verified_at.astimezone(UTC) + admission.max_age)
                     or tick < admission.verified_monotonic
                     or tick - admission.verified_monotonic >= admission.max_age.total_seconds()):
                     raise ClaimRefused("capability.unverifiable")

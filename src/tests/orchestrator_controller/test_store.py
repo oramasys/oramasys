@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -108,6 +109,34 @@ def test_claim_creates_one_lease_and_commits_outbox_and_audit(store, clock) -> N
     assert (task.state, task.version) == ("claimed", 2)
     assert _count(store, "leases") == 1
     assert _count(store, "outbox") == 1 and _count(store, "audit") == 1
+
+
+def test_admission_age_uses_elapsed_time_in_repeated_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold=1 admission remains valid until its exact UTC age deadline."""
+    try:
+        eastern = ZoneInfo("America/New_York")
+    except ZoneInfoNotFoundError:
+        pytest.skip("IANA timezone data unavailable on this host")
+    verified = datetime(2026, 11, 1, 1, 30, tzinfo=eastern, fold=1)
+    monkeypatch.setattr(store_module.time, "monotonic", lambda: 10.0)
+    admission = Admission(
+        principal_id="agent-a", verified_at=verified,
+        verified_monotonic=10.0, max_age=timedelta(seconds=2),
+    )
+    req = request()
+    clock = FakeClock(verified.astimezone(UTC))
+    store = open_store(tmp_path, clock)
+    try:
+        declare(store)
+        clock.advance(1)
+        assert not store.apply_admitted(req, admission).replayed
+        clock.advance(1)
+        with pytest.raises(ClaimRefused, match="capability.unverifiable"):
+            store.apply_admitted(req, admission)
+    finally:
+        store.close()
 
 
 def test_lease_token_is_stored_only_as_a_digest(store) -> None:
