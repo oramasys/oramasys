@@ -412,11 +412,12 @@ def test_two_connections_only_one_retry_receives_token(tmp_path: Path) -> None:
 def test_old_open_connection_cannot_replay_inline_token_after_migration(tmp_path: Path) -> None:
     """A schema-1 writer surviving migration cannot create a reusable replay secret."""
     import json
+    from orama.graph.private_store import prepare_private_store
     from orama.orchestrator_controller.migrations import MIGRATIONS, migration_digest
     from orama.orchestrator_controller.store import ClaimReceipt
 
     path = tmp_path / 'state' / 'controller.db'
-    path.parent.mkdir()
+    prepare_private_store(path)
     old = sqlite3.connect(path, isolation_level=None)
     old.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, digest TEXT NOT NULL, applied_at INTEGER NOT NULL)')
     migration = MIGRATIONS[0]
