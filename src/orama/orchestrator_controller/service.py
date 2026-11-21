@@ -14,6 +14,7 @@ proof material (IC-25).
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 
@@ -86,6 +87,7 @@ class ControllerService:
         """Ask the Phylax port, then re-check every binding of its decision."""
         if request.capability_proof is None:
             raise ClaimRefused("capability.missing")
+        verification_started = time.monotonic()
         now = self._clock()
         query = CapabilityQuery(
             proof=request.capability_proof,
@@ -112,6 +114,8 @@ class ControllerService:
         if not isinstance(expires, datetime) or expires.tzinfo is None or expires.utcoffset() is None:
             raise ClaimRefused("capability.unverifiable")
         post_verify_now = self._clock()
+        if self._max_admission_age is not None and post_verify_now < now:
+            raise ClaimRefused("capability.unverifiable")
         if post_verify_now >= expires:
             raise ClaimRefused("capability.expired")
         if (
@@ -121,7 +125,7 @@ class ControllerService:
         ):
             raise ClaimRefused("capability.insufficient")
         return Admission(principal_id=request.principal, expires_at=expires, verified_at=post_verify_now,
-                         max_age=self._max_admission_age)
+                         max_age=self._max_admission_age, verified_monotonic=verification_started)
 
 
 def _hints(body: object) -> tuple[str, str | None]:

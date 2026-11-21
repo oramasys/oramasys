@@ -407,3 +407,31 @@ def test_two_connections_only_one_retry_receives_token(tmp_path: Path) -> None:
     assert tokens.count(None) == 1
     a.close()
     b.close()
+
+
+def test_old_open_connection_cannot_replay_inline_token_after_migration(tmp_path: Path) -> None:
+    """A schema-1 writer surviving migration cannot create a reusable replay secret."""
+    import json
+    from orama.orchestrator_controller.migrations import MIGRATIONS, migration_digest
+    from orama.orchestrator_controller.store import ClaimReceipt
+
+    path = tmp_path / 'state' / 'controller.db'
+    path.parent.mkdir()
+    old = sqlite3.connect(path, isolation_level=None)
+    old.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, digest TEXT NOT NULL, applied_at INTEGER NOT NULL)')
+    migration = MIGRATIONS[0]
+    for sql in migration.statements:
+        old.execute(sql)
+    old.execute('INSERT INTO schema_migrations VALUES (?, ?, ?, ?)', (1, migration.name, migration_digest(migration), 0))
+    store = open_store(tmp_path)
+    req = request()
+    receipt = ClaimReceipt('old-receipt', 'claim', 'task-1', 2, 'claimed', lease_id='old-lease')
+    body = json.loads(receipt.to_json())
+    body['lease_token'] = 'legacy-secret'
+    old.execute('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?, ?)',
+                (req.principal, req.operation, req.idempotency_key, req.request_digest(), json.dumps(body), 0))
+    assert store._db.execute('SELECT count(*) FROM replay_tokens').fetchone()[0] == 0
+    assert store.apply_admitted(req, admitted()).lease_token is None
+    assert store.apply_admitted(req, admitted()).lease_token is None
+    old.close()
+    store.close()

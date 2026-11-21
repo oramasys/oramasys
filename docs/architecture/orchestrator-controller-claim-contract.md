@@ -193,6 +193,13 @@ samples `verified_at` after verification; if a positive maximum admission age is
 configured, the same final boundary rejects an admission at or past that age.
 No maximum age is chosen by default.
 
+Admission age, when configured, is bounded from before capability verification using
+process monotonic time, including verification and transaction wait. The wall-clock
+expiry and high-water checks still apply; a backward step observed during verification
+or an effective time earlier than verification is refused. No default age is selected.
+The monotonic stamp is in-process admission data, not a persisted or cross-process token.
+
+
 | Code | Status | Meaning |
 | --- | --- | --- |
 | `envelope.invalid` | 400 | malformed, missing or unknown field |
@@ -303,7 +310,13 @@ Tests live under `src/tests/orchestrator_controller/`.
 The module is not wired into any serving path, so rollback today is removing the
 composition that constructs it. Migration 2 permits only an empty schema-1 store;
 a populated legacy store is refused without cleanup until an accepted cutover
-disposition resolves replay identities and allowance. The wire schema remains 1;
+disposition resolves replay identities and allowance. An already-open schema-1 writer
+can still write after the empty-store check: new replay code discards inline receipt
+tokens and discloses only a separately stored, atomically consumed retry token.
+This protects that replay path only. Such a writer can still mutate tasks, leases,
+idempotency, outbox, audit and maintenance ownership using its old rules; it is
+not fenced by migration 2. A writer-quiescence or fencing policy and the
+cross-version disposition remain owner decisions before cutover. The wire schema remains 1;
 this migration does not select cross-version readback or drain. The database is
 controller-owned and additive;
 rolling code back to a revision without a migration it recorded is refused at
