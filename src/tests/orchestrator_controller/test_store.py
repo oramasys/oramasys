@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -107,6 +109,34 @@ def test_claim_creates_one_lease_and_commits_outbox_and_audit(store, clock) -> N
     assert (task.state, task.version) == ("claimed", 2)
     assert _count(store, "leases") == 1
     assert _count(store, "outbox") == 1 and _count(store, "audit") == 1
+
+
+def test_admission_age_uses_elapsed_time_in_repeated_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold=1 admission remains valid until its exact UTC age deadline."""
+    try:
+        eastern = ZoneInfo("America/New_York")
+    except ZoneInfoNotFoundError:
+        pytest.skip("IANA timezone data unavailable on this host")
+    verified = datetime(2026, 11, 1, 1, 30, tzinfo=eastern, fold=1)
+    monkeypatch.setattr(store_module.time, "monotonic", lambda: 10.0)
+    admission = Admission(
+        principal_id="agent-a", verified_at=verified,
+        verified_monotonic=10.0, max_age=timedelta(seconds=2),
+    )
+    req = request()
+    clock = FakeClock(verified.astimezone(UTC))
+    store = open_store(tmp_path, clock)
+    try:
+        declare(store)
+        clock.advance(1)
+        assert not store.apply_admitted(req, admission).replayed
+        clock.advance(1)
+        with pytest.raises(ClaimRefused, match="capability.unverifiable"):
+            store.apply_admitted(req, admission)
+    finally:
+        store.close()
 
 
 def test_lease_token_is_stored_only_as_a_digest(store) -> None:
@@ -360,3 +390,78 @@ def test_restart_preserves_state_and_never_reissues_an_unexpired_lease(tmp_path,
     assert _refusal(reopened, request(principal="agent-b", idempotency_key="b"), "agent-b").code == "task.already_claimed"
     assert reopened.apply_admitted(lease_request("complete", claim), admitted()).task_state == "completed"
     reopened.close()
+
+
+def test_claim_replay_token_is_delivered_only_once_after_original(store: ControllerStore) -> None:
+    """One replay may disclose the token; subsequent receipts do not."""
+    req = request()
+    original = store.apply_admitted(req, admitted())
+    retry = store.apply_admitted(req, admitted())
+    later = store.apply_admitted(req, admitted())
+    assert retry.lease_token == original.lease_token
+    assert later.lease_token is None
+    assert later.replayed
+    assert original.lease_token not in repr(store._read_all('idempotency'))
+
+
+def test_retry_allowance_survives_restart_and_response_loss(tmp_path: Path) -> None:
+    """Reopening cannot restore a consumed retry token after response loss."""
+    store = open_store(tmp_path)
+    declare(store)
+    original = store.apply_admitted(request(), admitted())
+    store.close()
+    store = open_store(tmp_path)
+    assert store.apply_admitted(request(), admitted()).lease_token == original.lease_token
+    store.close()  # response may be lost after commit
+    store = open_store(tmp_path)
+    assert store.apply_admitted(request(), admitted()).lease_token is None
+    store.close()
+
+
+def test_two_connections_only_one_retry_receives_token(tmp_path: Path) -> None:
+    """Concurrent retry transactions can disclose the token at most once."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    a, b = open_store(tmp_path), open_store(tmp_path)
+    declare(a)
+    original = a.apply_admitted(request(), admitted())
+    barrier = Barrier(2)
+    def retry(store: ControllerStore) -> str | None:
+        """Race a retry against the other connection."""
+        barrier.wait()
+        return store.apply_admitted(request(), admitted()).lease_token
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tokens = list(pool.map(retry, (a, b)))
+    assert tokens.count(original.lease_token) == 1
+    assert tokens.count(None) == 1
+    a.close()
+    b.close()
+
+
+def test_old_open_connection_cannot_replay_inline_token_after_migration(tmp_path: Path) -> None:
+    """A schema-1 writer surviving migration cannot create a reusable replay secret."""
+    import json
+    from orama.graph.private_store import prepare_private_store
+    from orama.orchestrator_controller.migrations import MIGRATIONS, migration_digest
+    from orama.orchestrator_controller.store import ClaimReceipt
+
+    path = tmp_path / 'state' / 'controller.db'
+    prepare_private_store(path)
+    old = sqlite3.connect(path, isolation_level=None)
+    old.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, digest TEXT NOT NULL, applied_at INTEGER NOT NULL)')
+    migration = MIGRATIONS[0]
+    for sql in migration.statements:
+        old.execute(sql)
+    old.execute('INSERT INTO schema_migrations VALUES (?, ?, ?, ?)', (1, migration.name, migration_digest(migration), 0))
+    store = open_store(tmp_path)
+    req = request()
+    receipt = ClaimReceipt('old-receipt', 'claim', 'task-1', 2, 'claimed', lease_id='old-lease')
+    body = json.loads(receipt.to_json())
+    body['lease_token'] = 'legacy-secret'
+    old.execute('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?, ?)',
+                (req.principal, req.operation, req.idempotency_key, req.request_digest(), json.dumps(body), 0))
+    assert store._db.execute('SELECT count(*) FROM replay_tokens').fetchone()[0] == 0
+    assert store.apply_admitted(req, admitted()).lease_token is None
+    assert store.apply_admitted(req, admitted()).lease_token is None
+    old.close()
+    store.close()

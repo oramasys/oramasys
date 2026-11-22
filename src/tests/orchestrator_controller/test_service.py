@@ -117,3 +117,110 @@ def test_capability_expiry_elapsing_during_store_lock_is_refused_and_audited(
             "SELECT actor, action, outcome FROM audit WHERE actor = 'agent-a' AND action = 'claim' ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
     assert audit_row == ("agent-a", "claim", "refused:capability.expired")
+
+
+def test_freshness_deadline_is_checked_after_wait_before_replay(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+) -> None:
+    """A stale admission cannot consume the token during a delayed retry."""
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=TransportDouble(), max_admission_age=timedelta(seconds=2))
+    original = service.submit(raw(), transport=ATTESTED)
+    apply = store.apply_admitted
+    def delayed(req: ClaimRequest, admission: Admission) -> ClaimReceipt:
+        """Advance time between verification and the transaction."""
+        clock.advance(3)
+        return apply(req, admission)
+    store.apply_admitted = delayed
+    with pytest.raises(ClaimRefused):
+        service.submit(raw(), transport=ATTESTED)
+    store.apply_admitted = apply
+    assert service.submit(raw(), transport=ATTESTED).lease_token == original.lease_token
+
+
+def test_denied_cross_channel_and_revoked_retry_do_not_consume_allowance(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+) -> None:
+    """Denied alternate-channel and revoked requests leave the retry token available."""
+    from orama.orchestrator_controller.ports import TransportAttestation, TransportDecision
+    class ChannelVerifier:
+        def verify(self, attestation: TransportAttestation) -> TransportDecision:
+            """Refuse a different channel."""
+            return TransportDecision(verified=attestation.channel_ref == 'channel-1')
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=ChannelVerifier())
+    original = service.submit(raw(), transport=ATTESTED)
+    with pytest.raises(ClaimRefused, match='transport.unverified'):
+        service.submit(raw(), transport=TransportAttestation(channel_ref='other'))
+    grants.grants['agent-a'].revoked = True
+    with pytest.raises(ClaimRefused, match='capability.revoked'):
+        service.submit(raw(), transport=ATTESTED)
+    grants.grants['agent-a'].revoked = False
+    assert service.submit(raw(), transport=ATTESTED).lease_token == original.lease_token
+    assert service.submit(raw(), transport=ATTESTED).lease_token is None
+
+
+def test_age_rejects_elapsed_monotonic_time_after_wall_clock_rollback(store, clock, grants, monkeypatch) -> None:
+    """Elapsed admission age cannot be hidden by wall rollback or its high-water mark."""
+    import time
+    tick = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: tick[0])
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=TransportDouble(), max_admission_age=timedelta(seconds=2))
+    original = service.submit(raw(), transport=ATTESTED)
+    apply = store.apply_admitted
+    def delayed(req, admission):
+        tick[0] += 3
+        clock.advance(-1)
+        return apply(req, admission)
+    store.apply_admitted = delayed
+    with pytest.raises(ClaimRefused, match='capability.unverifiable'):
+        service.submit(raw(), transport=ATTESTED)
+    store.apply_admitted = apply
+    assert service.submit(raw(), transport=ATTESTED).lease_token == original.lease_token
+
+
+def test_rollback_during_verification_is_not_blessed_as_fresh(store, clock, grants) -> None:
+    """The verification query time bounds the later wall-clock sample."""
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=TransportDouble(), max_admission_age=timedelta(seconds=2))
+    verify = grants.verify
+    def backwards(query):
+        result = verify(query)
+        clock.advance(-1)
+        return result
+    grants.verify = backwards
+    with pytest.raises(ClaimRefused, match='capability.unverifiable'):
+        service.submit(raw(), transport=ATTESTED)
+    assert store.task('task-1').state == 'pending'
+
+
+def test_age_rejects_effective_time_before_verification(store, clock, grants) -> None:
+    """No prior high-water mark may silently validate a future verification time."""
+    clock.advance(10)
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=TransportDouble(), max_admission_age=timedelta(seconds=2))
+    apply = store.apply_admitted
+    def backwards(req, admission):
+        clock.advance(-5)
+        return apply(req, admission)
+    store.apply_admitted = backwards
+    with pytest.raises(ClaimRefused, match='capability.unverifiable'):
+        service.submit(raw(), transport=ATTESTED)
+
+
+def test_age_includes_time_spent_in_verifier(store, clock, grants, monkeypatch) -> None:
+    """An unchanging wall clock cannot hide a slow capability verification."""
+    import time
+    tick = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: tick[0])
+    verify = grants.verify
+    def slow(query):
+        result = verify(query)
+        tick[0] += 3
+        return result
+    grants.verify = slow
+    service = ControllerService(store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+                                transport_verifier=TransportDouble(), max_admission_age=timedelta(seconds=2))
+    with pytest.raises(ClaimRefused, match='capability.unverifiable'):
+        service.submit(raw(), transport=ATTESTED)

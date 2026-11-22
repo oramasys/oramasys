@@ -17,10 +17,11 @@ import hmac
 import json
 import secrets
 import sqlite3
+import time
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -67,11 +68,18 @@ def from_micros(value: int) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class Admission:
-    """What the service proved about a request before handing it to the store."""
+    """Proof handed to the store; monotonic freshness starts before verification.
+
+    When ``max_age`` is set both timestamps are required, and the monotonic
+    timestamp must come from the same process clock used by this store.
+    """
 
     principal_id: str
     expires_at: datetime | None = None
     policy_version: str = POLICY_VERSION
+    verified_at: datetime | None = None
+    max_age: timedelta | None = None
+    verified_monotonic: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +125,7 @@ class ClaimReceipt:
             "task_version": self.task_version,
             "task_state": self.task_state,
             "lease_id": self.lease_id,
-            "lease_token": self.lease_token,
+            "lease_token": None,
             "lease_expires_at": None if self.lease_expires_at is None else to_micros(self.lease_expires_at),
             "result_digest": self.result_digest,
             "failure_class": self.failure_class,
@@ -359,6 +367,14 @@ class ControllerStore:
             """Decide and apply the transition inside the open transaction."""
             if admission.expires_at is not None and now >= to_micros(admission.expires_at):
                 raise ClaimRefused("capability.expired")
+            if admission.max_age is not None:
+                tick = time.monotonic()
+                if (admission.verified_at is None or admission.verified_monotonic is None
+                    or now < to_micros(admission.verified_at)
+                    or now >= to_micros(admission.verified_at.astimezone(UTC) + admission.max_age)
+                    or tick < admission.verified_monotonic
+                    or tick - admission.verified_monotonic >= admission.max_age.total_seconds()):
+                    raise ClaimRefused("capability.unverifiable")
             stored = db.execute(
                 "SELECT request_digest, receipt_json FROM idempotency"
                 " WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
@@ -367,7 +383,21 @@ class ControllerStore:
             if stored is not None:
                 if stored[0] != digest:
                     raise ClaimRefused("idempotency.key_reused")
-                return ClaimReceipt.from_json(str(stored[1]))
+                # A surviving schema-1 writer may have persisted a raw inline token.
+                # Only the separately consumed replay row authorizes disclosure.
+                receipt = replace(ClaimReceipt.from_json(str(stored[1])), lease_token=None)
+                key = (request.principal, request.operation, request.idempotency_key)
+                token = db.execute(
+                    "SELECT token FROM replay_tokens WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
+                    key,
+                ).fetchone()
+                if token is not None:
+                    db.execute(
+                        "DELETE FROM replay_tokens WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
+                        key,
+                    )
+                    receipt = replace(receipt, lease_token=str(token[0]))
+                return receipt
             row = db.execute(_TASK_SELECT, (request.task_id,)).fetchone()
             if row is None:
                 raise ClaimRefused("task.unknown")
@@ -384,6 +414,11 @@ class ControllerStore:
                 (request.principal, request.operation, request.idempotency_key, digest,
                  receipt.to_json(), now),
             )
+            if receipt.lease_token is not None:
+                db.execute(
+                    "INSERT INTO replay_tokens (principal_id, operation, idempotency_key, token) VALUES (?, ?, ?, ?)",
+                    (request.principal, request.operation, request.idempotency_key, receipt.lease_token),
+                )
             return receipt
 
         return self._commit_refusal(body)

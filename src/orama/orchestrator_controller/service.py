@@ -14,8 +14,9 @@ proof material (IC-25).
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from orama.orchestrator_controller.envelope import ClaimRequest, OPERATIONS, validate_opaque_id
 from orama.orchestrator_controller.ports import (
@@ -43,12 +44,16 @@ class ControllerService:
         clock: Clock,
         capability_verifier: CapabilityVerifier | None = None,
         transport_verifier: TransportVerifier | None = None,
+        max_admission_age: timedelta | None = None,
     ) -> None:
         """Compose the service; missing ports default to deny-all adapters.
 
         ``audience`` is this controller's opaque identity that every capability must name.
         ``clock`` is the time used to re-check capability expiry.
         """
+        if max_admission_age is not None and (not isinstance(max_admission_age, timedelta) or max_admission_age <= timedelta(0)):
+            raise ValueError("max_admission_age must be positive")
+        self._max_admission_age = max_admission_age
         self._store = store
         self._audience = validate_opaque_id(audience, "audience")
         self._clock = clock
@@ -82,6 +87,7 @@ class ControllerService:
         """Ask the Phylax port, then re-check every binding of its decision."""
         if request.capability_proof is None:
             raise ClaimRefused("capability.missing")
+        verification_started = time.monotonic()
         now = self._clock()
         query = CapabilityQuery(
             proof=request.capability_proof,
@@ -108,6 +114,8 @@ class ControllerService:
         if not isinstance(expires, datetime) or expires.tzinfo is None or expires.utcoffset() is None:
             raise ClaimRefused("capability.unverifiable")
         post_verify_now = self._clock()
+        if self._max_admission_age is not None and post_verify_now < now:
+            raise ClaimRefused("capability.unverifiable")
         if post_verify_now >= expires:
             raise ClaimRefused("capability.expired")
         if (
@@ -116,7 +124,8 @@ class ControllerService:
             or decision.audience != self._audience
         ):
             raise ClaimRefused("capability.insufficient")
-        return Admission(principal_id=request.principal, expires_at=expires)
+        return Admission(principal_id=request.principal, expires_at=expires, verified_at=post_verify_now,
+                         max_age=self._max_admission_age, verified_monotonic=verification_started)
 
 
 def _hints(body: object) -> tuple[str, str | None]:

@@ -46,6 +46,7 @@ file in a `0700` directory via `prepare_private_store`). Schema version 1:
 | Table | Purpose |
 | --- | --- |
 | `schema_migrations` | applied migration version, name and reviewed SHA-256 digest |
+| `replay_tokens` | private, one-use claim retry token, deleted durably when delivered |
 | `controller_meta` | random opaque `store_id`; controller clock high-water mark |
 | `tasks` | `task_id`, `state`, `version`, `source_ref`, `expected_base_sha`, `payload_digest`, `effect_class`, `result_digest`, `failure_class` |
 | `leases` | `lease_id`, `task_id`, `principal_id`, `token_digest`, `fence`, `issued_at`, `expires_at`, `state` |
@@ -114,8 +115,10 @@ The claim kind panel is the doc 68 §4.2 request. Unknown fields are refused
 `(principal_id, operation, idempotency_key)`. The request digest is SHA-256 over
 canonical JSON of every covered field: all fields above except
 `capability_proof` and the projections; `lease_token` is covered by its SHA-256
-digest. An identical replay returns the original committed receipt, marked
-`replayed`. The same key with a different digest is refused `409
+digest. An identical replay returns the frozen committed outcome, marked
+`replayed`. Attempt 1 returns the token; exactly one fully admitted retry may
+return it, and later attempts return no token. Consumption commits before return;
+a lost retry response does not replenish the allowance. The same key with a different digest is refused `409
 idempotency.key_reused`. Only committed transitions create idempotency records;
 a refusal changes no claim state, so a retried refused request is evaluated
 afresh. Workflow-scope idempotency is the application's and shares no table.
@@ -126,9 +129,9 @@ cannot read back an earlier receipt.
 ## 5. Fencing, expiry and the clock rule
 
 - **Lease token.** 256 random bits (`secrets.token_urlsafe(32)`). `leases` stores
-  only its SHA-256; comparison is constant time. The claim receipt, including the
-  token, is kept in the private idempotency row so a timed-out client can replay
-  its claim; it never enters `audit` or `outbox`.
+  only its SHA-256; comparison is constant time. The token-free outcome is kept
+  in idempotency and the one-use retry token in a separate private table. It
+  never enters `audit`, `outbox`, or receipt repr.
 - **Fence.** A lease's `fence` is the task version its claim produced. Every
   later transition increments the version, so a lease whose fence differs from the
   current version is stale, whatever its token.
@@ -185,7 +188,17 @@ expiry through `Admission.expires_at`. Under the SQLite write lock, before
 idempotency or task lookup, effective controller time must remain strictly
 less than that deadline. Expiry refuses the mutation; safe denial audit and
 clock-highwater writes remain required. This capability deadline is distinct
-from the claim's lease expiry and never authorizes a missing capability.
+from the claim's lease expiry and never authorizes a missing capability. The service
+samples `verified_at` after verification; if a positive maximum admission age is
+configured, the same final boundary rejects an admission at or past that age.
+No maximum age is chosen by default.
+
+Admission age, when configured, is bounded from before capability verification using
+process monotonic time, including verification and transaction wait. The wall-clock
+expiry and high-water checks still apply; a backward step observed during verification
+or an effective time earlier than verification is refused. No default age is selected.
+The monotonic stamp is in-process admission data, not a persisted or cross-process token.
+
 
 | Code | Status | Meaning |
 | --- | --- | --- |
@@ -261,7 +274,7 @@ Tests live under `src/tests/orchestrator_controller/`.
 | IC-10 | Covered: a handoff successor needs its own capability; lineage grants nothing. | `test_ports.py::test_ic10_*` |
 | IC-11 | Covered: one transaction decides a claim; ten-worker races in threads and processes. | `test_store.py`, `test_conformance.py::test_ten_worker_*` |
 | IC-12 | Covered: claim scope is principal + operation + key; no workflow table exists. | `test_store.py::test_ic12_*` |
-| IC-13 | Covered: same request replays; changed content refused. | `test_store.py` |
+| IC-13 | Candidate: same outcome replays; one admitted retry may receive its token; changed content refused. | `test_store.py` |
 | IC-14 | Covered: stale version returns `409` with state unchanged. | `test_store.py` |
 | IC-15 | Covered: lease token, principal, fence and expiry required for every lease-bound operation. | `test_store.py`, `test_expiry.py` |
 | IC-16 | Covered: client timeout replays rather than reissues; external-effect expiry is held in `reconcile`. | `test_expiry.py`, `test_conformance.py` |
@@ -295,7 +308,17 @@ Tests live under `src/tests/orchestrator_controller/`.
 ## 10. Rollback (draft, C3d not closed)
 
 The module is not wired into any serving path, so rollback today is removing the
-composition that constructs it. The database is controller-owned and additive;
+composition that constructs it. Migration 2 permits only an empty schema-1 store;
+a populated legacy store is refused without cleanup until an accepted cutover
+disposition resolves replay identities and allowance. An already-open schema-1 writer
+can still write after the empty-store check: new replay code discards inline receipt
+tokens and discloses only a separately stored, atomically consumed retry token.
+This protects that replay path only. Such a writer can still mutate tasks, leases,
+idempotency, outbox, audit and maintenance ownership using its old rules; it is
+not fenced by migration 2. A writer-quiescence or fencing policy and the
+cross-version disposition remain owner decisions before cutover. The wire schema remains 1;
+this migration does not select cross-version readback or drain. The database is
+controller-owned and additive;
 rolling code back to a revision without a migration it recorded is refused at
 open (newer schema). Do not delete a controller database that holds `active`
 leases or `reconcile` tasks: export it for reconciliation first. No PT state is
