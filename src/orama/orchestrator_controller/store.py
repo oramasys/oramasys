@@ -20,7 +20,7 @@ import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -65,13 +65,7 @@ def from_micros(value: int) -> datetime:
     return _EPOCH + timedelta(microseconds=value)
 
 
-@dataclass(frozen=True, slots=True)
-class Admission:
-    """What the service proved about a request before handing it to the store."""
-
-    principal_id: str
-    expires_at: datetime | None = None
-    policy_version: str = POLICY_VERSION
+from orama.orchestrator_controller.ports import Admission
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +151,7 @@ class ControllerStore:
         clock: Clock,
         lease_ttl: timedelta = timedelta(minutes=5),
         busy_timeout: float = 30.0,
+        max_admission_age: float = 300.0,
     ) -> None:
         """Open (creating privately) the store, apply reviewed migrations and read its identity.
 
@@ -169,6 +164,9 @@ class ControllerStore:
             raise ValueError("lease_ttl must be between one second and one day")
         if isinstance(busy_timeout, bool) or not isinstance(busy_timeout, (int, float)) or busy_timeout <= 0:
             raise ValueError("busy_timeout must be a positive number of seconds")
+        if isinstance(max_admission_age, bool) or not isinstance(max_admission_age, (int, float)) or max_admission_age <= 0:
+            raise ValueError("max_admission_age must be a positive number of seconds")
+        self._max_admission_age = float(max_admission_age)
         self._clock = clock
         self._ttl = lease_ttl // _MICRO
         self._lock = threading.Lock()
@@ -204,6 +202,11 @@ class ControllerStore:
     def lease_ttl(self) -> timedelta:
         """Return the configured lease time-to-live."""
         return timedelta(microseconds=self._ttl)
+
+    @property
+    def max_admission_age(self) -> float:
+        """Return the maximum allowed age of an admission in seconds."""
+        return self._max_admission_age
 
     def close(self) -> None:
         """Close the connection; uncommitted work is rolled back by SQLite."""
@@ -357,17 +360,31 @@ class ControllerStore:
 
         def body(db: sqlite3.Connection, now: int) -> ClaimReceipt:
             """Decide and apply the transition inside the open transaction."""
+            now_sec = now / 1_000_000.0
+            admission_age = now_sec - admission.verified_at
+            if admission_age < 0 or admission_age > self._max_admission_age:
+                raise ClaimRefused("admission.expired")
             if admission.expires_at is not None and now >= to_micros(admission.expires_at):
                 raise ClaimRefused("capability.expired")
             stored = db.execute(
-                "SELECT request_digest, receipt_json FROM idempotency"
+                "SELECT request_digest, receipt_json, replay_count FROM idempotency"
                 " WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
                 (request.principal, request.operation, request.idempotency_key),
             ).fetchone()
             if stored is not None:
                 if stored[0] != digest:
                     raise ClaimRefused("idempotency.key_reused")
-                return ClaimReceipt.from_json(str(stored[1]))
+                receipt_json = str(stored[1])
+                replay_count = int(stored[2])
+                db.execute(
+                    "UPDATE idempotency SET replay_count = replay_count + 1"
+                    " WHERE principal_id = ? AND operation = ? AND idempotency_key = ?",
+                    (request.principal, request.operation, request.idempotency_key),
+                )
+                receipt = ClaimReceipt.from_json(receipt_json)
+                if replay_count == 0:
+                    return receipt
+                return replace(receipt, lease_token=None)
             row = db.execute(_TASK_SELECT, (request.task_id,)).fetchone()
             if row is None:
                 raise ClaimRefused("task.unknown")
@@ -380,7 +397,7 @@ class ControllerStore:
                 receipt = self._lease_operation(db, request, task, now, admission)
             db.execute(
                 "INSERT INTO idempotency (principal_id, operation, idempotency_key, request_digest,"
-                " receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                " receipt_json, created_at, replay_count) VALUES (?, ?, ?, ?, ?, ?, 0)",
                 (request.principal, request.operation, request.idempotency_key, digest,
                  receipt.to_json(), now),
             )

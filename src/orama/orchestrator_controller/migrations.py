@@ -89,10 +89,18 @@ MIGRATIONS: tuple[Migration, ...] = (
             " epoch INTEGER NOT NULL CHECK (epoch >= 1), expires_at INTEGER NOT NULL)",
         ),
     ),
+    Migration(
+        version=2,
+        name="idempotency_replay_count_v2",
+        statements=(
+            "ALTER TABLE idempotency ADD COLUMN replay_count INTEGER NOT NULL DEFAULT 0",
+        ),
+    ),
 )
 
 REVIEWED_MIGRATION_DIGESTS: Mapping[int, str] = MappingProxyType({
     1: "00b385b918214207f31c5bc2edaecb0c6a11af2f5cb24f0dc6bfaf82fad29b60",
+    2: "84a68ae209cdb8dbad704442f3d2586de8d354ca090f85a115dfd3262347f037",
 })
 
 

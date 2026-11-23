@@ -16,6 +16,7 @@ REFUSAL_STATUS: Mapping[str, int] = MappingProxyType({
     "capability.invalid": 401,
     "capability.unverifiable": 401,
     "capability.expired": 401,
+    "admission.expired": 401,
     "capability.revoked": 401,
     "capability.insufficient": 403,
     "capability.principal_mismatch": 403,

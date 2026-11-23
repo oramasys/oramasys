@@ -116,7 +116,11 @@ class ControllerService:
             or decision.audience != self._audience
         ):
             raise ClaimRefused("capability.insufficient")
-        return Admission(principal_id=request.principal, expires_at=expires)
+        return Admission(
+            principal_id=request.principal,
+            verified_at=post_verify_now.timestamp(),
+            expires_at=expires,
+        )
 
 
 def _hints(body: object) -> tuple[str, str | None]:

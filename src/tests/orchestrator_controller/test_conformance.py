@@ -155,7 +155,7 @@ _PROCESS_WORKER = textwrap.dedent(
     while not Path(go).exists() and time.monotonic() < deadline:
         time.sleep(0.001)
     try:
-        outcome = store.apply_admitted(request, Admission(worker)).task_state
+        outcome = store.apply_admitted(request, Admission(worker, verified_at=datetime.now(UTC).timestamp())).task_state
     except ClaimRefused as refusal:
         outcome = refusal.code
     print(json.dumps({"worker": worker, "outcome": outcome}))

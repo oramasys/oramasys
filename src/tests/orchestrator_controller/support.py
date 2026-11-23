@@ -18,11 +18,19 @@ START = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
 DROP = object()  # sentinel: remove this field from a raw request
 
 
+ACTIVE_CLOCK: FakeClock | None = None
+
+
 @dataclass
 class FakeClock:
     """A controllable, timezone-aware clock injected into the controller."""
 
     now: datetime = field(default_factory=lambda: START)
+
+    def __post_init__(self) -> None:
+        """Register as the active test clock."""
+        global ACTIVE_CLOCK
+        ACTIVE_CLOCK = self
 
     def __call__(self) -> datetime:
         """Return the current fake time."""
@@ -92,9 +100,15 @@ def lease_request(operation: str, receipt: Any, **overrides: Any) -> ClaimReques
     return request(operation, **body)
 
 
-def admitted(principal: str = "agent-a") -> Admission:
+def admitted(principal: str = "agent-a", *, verified_at: float | None = None) -> Admission:
     """Return the admission a verified principal would carry into the store."""
-    return Admission(principal_id=principal)
+    if verified_at is not None:
+        at = verified_at
+    elif ACTIVE_CLOCK is not None:
+        at = ACTIVE_CLOCK.now.timestamp()
+    else:
+        at = START.timestamp()
+    return Admission(principal_id=principal, verified_at=at)
 
 
 def table_snapshot(store: ControllerStore, *tables: str) -> Mapping[str, list[tuple[Any, ...]]]:

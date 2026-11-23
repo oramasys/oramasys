@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+import sys
 
 import pytest
 
@@ -37,6 +38,7 @@ def test_fresh_store_records_reviewed_versions_and_reopens(tmp_path) -> None:
     store.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits not enforced on Windows NTFS DACLs")
 def test_store_file_is_private(tmp_path) -> None:
     """The authoritative database is a 0600 file in a 0700 directory."""
     open_store(tmp_path).close()

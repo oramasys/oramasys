@@ -154,14 +154,14 @@ def test_source_line_mismatch_is_refused(store, overrides) -> None:
 def test_admission_must_match_the_request_principal(store) -> None:
     """The store never applies a request under another principal's admission."""
     with pytest.raises(ClaimRefused) as caught:
-        store.apply_admitted(request(), Admission(principal_id="agent-b"))
+        store.apply_admitted(request(), Admission(principal_id="agent-b", verified_at=clock.now.timestamp()))
     assert (caught.value.code, caught.value.status) == ("capability.principal_mismatch", 403)
 
 
 def test_admission_expired_at_lock_time_is_refused_and_preserves_clock_highwater(store, clock) -> None:
     """If capability expiry elapses before or during store lock, claim is refused and clock highwater is kept."""
     expiry = clock.now + timedelta(seconds=5)
-    admission = Admission(principal_id="agent-a", expires_at=expiry)
+    admission = Admission(principal_id="agent-a", verified_at=clock.now.timestamp(), expires_at=expiry)
 
     # Store clock advances past expiry before lock/transaction time
     clock.now = expiry + timedelta(seconds=1)

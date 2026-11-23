@@ -17,6 +17,20 @@ from typing import Protocol
 
 
 @dataclass(frozen=True, slots=True)
+class Admission:
+    """What the service proved about a request before handing it to the store.
+
+    ``principal_id`` is the authenticated actor; ``verified_at`` is the epoch timestamp
+    in seconds when verification occurred; ``expires_at`` is the optional expiration moment.
+    """
+
+    principal_id: str
+    verified_at: float = 0.0
+    expires_at: datetime | None = None
+    policy_version: str = "controller-claim-policy-v1"
+
+
+@dataclass(frozen=True, slots=True)
 class TransportAttestation:
     """Evidence a Telos-backed transport hands over for one inbound request.
 

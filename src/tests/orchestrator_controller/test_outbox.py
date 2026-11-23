@@ -350,7 +350,7 @@ def test_ic17_process_killed_mid_publish(tmp_path) -> None:
                  "principal": "agent-a", "idempotency_key": "k1", "expected_task_version": 1,
                  "source_ref": "refs/heads/reviewed",
                  "expected_base_sha": "0123456789abcdef0123456789abcdef01234567"}}
-        store.apply_admitted(ClaimRequest.from_mapping(body), Admission("agent-a"))
+        store.apply_admitted(ClaimRequest.from_mapping(body), Admission("agent-a", verified_at=datetime.now(UTC).timestamp()))
 
         class Dying:
             def publish(self, event):
