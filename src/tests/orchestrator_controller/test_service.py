@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import pytest
 
 from orama.orchestrator_controller.refusals import ClaimRefused
@@ -85,6 +86,29 @@ def test_capability_expiry_elapsing_during_verification_is_refused(
         service.submit(raw(), transport=ATTESTED)
     assert (caught.value.code, caught.value.status) == ("capability.expired", 401)
     assert store.task("task-1").state == "pending"
+
+
+def test_admission_accepts_forward_progress_across_repeated_hour(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+) -> None:
+    """A backward local clock display across DST is not a UTC rollback."""
+    zone = ZoneInfo("America/New_York")
+    clock.now = datetime(2027, 11, 7, 1, 55, tzinfo=zone)
+    post_verification = datetime(2027, 11, 7, 1, 5, tzinfo=zone, fold=1)
+    grants.grants["agent-a"].expires_at = post_verification.replace(minute=10)
+    original_verify = grants.verify
+
+    def verify(query: CapabilityQuery) -> CapabilityDecision:
+        """Return a decision after the local clock enters the repeated hour."""
+        clock.now = post_verification
+        return original_verify(query)
+
+    grants.verify = verify
+    service = ControllerService(
+        store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+        transport_verifier=TransportDouble(), max_admission_age=timedelta(minutes=15),
+    )
+    assert service.submit(raw(), transport=ATTESTED).lease_token is not None
 
 
 def test_capability_expiry_elapsing_during_store_lock_is_refused_and_audited(

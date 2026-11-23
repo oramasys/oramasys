@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from orama.orchestrator_controller.envelope import ClaimRequest, OPERATIONS, validate_opaque_id
 from orama.orchestrator_controller.ports import (
@@ -88,7 +88,7 @@ class ControllerService:
         if request.capability_proof is None:
             raise ClaimRefused("capability.missing")
         verification_started = time.monotonic()
-        now = self._clock()
+        now = _capability_instant(self._clock())
         query = CapabilityQuery(
             proof=request.capability_proof,
             principal_id=request.principal,
@@ -110,10 +110,8 @@ class ControllerService:
             raise ClaimRefused("capability.revoked")
         if decision.principal_id != request.principal:
             raise ClaimRefused("capability.principal_mismatch")
-        expires = decision.expires_at
-        if not isinstance(expires, datetime) or expires.tzinfo is None or expires.utcoffset() is None:
-            raise ClaimRefused("capability.unverifiable")
-        post_verify_now = self._clock()
+        expires = _capability_instant(decision.expires_at)
+        post_verify_now = _capability_instant(self._clock())
         if self._max_admission_age is not None and post_verify_now < now:
             raise ClaimRefused("capability.unverifiable")
         if post_verify_now >= expires:
@@ -126,6 +124,18 @@ class ControllerService:
             raise ClaimRefused("capability.insufficient")
         return Admission(principal_id=request.principal, expires_at=expires, verified_at=post_verify_now,
                          max_age=self._max_admission_age, verified_monotonic=verification_started)
+
+
+def _capability_instant(value: object) -> datetime:
+    """Normalize aware timestamps before comparing instants across DST folds."""
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ClaimRefused("capability.unverifiable")
+    try:
+        if value.utcoffset() is not None:
+            return value.astimezone(UTC)
+    except (OverflowError, ValueError) as error:
+        raise ClaimRefused("capability.unverifiable") from error
+    raise ClaimRefused("capability.unverifiable")
 
 
 def _hints(body: object) -> tuple[str, str | None]:
