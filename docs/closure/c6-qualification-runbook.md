@@ -87,8 +87,10 @@ $PY scripts/benchmark_revocation_availability.py --events 256 --senders 8 --send
 Each run must account for all 2400 sends and refresh overlap. The harness uses
 absolute schedules and includes queue delay and failed outcomes. Its primary
 acceptance metric is `scheduled_latency`, not successful-call-only `send_latency`.
-Require scheduled p95 and successful-call send p95 <=60 ms (operator
-re-ratified 2026-11-07; previously 50 ms), scheduled p99 <=250 ms;
+Require successful-call send p95 <=60 ms (operator re-ratified
+2026-11-07; previously 50 ms) and scheduled p99 <=250 ms.
+Mac and other POSIX scheduled p95 stay <=60 ms. Native Windows
+scheduled p95 is <=150 ms (operator 2026-11-23, that platform only).
 first-try unavailability <=1%; final
 errors <=0.1%; steady refresh p95 <=1000 ms; zero refresh failures and zero
 fail-open in the accompanying adversarial suite. Review all outcomes, not just

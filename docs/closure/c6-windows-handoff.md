@@ -22,11 +22,14 @@ changes for operator approval rather than silently weakening a control.
 - Workload: 256 complete-from-genesis events, eight senders at five sends
   per second each, 2,400 sends, separate refresh every 15 seconds; two
   retries with 50 ms pauses for the existing retryable refusal only.
-- Both scheduled and successful-call p95 <=60 ms, operator re-ratified
-  2026-11-07 from 50 ms; scheduled p99 <=250 ms; first-attempt
-  unavailability <=1%; final errors <=0.1%; steady refresh p95 <=1,000 ms;
-  zero refresh failures. Test zero fail-open through the adversarial suite,
-  not the performance harness alone.
+- Successful-call send p95 <=60 ms, operator re-ratified 2026-11-07
+  from 50 ms. Native Windows scheduled p95 is <=150 ms (operator
+  2026-11-23, that platform only). Mac and other POSIX scheduled p95
+  stay <=60 ms. Scheduled p99 <=250 ms. First-attempt unavailability
+  <=1%. Final errors <=0.1%. Steady refresh p95 <=1,000 ms. Zero
+  refresh failures. Test zero fail-open through the adversarial suite,
+  not the performance harness alone. The 150 ms line does not qualify
+  the deployment by itself. A service-account run is still required.
 - Error-rate point estimates and statistical bounds are separate. Zero
   errors in 2,400 sends gives a one-sided 95% upper bound about 0.1247%,
   not a population guarantee <=0.1%. Report temporal-correlation limits.

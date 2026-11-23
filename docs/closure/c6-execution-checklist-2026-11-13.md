@@ -56,7 +56,8 @@ and merges operator-held.
 
 1. Protect evidence + TMPDIR on approved local APFS; confirm FD capacity.
 2. Controls A/B then **three consecutive** candidate runs (2400 sends each) under
-   the Mac runbook; scheduled + successful-call p95 ≤ 60 ms; zero fail-open
+   the Mac runbook; POSIX scheduled p95 and successful-call p95 ≤ 60 ms;
+   native Windows scheduled p95 ≤ 150 ms (operator 2026-11-23); zero fail-open
    adversarial suite.
 3. Native Windows Tier 1 stdlib lock experiment ×3; Tier 3 full native suite as
    service account.
