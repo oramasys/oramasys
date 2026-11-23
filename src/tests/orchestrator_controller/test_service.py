@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo
 import pytest
 
 from orama.orchestrator_controller.refusals import ClaimRefused
@@ -17,6 +16,27 @@ from .doubles import ATTESTED, AUDIENCE, Grant, GrantTableVerifier, TransportDou
 from .support import START, FakeClock, declare, open_store, raw
 
 ALL_OPS = frozenset({"claim", "renew", "complete", "release", "fail"})
+
+
+class RepeatedHour(tzinfo):
+    """Model New York's 2027 fall-back hour without system timezone data.
+
+    Used only for 01:00-01:59 on November 7: fold 0 is EDT, fold 1 is EST.
+    """
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        """Select the UTC offset of the requested occurrence."""
+        return timedelta(hours=-5 if dt is not None and dt.fold else -4)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        """Report DST only during the first occurrence."""
+        return timedelta(0) if dt is not None and dt.fold else timedelta(hours=1)
+
+
+@pytest.fixture
+def repeated_hour() -> RepeatedHour:
+    """Use the same timezone instance for both sides of the fold."""
+    return RepeatedHour()
 
 
 @pytest.fixture
@@ -89,12 +109,13 @@ def test_capability_expiry_elapsing_during_verification_is_refused(
 
 
 def test_admission_accepts_forward_progress_across_repeated_hour(
-    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier,
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier, repeated_hour: RepeatedHour,
 ) -> None:
     """A backward local clock display across DST is not a UTC rollback."""
-    zone = ZoneInfo("America/New_York")
-    clock.now = datetime(2027, 11, 7, 1, 55, tzinfo=zone)
-    post_verification = datetime(2027, 11, 7, 1, 5, tzinfo=zone, fold=1)
+    clock.now = datetime(2027, 11, 7, 1, 55, tzinfo=repeated_hour)
+    post_verification = datetime(2027, 11, 7, 1, 5, tzinfo=repeated_hour, fold=1)
+    assert clock.now.astimezone(UTC) == datetime(2027, 11, 7, 5, 55, tzinfo=UTC)
+    assert post_verification.astimezone(UTC) == datetime(2027, 11, 7, 6, 5, tzinfo=UTC)
     grants.grants["agent-a"].expires_at = post_verification.replace(minute=10)
     original_verify = grants.verify
 
@@ -109,6 +130,59 @@ def test_admission_accepts_forward_progress_across_repeated_hour(
         transport_verifier=TransportDouble(), max_admission_age=timedelta(minutes=15),
     )
     assert service.submit(raw(), transport=ATTESTED).lease_token is not None
+
+
+def test_capability_expires_at_exact_utc_instant_across_repeated_hour(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier, repeated_hour: RepeatedHour,
+) -> None:
+    """A capability is expired at its UTC deadline in the second occurrence."""
+    clock.now = datetime(2027, 11, 7, 1, 55, tzinfo=repeated_hour)
+    post_verification = datetime(2027, 11, 7, 1, 5, tzinfo=repeated_hour, fold=1)
+    grants.grants["agent-a"].expires_at = datetime(2027, 11, 7, 6, 5, tzinfo=UTC)
+    assert post_verification.astimezone(UTC) == grants.grants["agent-a"].expires_at
+    original_verify = grants.verify
+
+    def verify(query: CapabilityQuery) -> CapabilityDecision:
+        """Advance the clock to the exact expiry instant."""
+        clock.now = post_verification
+        return original_verify(query)
+
+    grants.verify = verify
+    service = ControllerService(
+        store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+        transport_verifier=TransportDouble(), max_admission_age=timedelta(minutes=15),
+    )
+    with pytest.raises(ClaimRefused) as caught:
+        service.submit(raw(), transport=ATTESTED)
+    assert (caught.value.code, caught.value.status) == ("capability.expired", 401)
+    assert store.task("task-1").state == "pending"
+
+
+def test_admission_refuses_hidden_utc_rollback_across_repeated_hour(
+    store: ControllerStore, clock: FakeClock, grants: GrantTableVerifier, repeated_hour: RepeatedHour,
+) -> None:
+    """A later wall time can still be an earlier UTC instant across the fold."""
+    clock.now = datetime(2027, 11, 7, 1, 5, tzinfo=repeated_hour, fold=1)
+    post_verification = datetime(2027, 11, 7, 1, 55, tzinfo=repeated_hour)
+    assert clock.now.astimezone(UTC) == datetime(2027, 11, 7, 6, 5, tzinfo=UTC)
+    assert post_verification.astimezone(UTC) == datetime(2027, 11, 7, 5, 55, tzinfo=UTC)
+    grants.grants["agent-a"].expires_at = datetime(2027, 11, 7, 7, 0, tzinfo=UTC)
+    original_verify = grants.verify
+
+    def verify(query: CapabilityQuery) -> CapabilityDecision:
+        """Roll the clock back across the repeated hour."""
+        clock.now = post_verification
+        return original_verify(query)
+
+    grants.verify = verify
+    service = ControllerService(
+        store, audience=AUDIENCE, clock=clock, capability_verifier=grants,
+        transport_verifier=TransportDouble(), max_admission_age=timedelta(minutes=15),
+    )
+    with pytest.raises(ClaimRefused) as caught:
+        service.submit(raw(), transport=ATTESTED)
+    assert (caught.value.code, caught.value.status) == ("capability.unverifiable", 401)
+    assert store.task("task-1").state == "pending"
 
 
 def test_capability_expiry_elapsing_during_store_lock_is_refused_and_audited(
